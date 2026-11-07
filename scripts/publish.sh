@@ -13,12 +13,16 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 
 mode=dry
 self_test=0
+key_only=0
+bar_only=0
 check_dir=""
 check_bar=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --yes) mode=push; shift ;;
         --self-test) self_test=1; shift ;;
+        --key) key_only=1; shift ;;
+        --bar) bar_only=1; shift ;;
         --check)
             [[ $# -ge 3 ]] || { echo '[publish] --check needs a directory and a bar record' >&2; exit 2; }
             check_dir="$2"; check_bar="$3"; shift 3 ;;
@@ -37,10 +41,12 @@ env_value() {
     fi
 }
 
+# R65 F4: one key computation for the bar, the cell, the grid and the
+# publish. This used to hash `graded-paths.txt` itself, including its
+# `exclude-name`/`keep` data lines and `tests.rs`, so every publish asked
+# for a record no bar ever wrote.
 flake_key() {
-    local paths
-    mapfile -t paths < <(grep -vE '^[[:space:]]*(#|$)' scripts/graded-paths.txt)
-    git ls-tree -r HEAD -- "${paths[@]}" | sha256sum | cut -c1-12
+    "$PWD/scripts/flake-bar.sh" --key
 }
 
 bar_record() {
@@ -48,7 +54,7 @@ bar_record() {
         printf '%s' "$SDB_BAR_RECORD"
     else
         printf '%s/sdb-gates/flake-%s.txt' \
-            "$(git rev-parse --git-common-dir)" "$(flake_key)"
+            "$(git rev-parse --path-format=absolute --git-common-dir)" "$(flake_key)"
     fi
 }
 
@@ -157,6 +163,15 @@ deploy() {
     fi
 }
 
+if [[ "$key_only" -eq 1 ]]; then
+    flake_key
+    exit 0
+fi
+if [[ "$bar_only" -eq 1 ]]; then
+    bar_record
+    exit 0
+fi
+
 if [[ -n "$check_dir" ]]; then
     validate_export "$check_dir" "$check_bar"
     exit $?
@@ -257,6 +272,50 @@ EOF
     }
     [[ -f "$target/stray.txt" ]] || { echo '[self-test] dry run deleted' >&2; exit 1; }
     echo '[self-test] stray target file listed and refused'
+
+    # R65 F4: a fixture repo with a tests.rs edit. publish's key must equal
+    # flake-bar.sh --key, the default bar record must be that key's, and a
+    # PASS record there must validate without SDB_BAR_RECORD.
+    fixture="$root/repo"
+    mkdir -p "$fixture/src/sandbox" "$fixture/scripts"
+    cp scripts/publish.sh scripts/flake-bar.sh scripts/graded-paths.txt \
+        scripts/graded-filter.sh scripts/bar-proofs.sh scripts/long-test-lock.sh \
+        "$fixture/scripts/"
+    git -C "$fixture" init -q
+    git -C "$fixture" config user.email publish@example.com
+    git -C "$fixture" config user.name publish
+    echo one > "$fixture/src/x.rs"
+    echo one > "$fixture/src/sandbox/tests.rs"
+    echo lock > "$fixture/Cargo.lock"
+    git -C "$fixture" add -A
+    git -C "$fixture" commit -qm one
+    echo two > "$fixture/src/sandbox/tests.rs"
+    git -C "$fixture" add -A
+    git -C "$fixture" commit -qm "edit tests.rs"
+    pubkey="$(cd "$fixture" && scripts/publish.sh --key)"
+    flakekey="$(cd "$fixture" && scripts/flake-bar.sh --key)"
+    [[ "$pubkey" == "$flakekey" ]] || {
+        echo "[self-test] publish key $pubkey != flake key $flakekey" >&2; exit 1; }
+    fixture_record="$(cd "$fixture" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$pubkey.txt"
+    mkdir -p "$(dirname "$fixture_record")"
+    printf 'RESULT: PASS\n' > "$fixture_record"
+    fixture_bar="$(cd "$fixture" && scripts/publish.sh --bar)"
+    [[ "$fixture_bar" == "$fixture_record" ]] || {
+        echo "[self-test] default bar record $fixture_bar != $fixture_record" >&2; exit 1; }
+    scan_bin="$(secret_scan_bin)"
+    ( cd "$fixture" && SDB_BIN="$scan_bin" SDB_BAR_RECORD= \
+        scripts/publish.sh --check "$good" "$fixture_bar" ) || {
+        echo '[self-test] the keyed bar record was refused without SDB_BAR_RECORD' >&2; exit 1; }
+    echo '[self-test] publish key matches the bar and its record validates'
+    # The pre-push hook lists every file for the secret scan; it never
+    # reads graded-paths.txt, so it is not a key reader.
+    needle="git ls-""tree"
+    if grep -rn "$needle" scripts/ \
+        | grep -vE '^scripts/(flake-bar|graded-filter)\.sh:|^scripts/hooks/'; then
+        echo '[self-test] a private graded-path key computation remains' >&2; exit 1
+    fi
+    echo '[self-test] no private key computation remains'
+
     echo '[self-test] PASS'
     exit 0
 fi

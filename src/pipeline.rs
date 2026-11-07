@@ -3709,11 +3709,21 @@ impl BenchmarkPipeline {
             // without trusting the archive tooling. A run with egress_enforced
             // false (or absent, from before this field) made no isolation claim.
             egress_enforced: Some(crate::sandbox::docker::egress_filter_enabled()),
+            // R65 F5: the prompt is the full input context. On the
+            // Anthropic and OpenAI routes the cache-write share arrives in
+            // `cacheWrite`/`cache_creation_input_tokens`, not in `input`;
+            // folding it in here (never in the parser, where the cost
+            // prices it separately) makes `total = prompt + cached +
+            // completion` hold. The cost and floor inputs above are
+            // unchanged.
             tokens: RunTokenUsage {
-                prompt_tokens,
+                prompt_tokens: prompt_tokens + omp_stats.cache_write_tokens,
                 cached_tokens,
                 completion_tokens,
-                total_tokens: total_run_tokens,
+                total_tokens: prompt_tokens
+                    + omp_stats.cache_write_tokens
+                    + cached_tokens
+                    + completion_tokens,
             },
             cost_usd,
             cost_source: Some(cost_source.to_string()),

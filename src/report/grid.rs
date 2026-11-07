@@ -1045,8 +1045,9 @@ fn mark_badge(c: &CareerCell) -> String {
 
 /// R64 F4 (H1): a career's visible name is `<model> · career <i> · <date>`;
 /// the campaign id lives in the tooltip and the results-page link. The
-/// index is the career's best-first position within its model/harness/
-/// effort/rules group, so it matches the expanded rows.
+/// index is the ranked career's start-time position within its
+/// model/harness/effort/rules group (R64-3/R65 F7); an unranked cell
+/// follows the ranked ones.
 fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, c) in cells.iter().enumerate() {
@@ -1072,8 +1073,8 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
             // unfinished cell never shifts the paid careers' indices.
             ranked_b
                 .cmp(&ranked_a)
-                .then_with(|| campaign::board_order(&ca.key, &cb.key))
                 .then_with(|| ca.started.cmp(&cb.started))
+                .then_with(|| ca.campaign_id.cmp(&cb.campaign_id))
         });
         for (i, idx) in g.iter().enumerate() {
             let c = &cells[*idx];
@@ -1093,6 +1094,11 @@ fn short_model(model: &str) -> &str {
     model.strip_prefix("openrouter/").unwrap_or(model)
 }
 
+/// R65-1: the short model name may break at its `/` (not mid-word).
+fn model_name_html(model: &str) -> String {
+    esc(short_model(model)).replace('/', "/<wbr>")
+}
+
 fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -1103,9 +1109,9 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
         format!("career-row {extra_class}")
     };
     let id = esc(&c.campaign_id);
+    let name_html = esc(name).replace('/', "/<wbr>");
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td>{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
-        esc(name),
+        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         mark_badge(c),
         effort_note(&c.effort),
         flags_of(c),
@@ -1262,10 +1268,10 @@ fn model_row(
         fmt_token_value,
     );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td title=\"the median career's\">{}</td><td class=\"num\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num\">{}</td><td class=\"num\">{duration}</td><td class=\"num\">{turns}</td><td>{tokens}</td><td>{}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td class=\"col-model\"><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td class=\"col-highest\" title=\"the median career's\">{}</td><td class=\"num col-green\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{duration}</td><td class=\"num col-turns\">{turns}</td><td class=\"col-tokens\">{tokens}</td><td class=\"col-state\">{}</td></tr>",
         rank_label(g, stability),
         esc(&g.model),
-        esc(short_model(&g.model)),
+        model_name_html(&g.model),
         mark_badge(med),
         esc(&g.harness),
         effort_note(&g.effort),
@@ -1381,7 +1387,7 @@ fn render_board(cells: &[CareerCell]) -> String {
     if !current_groups.is_empty() && stability.is_none() {
         h.push_str("<div class=\"mut\">Rank stability: too many combinations to enumerate; ranks follow the board order.</div>");
     }
-    h.push_str("<div class=\"wrap\"><table><thead><tr><th>#</th><th>Model / career</th><th title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th>Pts / $</th><th title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th title=\"turns summed over the career's tickets\">Turns</th><th title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th>State</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table class=\"board-table\"><thead><tr><th>#</th><th class=\"col-model\">Model / career</th><th class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th class=\"col-ppd\">Pts / $</th><th class=\"col-duration\" title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th class=\"col-turns\" title=\"turns summed over the career's tickets\">Turns</th><th class=\"col-tokens\" title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th class=\"col-state\">State</th></tr></thead><tbody>");
     if rows.is_empty() {
         h.push_str("<tr><td colspan=\"12\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
@@ -1663,7 +1669,7 @@ fn fmt_variance(name: &str, v: f64) -> String {
     match name {
         "points" => format!("{v:.1}"),
         "perf" => format!("{v:.2}×"),
-        "$" => format!("${v:.4}"),
+        "$" => format!("${v:.2}"),
         "duration" => fmt_hours(v),
         "turns" => fmt_count(v.round() as u64),
         "tokens out" => fmt_tokens(v.round() as u64),
@@ -1834,6 +1840,22 @@ fn pareto<'a>(cars: &'a [&'a CareerCell]) -> Vec<&'a CareerCell> {
     out
 }
 
+/// R65 F6: one legend for both charts: a swatch in the series colour and
+/// the short model name (the full id stays in the title).
+fn chart_legend(models: &[String]) -> String {
+    let mut s = String::from("<div class=\"legend chart-legend\">");
+    for (i, m) in models.iter().enumerate() {
+        s.push_str(&format!(
+            "<span class=\"key\"><span class=\"dot\" style=\"background:{}\"></span><span title=\"{}\">{}</span></span>",
+            palette(i),
+            esc(m),
+            esc(short_model(m))
+        ));
+    }
+    s.push_str("</div>");
+    s
+}
+
 fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     let w = 760.0;
     let h = 340.0;
@@ -1858,8 +1880,13 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     ));
     for (frac, label) in [(0.0, "0"), (0.5, "1.98"), (1.0, "3.96")] {
         let xx = l + frac * pw;
+        let anchor = if frac == 1.0 {
+            " text-anchor=\"end\""
+        } else {
+            ""
+        };
         s.push_str(&format!(
-            "<text x=\"{xx:.1}\" y=\"{:.1}\" fill=\"#8b949e\" font-size=\"10\">${label}</text>",
+            "<text x=\"{xx:.1}\" y=\"{:.1}\" fill=\"#8b949e\" font-size=\"10\"{anchor}>${label}</text>",
             t + ph + 15.0
         ));
     }
@@ -1884,13 +1911,13 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     for c in cars {
         let color = palette(models.iter().position(|m| m == &c.model).unwrap_or(0));
         s.push_str(&format!(
-            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{color}\"><title>{}: {:.1} pts · ${:.4}</title></circle>",
+            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{color}\"><title>{}: {:.1} pts · ${:.2}</title></circle>",
             esc(&c.model),
             c.points,
             c.cost,
             x(c.cost),
             y(c.points),
-            esc(&c.model),
+            esc(short_model(&c.model)),
             c.points,
             c.cost
         ));
@@ -1937,10 +1964,23 @@ fn svg_survival(series: &[(String, Vec<f64>)]) -> String {
             })
             .collect::<Vec<_>>()
             .join(" ");
+        let dash = match mi {
+            0 => "",
+            1 => "6 3",
+            2 => "2 3",
+            3 => "8 3 2 3",
+            _ => "4 4",
+        };
+        let dash_attr = if dash.is_empty() {
+            String::new()
+        } else {
+            format!(" stroke-dasharray=\"{dash}\"")
+        };
         s.push_str(&format!(
-            "<polyline class=\"survival-line\" data-model=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"/>",
+            "<polyline class=\"survival-line\" data-model=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"{dash_attr}><title>{} · P(highest passed ticket ≥ i)</title></polyline>",
             esc(model),
-            palette(mi)
+            palette(mi),
+            esc(short_model(model))
         ));
     }
     s.push_str("</svg>");
@@ -1969,15 +2009,37 @@ fn render_results(cells: &[CareerCell]) -> String {
     } else {
         recorded.join(", ")
     };
-    let fingerprint_note = if recorded.is_empty() {
-        " <span class=\"b warn\">no recorded fingerprint</span>".to_string()
-    } else if recorded.iter().any(|f| f != &binary_fingerprint) {
-        format!(
-            " <span class=\"b warn\">recorded fingerprint differs from binary {}</span>",
-            esc(&binary_fingerprint)
-        )
-    } else {
-        String::new()
+    // R65-2: a harness change after the careers ran is normal, not a
+    // warning. One recorded fingerprint gets two neutral rows; the amber
+    // warning is kept only for the mixed case publish.sh refuses.
+    let (fingerprint_rows, fingerprint_note) = match recorded.len() {
+        0 => (
+            "<tr><th>Fingerprint (recorded)</th><td><span class=\"b warn\">no recorded fingerprint</span></td></tr>".to_string(),
+            String::new(),
+        ),
+        1 => {
+            let graded = &recorded[0];
+            let note = if graded != &binary_fingerprint {
+                "<div class=\"mut\">The harness changed after these careers ran; their grades are as recorded.</div>".to_string()
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "<tr><th>Graded under</th><td><code>{}</code></td></tr><tr><th>Page built with</th><td><code>{}</code></td></tr>",
+                    esc(graded),
+                    esc(&binary_fingerprint)
+                ),
+                note,
+            )
+        }
+        _ => (
+            format!(
+                "<tr><th>Fingerprint (recorded)</th><td><code>{}</code> <span class=\"b warn\">ranked careers carry more than one recorded fingerprint</span></td></tr>",
+                esc(&recorded_text)
+            ),
+            String::new(),
+        ),
     };
     let rules = current
         .iter()
@@ -2015,9 +2077,18 @@ fn render_results(cells: &[CareerCell]) -> String {
         .map(|m| {
             let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
             if detail.is_empty() {
-                format!("{} — none", esc(m))
+                format!(
+                    "<span title=\"{}\">{}</span> — none",
+                    esc(m),
+                    esc(short_model(m))
+                )
             } else {
-                format!("{} — {}", esc(m), esc(detail))
+                format!(
+                    "<span title=\"{}\">{}</span> — {}",
+                    esc(m),
+                    esc(short_model(m)),
+                    esc(detail)
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -2074,8 +2145,9 @@ fn render_results(cells: &[CareerCell]) -> String {
         let regfree: u32 = cs.iter().map(|c| c.regression_free).sum();
         let rate = (passed > 0).then(|| regfree as f64 / passed as f64);
         metrics.push_str(&format!(
-            "<tr><td><b>{}</b></td><td class=\"num\">{:.4} / {:.4} / {:.4}</td><td class=\"num\">{}</td></tr>",
+            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td></tr>",
             esc(model),
+            esc(short_model(model)),
             costs.first().copied().unwrap_or(0.0),
             median(&costs).unwrap_or(0.0),
             costs.last().copied().unwrap_or(0.0),
@@ -2084,26 +2156,39 @@ fn render_results(cells: &[CareerCell]) -> String {
         ));
     }
 
-    let mut legend = String::new();
-    for (i, m) in models.iter().enumerate() {
-        legend.push_str(&format!(
-            "<span class=\"key\"><span class=\"dot\" style=\"background:{}\"></span>{}</span>",
-            palette(i),
-            esc(m)
-        ));
-    }
     let scatter = svg_scatter(&current, &models);
     let survival = svg_survival(&series);
+    let groups = model_groups(cells);
+    let model_order: HashMap<&str, usize> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.model.as_str(), i))
+        .collect();
+    let mut scatter_cells: Vec<&CareerCell> = current.clone();
+    scatter_cells.sort_by(|a, b| {
+        let oa = model_order
+            .get(a.model.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let ob = model_order
+            .get(b.model.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        oa.cmp(&ob)
+            .then_with(|| b.points.partial_cmp(&a.points).unwrap_or(Ordering::Equal))
+            .then_with(|| a.campaign_id.cmp(&b.campaign_id))
+    });
     let mut scatter_rows = String::new();
-    for c in &current {
+    for c in &scatter_cells {
         let id = esc(&c.campaign_id);
         let name = labels
             .get(&c.campaign_id)
             .map(String::as_str)
             .unwrap_or(&c.campaign_id);
         scatter_rows.push_str(&format!(
-            "<tr id=\"{id}\" title=\"{id}\"><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
+            "<tr id=\"{id}\" title=\"{id}\"><td title=\"{}\">{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.2}</td></tr>",
             esc(&c.model),
+            esc(short_model(&c.model)),
             esc(name),
             c.points,
             c.cost
@@ -2114,7 +2199,11 @@ fn render_results(cells: &[CareerCell]) -> String {
         let cells = (0..=20)
             .map(|i| format!("<td class=\"num\">{:.0}%</td>", vals[i] * 100.0))
             .collect::<String>();
-        survival_rows.push_str(&format!("<tr><td>{}</td>{cells}</tr>", esc(model)));
+        survival_rows.push_str(&format!(
+            "<tr><td title=\"{}\">{}</td>{cells}</tr>",
+            esc(model),
+            esc(short_model(model))
+        ));
     }
     let mut h = String::new();
     h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — results</title><style>");
@@ -2126,10 +2215,8 @@ fn render_results(cells: &[CareerCell]) -> String {
         esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
     ));
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr><tr><th>Fingerprint (recorded)</th><td><code>{}</code>{}</td></tr><tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div></section>",
+        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}</section>",
         esc(rules),
-        esc(&recorded_text),
-        fingerprint_note,
         esc(crate::report::rules::sqlite_version()),
         esc(image),
         esc(&harness_effort),
@@ -2141,33 +2228,74 @@ fn render_results(cells: &[CareerCell]) -> String {
     ));
     let marked: Vec<&CareerCell> = cells.iter().filter(|c| c.rehearsal || c.smoke).collect();
     if !marked.is_empty() {
-        h.push_str("<section><h2>Rehearsals and smoke cells (not ranked)</h2><div class=\"wrap\"><table><tbody>");
-        for c in marked {
-            let id = esc(&c.campaign_id);
-            let name = labels
-                .get(&c.campaign_id)
-                .map(String::as_str)
-                .unwrap_or(&c.campaign_id);
-            h.push_str(&format!(
-                "<tr id=\"{id}\" title=\"{id}\"><td>{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.4}</td></tr>",
-                esc(name),
-                mark_badge(c),
-                c.points,
-                c.cost
-            ));
-        }
-        h.push_str("</tbody></table></div></section>");
+        let notes: Vec<String> = marked
+            .iter()
+            .map(|c| {
+                let kind = if c.rehearsal {
+                    "a $0 rehearsal (the harness's reference server, no model)"
+                } else {
+                    "a smoke cell"
+                };
+                format!(
+                    "{kind} scored {} / {}",
+                    fmt_pts(c.points),
+                    c.max_points as u32
+                )
+            })
+            .collect();
+        h.push_str(&format!(
+            "<div class=\"mut note\">Not ranked: {}.</div>",
+            notes.join("; ")
+        ));
     }
     h.push_str(&format!(
         "<section><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>"
     ));
-    h.push_str(&format!("<div class=\"wrap\">{scatter}</div>"));
+    let legend_html = chart_legend(&models);
+    h.push_str(&format!("<div class=\"wrap\">{scatter}</div>{legend_html}"));
     h.push_str(&format!("<div class=\"wrap\"><table><thead><tr><th>Model</th><th>Career</th><th>Points</th><th>Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"));
-    h.push_str("<section><h2>Survival: P(ticket ≥ i)</h2><div class=\"wrap\">");
+    h.push_str("<section><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div><div class=\"wrap\">");
     h.push_str(&survival);
-    h.push_str(&format!("</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
-    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div></section>"));
-    let groups = model_groups(cells);
+    h.push_str(&format!("</div>{legend_html}<div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
+    // R65 F6: the per-ticket pass share, shaded like the board's agreement.
+    let mut ticket_rows = String::new();
+    for model in &models {
+        let cs = by_model.get(model.as_str()).cloned().unwrap_or_default();
+        let n = cs.len();
+        let mut passed = [0usize; 21];
+        for c in &cs {
+            for rec in unique_stage_records(&c.stage_records) {
+                if rec.passed && rec.id <= 20 {
+                    passed[rec.id as usize] += 1;
+                }
+            }
+        }
+        let cells = (0..=20)
+            .map(|id| {
+                let p = passed[id];
+                let pct = if n > 0 { p * 100 / n } else { 0 };
+                let cls = if p == 0 {
+                    "agree-none"
+                } else if p == n {
+                    "agree-full"
+                } else if p * 2 > n {
+                    "agree-most"
+                } else {
+                    "agree-some"
+                };
+                format!(
+                    "<td class=\"num {cls}\" title=\"ticket {id} · passed by {p}/{n}\">{pct}%</td>"
+                )
+            })
+            .collect::<String>();
+        ticket_rows.push_str(&format!(
+            "<tr><td title=\"{}\">{}</td>{cells}</tr>",
+            esc(model),
+            esc(short_model(model))
+        ));
+    }
+    h.push_str(&format!("<section><h3>Per-ticket pass share</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div></section>"));
+    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
     let stability = rank_stability(cells, &groups);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let mut h2h_rows = String::new();
@@ -2186,9 +2314,11 @@ fn render_results(cells: &[CareerCell]) -> String {
             }
             let (aw, bw, ties) = head_to_head(&a, &b);
             h2h_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
+                "<tr><td title=\"{}\">{}</td><td title=\"{}\">{}</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
                 esc(&models[i]),
+                esc(short_model(&models[i])),
                 esc(&models[j]),
+                esc(short_model(&models[j])),
                 aw * 100.0,
                 bw * 100.0,
                 ties * 100.0
@@ -2218,18 +2348,17 @@ fn render_results(cells: &[CareerCell]) -> String {
     for (i, g) in current_groups.iter().enumerate() {
         let stab = stability.as_ref().map(|s| &s[i]);
         h.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
+            "<tr><td>{}</td><td title=\"{}\">{}</td><td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
             rank_label(g, stab),
             esc(&g.model),
+            esc(short_model(&g.model)),
             cells[g.best].points,
             cells[g.median].points,
             cells[g.worst].points
         ));
     }
     h.push_str("</tbody></table></div></section>");
-    h.push_str("<div class=\"mut\">Dots: <span class=\"key\">");
-    h.push_str(&legend);
-    h.push_str("</span></div></main></body></html>");
+    h.push_str("</main></body></html>");
     h
 }
 
@@ -2694,6 +2823,30 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {needle}: {hay}"))
     }
 
+    /// R65 F7: true when the visible text holds a dollar amount with more
+    /// than two decimals.
+    fn money_over_two(text: &str) -> bool {
+        let mut rest = text;
+        while let Some(i) = rest.find('$') {
+            let tail = &rest[i + 1..];
+            let digits: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if let Some(dot) = digits.find('.') {
+                let decimals = digits[dot + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count();
+                if decimals > 2 {
+                    return true;
+                }
+            }
+            rest = &tail[digits.len()..];
+        }
+        false
+    }
+
     /// R64 F4: the text a reader sees, with every tag and attribute removed.
     fn visible_text(html: &str) -> String {
         let mut out = String::new();
@@ -2701,7 +2854,12 @@ mod tests {
         for ch in html.chars() {
             match ch {
                 '<' => in_tag = true,
-                '>' => in_tag = false,
+                '>' => {
+                    in_tag = false;
+                    // Keep a boundary between cells: `$0.04` followed by a
+                    // bare `1750.0` must not read as one long decimal.
+                    out.push(' ');
+                }
                 c if !in_tag => out.push(c),
                 _ => {}
             }
@@ -2877,7 +3035,12 @@ mod tests {
         assert_ne!(meta["fingerprint"].as_str().unwrap(), "fp-a");
         let html = read(&out.join("results.html"));
         assert!(html.contains("fp-a") && html.contains("fp-b"), "{html}");
-        assert!(html.contains("recorded fingerprint differs"), "{html}");
+        // R65-2: a mixed set keeps the amber warning; a single recorded
+        // fingerprint is neutral.
+        assert!(
+            html.contains("more than one recorded fingerprint"),
+            "{html}"
+        );
 
         let bar = base.join("bar.txt");
         fs::write(&bar, "RESULT: PASS\n").unwrap();
@@ -3232,8 +3395,9 @@ mod tests {
             "{board}"
         );
         let results = read(&out.join("results.html"));
-        assert!(results.contains("REHEARSAL"), "{results}");
-        assert!(results.contains("not ranked"), "{results}");
+        // R65 F7: the results page shows the rehearsal as a footnote.
+        assert!(results.contains("Not ranked:"), "{results}");
+        assert!(results.contains("$0 rehearsal"), "{results}");
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["ranked"], 0);
         let _ = fs::remove_dir_all(&base);
@@ -3647,7 +3811,7 @@ mod tests {
         let h2h = &html[pos(&html, "Head-to-head")..];
         let at = pos(
             h2h,
-            "<td>openrouter/deepseek/deepseek-v4.1-flash-1017</td><td>openrouter/xiaomi/mimo-v2.6-flash</td>",
+            "<td title=\"openrouter/deepseek/deepseek-v4.1-flash-1017\">deepseek/deepseek-v4.1-flash-1017</td><td title=\"openrouter/xiaomi/mimo-v2.6-flash\">xiaomi/mimo-v2.6-flash</td>",
         );
         let row = &h2h[at..at + h2h[at..].find("</tr>").unwrap()];
         assert!(row.contains("mimo"), "deepseek vs mimo row: {row}");
@@ -3690,6 +3854,259 @@ mod tests {
             "median diamond: {svg}"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F7 (R5-R8): the results page matches the board: short names,
+    /// two-decimal money, date-ordered career numbers and the rehearsal as
+    /// a footnote.
+    #[test]
+    fn r65_f7_results_matches_board() {
+        let (base, runs, out) = fixture("r65f7");
+        let model = "openrouter/deepseek/deepseek-v4.1-flash-1017";
+        for (prefix, date) in [
+            ("d1", "2026-11-04"),
+            ("d2", "2026-11-05"),
+            ("d3", "2026-11-06"),
+        ] {
+            career(&runs, prefix, model, [17.5; 4], [0.01; 4]);
+            for phase in 1..=4 {
+                set_phase_times(
+                    &runs,
+                    prefix,
+                    phase,
+                    &format!("{date}T0{phase}:00:00Z"),
+                    &format!("{date}T0{phase}:30:00Z"),
+                );
+            }
+        }
+        career(&runs, "reh", model, [17.75; 4], [0.0; 4]);
+        set_mark(&runs, "reh", 4, "rehearsal");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        for (page, html) in [("board", &board), ("results", &results)] {
+            let text = visible_text(html);
+            assert!(
+                !text.contains("openrouter/"),
+                "{page} shows the provider prefix: {text}"
+            );
+            assert!(
+                !money_over_two(&text),
+                "{page} holds a dollar amount with more than two decimals: {text}"
+            );
+        }
+        let text = visible_text(&results);
+        for (i, date) in ["2026-11-04", "2026-11-05", "2026-11-06"]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                text.contains(&format!(
+                    "deepseek/deepseek-v4.1-flash-1017 · career {} · {date}",
+                    i + 1
+                )),
+                "career {} is dated {date}: {text}",
+                i + 1
+            );
+        }
+        assert!(
+            text.contains(
+                "Not ranked: a $0 rehearsal (the harness's reference server, no model) scored 71 / 76."
+            ),
+            "the rehearsal is a footnote: {text}"
+        );
+        assert!(
+            !results.contains("Rehearsals and smoke cells"),
+            "the rehearsal section is gone: {results}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F6 (R1, R2): both charts carry one legend swatch per model in
+    /// the series colour, with the short name; the broken Dots: line is gone.
+    #[test]
+    fn r65_f6_chart_legends() {
+        let (base, runs, out) = fixture("r65f6legends");
+        for (prefix, model) in [
+            ("a", "openrouter/vendor/alpha"),
+            ("b", "openrouter/vendor/beta"),
+            ("c", "openrouter/vendor/gamma"),
+        ] {
+            career(&runs, prefix, model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert_eq!(
+            html.matches("class=\"legend chart-legend\"").count(),
+            2,
+            "one legend for each chart: {html}"
+        );
+        assert!(!html.contains("Dots:"), "the broken Dots line is gone");
+        for legend in html.split("class=\"legend chart-legend\"").skip(1) {
+            let legend = &legend[..legend.find("</div>").unwrap()];
+            assert_eq!(
+                legend.matches("class=\"dot\"").count(),
+                3,
+                "one swatch per model: {legend}"
+            );
+            for (i, name) in ["vendor/alpha", "vendor/beta", "vendor/gamma"]
+                .iter()
+                .enumerate()
+            {
+                assert!(legend.contains(name), "short name {name}: {legend}");
+                assert!(
+                    legend.contains(&format!("background:{}", palette(i))),
+                    "series colour {i}: {legend}"
+                );
+            }
+            assert!(
+                !visible_text(legend).contains("openrouter/"),
+                "the legend shows no provider prefix: {legend}"
+            );
+        }
+        assert!(
+            html.contains("<title>vendor/alpha · P(highest passed ticket ≥ i)</title>"),
+            "each survival line names its model: {html}"
+        );
+        assert!(
+            html.contains("<title>vendor/alpha: 4.0 pts · $0.04</title>"),
+            "each dot names its model and career: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F6 (R3, R4): survival is the highest passed ticket, and the
+    /// per-ticket table shows an earlier failure.
+    #[test]
+    fn r65_f6_per_ticket_pass_table() {
+        let (base, runs, out) = fixture("r65f6tickets");
+        career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
+        fail_ticket(&runs, "m", 5);
+        for id in 16..=20 {
+            fail_ticket(&runs, "m", id);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(
+            html.contains("Survival: P(highest passed ticket ≥ i)"),
+            "the heading says highest passed: {html}"
+        );
+        assert!(
+            html.contains("Per-ticket pass share"),
+            "the per-ticket table exists: {html}"
+        );
+        assert!(
+            html.contains("title=\"ticket 5 · passed by 0/1\""),
+            "ticket 5 is below 100%: {html}"
+        );
+        assert!(
+            html.contains("title=\"ticket 15 · passed by 1/1\""),
+            "ticket 15 passed: {html}"
+        );
+        let surv = &html[pos(&html, "Survival: P(highest")..];
+        let at = pos(surv, "<td title=\"m\">m</td>");
+        let row = &surv[at..at + surv[at..].find("</tr>").unwrap()];
+        let cells: Vec<&str> = row.split("<td class=\"num\">").skip(1).collect();
+        assert_eq!(cells.len(), 21, "one cell per ticket: {row}");
+        assert!(cells[15].starts_with("100%"), "survival at 15: {row}");
+        assert!(cells[16].starts_with("0%"), "survival at 16: {row}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65 F8: the board's phone layout hides the secondary columns and
+    /// keeps rank, model, points, perf and spend.
+    #[test]
+    fn r65_f8_mobile_board() {
+        let css = include_str!("portal_board.css");
+        assert!(
+            css.contains("@media (max-width: 700px)"),
+            "the board has a phone media query"
+        );
+        for class in [
+            "col-highest",
+            "col-green",
+            "col-ppd",
+            "col-duration",
+            "col-turns",
+            "col-tokens",
+            "col-state",
+        ] {
+            assert!(css.contains(class), "the media query names {class}");
+        }
+        let (base, runs, out) = fixture("r65f8");
+        career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        for class in [
+            "col-model",
+            "col-highest",
+            "col-green",
+            "col-ppd",
+            "col-duration",
+            "col-turns",
+            "col-tokens",
+            "col-state",
+        ] {
+            assert!(
+                html.contains(&format!("class=\"{class}\"")),
+                "the board uses {class}: {html}"
+            );
+        }
+        assert!(
+            html.contains("<th class=\"col-highest\"")
+                && html.contains("<th class=\"col-duration\""),
+            "the headers carry the collapsed columns: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R65-2: one recorded fingerprint gets neutral "Graded under" and
+    /// "Page built with" rows, even when the binary moved on; only the
+    /// mixed case keeps the amber warning.
+    #[test]
+    fn r65_r2_fingerprint_rows() {
+        let (base, runs, out) = fixture("r65r2");
+        career_with_stamp(&runs, "a", "m", [1.0; 4], [0.01; 4], "fp-old");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("<th>Graded under</th>"), "{html}");
+        assert!(html.contains("<th>Page built with</th>"), "{html}");
+        assert!(html.contains("fp-old"), "{html}");
+        assert!(
+            html.contains(&crate::report::rules::fingerprint()),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "The harness changed after these careers ran; their grades are as recorded."
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("recorded fingerprint differs"), "{html}");
+        let section = &html[pos(&html, "What it measured")..];
+        let section = &section[..section.find("</section>").unwrap()];
+        assert!(
+            !section.contains("class=\"b warn\""),
+            "the single-fingerprint case has no warning: {section}"
+        );
+        let _ = fs::remove_dir_all(&base);
+
+        let (base2, runs2, out2) = fixture("r65r2mixed");
+        career_with_stamp(&runs2, "a", "m1", [1.0; 4], [0.01; 4], "fp-a");
+        career_with_stamp(&runs2, "b", "m2", [2.0; 4], [0.01; 4], "fp-b");
+        export(runs2.to_str().unwrap(), out2.to_str().unwrap()).unwrap();
+        let html2 = read(&out2.join("results.html"));
+        assert!(
+            html2.contains("ranked careers carry more than one recorded fingerprint"),
+            "{html2}"
+        );
+        let section2 = &html2[pos(&html2, "What it measured")..];
+        let section2 = &section2[..section2.find("</section>").unwrap()];
+        assert!(
+            section2.contains("class=\"b warn\""),
+            "the mixed case keeps the warning: {section2}"
+        );
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
@@ -3750,8 +4167,8 @@ mod tests {
             "5× the prompt rate above 100k prompt tokens",
             "2× above 272k prompt tokens",
             "2× in weekday peak hours",
-            "xiaomi/mimo-v2.6-flash — none",
-            "qwen/qwen3.8-flash — none",
+            "mimo-v2.6-flash</span> — none",
+            "qwen3.8-flash</span> — none",
         ] {
             assert!(html.contains(needle), "missing {needle:?}: {html}");
         }

@@ -234,7 +234,11 @@ pub(crate) fn take_ready_signal(workdir: &std::path::Path) -> bool {
 /// - a JSON error envelope with a numeric `code`/`status` field 401/402/429,
 /// - an HTTP status line (`HTTP/1.1 402 ...`),
 /// - a provider phrase (payment required / insufficient credit / rate limit /
-///   unauthorized + key/token/auth).
+///   unauthorized + key/token/auth), including OpenRouter's
+///   `requires more credits` / `can only afford` / `more credits` +
+///   `max_tokens`, and a `402 `-prefixed line holding one of them;
+/// - OpenRouter's session envelope `errorStatus`/`errorId` 402/401/429 with
+///   an `errorMessage`.
 ///
 /// A blank line ends the list; the caller note below is ordinary prose, not a
 /// continuation item.
@@ -248,6 +252,15 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
         let code = v
             .pointer("/error/code")
             .or_else(|| v.pointer("/error/status"))
+            // R65 F1: OpenRouter's session envelope puts the status on the
+            // message (`errorStatus`/`errorId`), not under `error.code`.
+            // Only 402 is new here; a session-level 401/429 keeps its
+            // existing handling and must not become a billing trip.
+            .or_else(|| {
+                v.pointer("/message/errorStatus")
+                    .or_else(|| v.pointer("/message/errorId"))
+                    .filter(|c| c.as_u64() == Some(402))
+            })
             .or_else(|| v.get("statusCode"))
             .or_else(|| v.get("code"))
             .and_then(|c| {
@@ -316,6 +329,24 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
                 return Some("provider auth rejected (HTTP 401)".to_string());
             }
         }
+        // R65 F1: OpenRouter's session line carries the outage in
+        // `message.errorMessage`. Only billing phrases count here, so a
+        // rate-limit or auth message keeps its old handling.
+        let provider_msg = v
+            .pointer("/message/errorMessage")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if provider_msg.contains("payment required")
+            || provider_msg.contains("insufficient credit")
+            || provider_msg.contains("credit exhausted")
+            || provider_msg.contains("out of credit")
+            || provider_msg.contains("requires more credits")
+            || provider_msg.contains("can only afford")
+            || (provider_msg.contains("more credits") && provider_msg.contains("max_tokens"))
+        {
+            return Some("provider billing exhausted (HTTP 402)".to_string());
+        }
         return None;
     }
     // Text arm (stderr): HTTP status line or provider phrase. Never digits.
@@ -324,12 +355,19 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
         || low.contains("http/2 402")
         || low.contains("status 402")
         || low.contains("status: 402");
-    if status_line
-        || low.contains("payment required")
+    // R65 F1: OpenRouter's 402 text. `requires more credits` and
+    // `can only afford` are specific; a bare `more credits` only counts
+    // with `max_tokens` (so a `credits` table or game-loop prose never
+    // trips), and a `402 `-prefixed line still needs a billing phrase.
+    let phrase = low.contains("payment required")
         || low.contains("insufficient credit")
         || low.contains("credit exhausted")
-        || low.contains("out of credit")
-    {
+        || low.contains("out of credit");
+    let openrouter = low.contains("requires more credits")
+        || low.contains("can only afford")
+        || (low.contains("more credits") && low.contains("max_tokens"));
+    let prefixed_402 = low.trim_start().starts_with("402 ") && (openrouter || phrase);
+    if status_line || phrase || openrouter || prefixed_402 {
         return Some("provider billing exhausted (HTTP 402)".to_string());
     }
     let auth_line = low.contains("http/1.1 401")
@@ -1433,11 +1471,13 @@ impl OmpRunner {
                                 let tin = usage
                                     .get("input")
                                     .or_else(|| usage.get("prompt_tokens"))
+                                    .or_else(|| usage.get("input_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tout = usage
                                     .get("output")
                                     .or_else(|| usage.get("completion_tokens"))
+                                    .or_else(|| usage.get("output_tokens"))
                                     .and_then(|x| x.as_u64())
                                     .unwrap_or(0);
                                 let tcached = usage
@@ -1447,6 +1487,12 @@ impl OmpRunner {
                                     .or_else(|| {
                                         usage
                                             .get("prompt_tokens_details")
+                                            .and_then(|d| d.get("cached_tokens"))
+                                            .and_then(|x| x.as_u64())
+                                    })
+                                    .or_else(|| {
+                                        usage
+                                            .get("input_tokens_details")
                                             .and_then(|d| d.get("cached_tokens"))
                                             .and_then(|x| x.as_u64())
                                     })
@@ -2092,6 +2138,7 @@ impl OmpRunner {
                     if let Some(pt) = usage
                         .get("input")
                         .or_else(|| usage.get("prompt_tokens"))
+                        .or_else(|| usage.get("input_tokens"))
                         .and_then(|x| x.as_u64())
                     {
                         prompt_tokens += pt;
@@ -2099,6 +2146,7 @@ impl OmpRunner {
                     if let Some(ct) = usage
                         .get("output")
                         .or_else(|| usage.get("completion_tokens"))
+                        .or_else(|| usage.get("output_tokens"))
                         .and_then(|x| x.as_u64())
                     {
                         completion_tokens += ct;
@@ -2109,7 +2157,10 @@ impl OmpRunner {
                         .and_then(|x| x.as_u64())
                     {
                         cached_tokens += cr;
-                    } else if let Some(details) = usage.get("prompt_tokens_details") {
+                    } else if let Some(details) = usage
+                        .get("prompt_tokens_details")
+                        .or_else(|| usage.get("input_tokens_details"))
+                    {
                         if let Some(c) = details.get("cached_tokens").and_then(|x| x.as_u64()) {
                             cached_tokens += c;
                         }
@@ -2117,6 +2168,7 @@ impl OmpRunner {
                     if let Some(cw) = usage
                         .get("cacheWrite")
                         .or_else(|| usage.get("cache_write_input_tokens"))
+                        .or_else(|| usage.get("cache_creation_input_tokens"))
                         .and_then(|x| x.as_u64())
                     {
                         cache_write_tokens += cw;
@@ -2337,5 +2389,54 @@ mod billing_tripwire_tests {
         );
         // Bare "Provider returned 429" without status-line/phrase shape.
         assert!(classify_billing_error("Provider returned 429").is_none());
+        // R65 F1: `more credits` alone is not billing (a credits table or
+        // game-loop prose is ordinary text), and `max_tokens = 402` is not
+        // a 402 status line.
+        assert!(classify_billing_error("we need more credits in the game loop").is_none());
+        assert!(classify_billing_error("max_tokens = 402").is_none());
+        assert!(classify_billing_error("CREATE TABLE credits (id int); -- more credits").is_none());
+        assert!(classify_billing_error("402 rows affected").is_none());
+    }
+
+    /// R65 F1: a bare `more credits`, `max_tokens = 402` or a `402 ` line
+    /// without a billing phrase is ordinary text, never a trip.
+    #[test]
+    fn r65_f1_no_false_trip() {
+        for text in [
+            "we need more credits in the game loop",
+            "max_tokens = 402",
+            "CREATE TABLE credits (id int); -- more credits",
+            "402 rows affected",
+            // A session-level rate limit is not the OpenRouter outage.
+            r#"{"type":"message","message":{"role":"assistant","stopReason":"error","errorStatus":429,"errorMessage":"rate limit exceeded"}}"#,
+        ] {
+            assert!(
+                classify_billing_error(text).is_none(),
+                "{text} must not trip"
+            );
+        }
+    }
+
+    /// R65 F1 (R63-3): the exact OpenRouter outage line, its max_tokens
+    /// variant, and the session envelope that carries errorStatus 402.
+    #[test]
+    fn r65_f1_openrouter_402_trips() {
+        let line = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
+        assert_eq!(
+            classify_billing_error(line).as_deref(),
+            Some("provider billing exhausted (HTTP 402)")
+        );
+        let variant = "402 This request requires more credits, or fewer max_tokens. You requested up to 131072 tokens, but can only afford 47664. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
+        assert_eq!(
+            classify_billing_error(variant).as_deref(),
+            Some("provider billing exhausted (HTTP 402)")
+        );
+        // The real session jsonl shape: the status and message live on the
+        // message, not under error.code/error.message.
+        let session = r#"{"type":"message","message":{"role":"assistant","content":[],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0},"stopReason":"error","errorStatus":402,"errorId":402,"errorMessage":"402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit"}}"#;
+        assert_eq!(
+            classify_billing_error(session).as_deref(),
+            Some("provider billing exhausted (HTTP 402)")
+        );
     }
 }
