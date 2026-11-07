@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-28",
+  "as_of": "2026-11-07",
   "source": "OpenRouter /api/v1/models; exact catalog ids; cache_read is input_cache_read, cache_write is input_cache_write or the prompt rate when absent",
   "models": [
     {
@@ -39,24 +39,24 @@
     },
     {
       "id": "deepseek/deepseek-chat",
-      "prompt_per_million": 0.2574,
-      "completion_per_million": 1.0287,
-      "cache_read_per_million": 0.06435,
-      "cache_write_per_million": 0.2574
+      "prompt_per_million": 0.32,
+      "completion_per_million": 0.89,
+      "cache_read_per_million": 0.32,
+      "cache_write_per_million": 0.32
     },
     {
       "id": "qwen/qwen-2.5-coder-32b-instruct",
       "prompt_per_million": 0.66,
       "completion_per_million": 1.0,
-      "cache_read_per_million": 0.165,
+      "cache_read_per_million": 0.66,
       "cache_write_per_million": 0.66
     },
     {
       "id": "meta-llama/llama-3.3-70b-instruct",
-      "prompt_per_million": 0.1,
-      "completion_per_million": 0.32,
-      "cache_read_per_million": 0.025,
-      "cache_write_per_million": 0.1
+      "prompt_per_million": 0.59,
+      "completion_per_million": 0.79,
+      "cache_read_per_million": 0.295,
+      "cache_write_per_million": 0.59
     },
     {
       "id": "openai/gpt-4o-mini",
@@ -106,6 +106,34 @@
       "completion_per_million": 0.47,
       "cache_read_per_million": 0.016,
       "cache_write_per_million": 0.15
+    },
+    {
+      "id": "tencent/hy4",
+      "prompt_per_million": 0.417,
+      "completion_per_million": 1.2505,
+      "cache_read_per_million": 0.021,
+      "cache_write_per_million": 0.417
+    },
+    {
+      "id": "minimax/minimax-m3.1-flash",
+      "prompt_per_million": 0.075,
+      "completion_per_million": 0.3,
+      "cache_read_per_million": 0.0075,
+      "cache_write_per_million": 0.075
+    },
+    {
+      "id": "openai/gpt-6-luna-pro",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.125
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-pro",
+      "prompt_per_million": 0.435,
+      "completion_per_million": 0.87,
+      "cache_read_per_million": 0.0036,
+      "cache_write_per_million": 0.435
     }
   ]
 }
