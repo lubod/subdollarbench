@@ -967,17 +967,55 @@ fn state_of(c: &CareerCell) -> String {
 }
 
 fn flags_of(c: &CareerCell) -> String {
-    let mut f = String::new();
+    // R70 F5 (R69-7): badges, never a text node that starts with "· ".
+    let mut f: Vec<&str> = Vec::new();
     if c.over_budget {
-        f.push_str(" · <span class=\"b warn\">over budget</span>");
+        f.push("<span class=\"b warn\">over budget</span>");
     }
     if c.cap_reached {
-        f.push_str(" · <span class=\"b\">budget cap</span>");
+        f.push("<span class=\"b\">budget cap</span>");
     }
     if c.over_wall {
-        f.push_str(" · <span class=\"b warn\">over wall</span>");
+        f.push("<span class=\"b warn\">over wall</span>");
     }
-    f
+    f.join(" ")
+}
+
+/// R70 F1 (R69-2): the $0 rehearsals share one footnote with their count
+/// and score range; a smoke cell keeps its own line.
+fn unranked_note(cells: &[&CareerCell]) -> Option<String> {
+    let rehearsals: Vec<&&CareerCell> = cells.iter().filter(|c| c.rehearsal).collect();
+    let mut parts: Vec<String> = Vec::new();
+    if !rehearsals.is_empty() {
+        let mut scores: Vec<f64> = rehearsals.iter().map(|c| c.points).collect();
+        scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+        let lo = scores[0];
+        let hi = *scores.last().unwrap();
+        let max = rehearsals[0].max_points as u32;
+        let score = if (hi - lo).abs() < 1e-9 {
+            format!("{} / {max} each", fmt_pts(lo))
+        } else {
+            format!("{} - {} / {max}", fmt_pts(lo), fmt_pts(hi))
+        };
+        let n = rehearsals.len();
+        parts.push(format!(
+            "{n} $0 {} (the reference server; {score}) {} not ranked",
+            if n == 1 { "rehearsal" } else { "rehearsals" },
+            if n == 1 { "is" } else { "are" }
+        ));
+    }
+    for c in cells.iter().filter(|c| c.smoke) {
+        parts.push(format!(
+            "Not ranked: a smoke cell scored {} / {}",
+            fmt_pts(c.points),
+            c.max_points as u32
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(". ") + ".")
+    }
 }
 
 /// R47 F2: the board's Perf cell. A score reads `1.32×`; a career with no
@@ -1040,7 +1078,7 @@ fn effort_note(effort: &str) -> String {
     if effort.is_empty() {
         String::new()
     } else {
-        format!(" · effort {}", esc(effort))
+        format!("<span class=\"b effort\">effort {}</span>", esc(effort))
     }
 }
 
@@ -1113,9 +1151,12 @@ fn short_model(model: &str) -> &str {
     model.strip_prefix("openrouter/").unwrap_or(model)
 }
 
-/// R65-1: the short model name may break at its `/` (not mid-word).
+/// R65-1 / R70 F2: the short model name breaks only after `/` or `-`
+/// (never mid-word): every such character gets a `<wbr>`.
 fn model_name_html(model: &str) -> String {
-    esc(short_model(model)).replace('/', "/<wbr>")
+    esc(short_model(model))
+        .replace('/', "/<wbr>")
+        .replace('-', "-<wbr>")
 }
 
 /// R69 F1: the head both pages share: description, Open Graph title and
@@ -1266,7 +1307,7 @@ fn perf_badge(c: &CareerCell) -> String {
 /// Their dot strips stay in the expanded careers.
 fn secondary_line(c: &CareerCell) -> String {
     format!(
-        "<div class=\"mut secondary\"><span class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">highest {}</span><span class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\"> · kept {} green</span><span class=\"col-ppd\"> · {} pts/$</span><span class=\"col-duration\"> · {}</span><span class=\"col-turns\"> · {} turns</span><span class=\"col-tokens\"> · {}</span><span class=\"col-state\"> · {}</span></div>",
+        "<div class=\"mut secondary\"><span class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">highest {}</span><span class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\">kept {} green</span><span class=\"col-ppd\">{} pts/$</span><span class=\"col-duration\">{}</span><span class=\"col-turns\">{} turns</span><span class=\"col-tokens\">{}</span><span class=\"col-state\">{}</span></div>",
         reached_of(c),
         c.regression_free,
         ppd_of(c),
@@ -1285,15 +1326,20 @@ fn summary_cards(
     ranked: &[&CareerCell],
     colours: &HashMap<String, &'static str>,
 ) -> String {
-    let top = groups.iter().max_by(|a, b| {
-        cells[a.median]
-            .points
-            .partial_cmp(&cells[b.median].points)
-            .unwrap_or(Ordering::Equal)
-    });
+    // R70 F3 (R69-5): the top model is the board's #1, not a fresh
+    // max_by on points; the best points per dollar is each model's
+    // median pts/$ across its careers.
+    let top = groups.first();
     let best_ppd = groups
         .iter()
-        .filter_map(|g| cells[g.median].points_per_dollar().map(|v| (*g, v)))
+        .filter_map(|g| {
+            let values: Vec<f64> = g
+                .careers
+                .iter()
+                .filter_map(|i| cells[*i].points_per_dollar())
+                .collect();
+            median(&sorted_unique(values.into_iter())).map(|v| (*g, v))
+        })
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
     let cheapest = ranked
         .iter()
@@ -1304,7 +1350,7 @@ fn summary_cards(
             "<div class=\"card\" data-card=\"top-model\"><div class=\"k\">Top model</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">{} / {} median</div></div>",
             swatch(&g.model, colours),
             esc(&g.model),
-            esc(short_model(&g.model)),
+            model_name_html(&g.model),
             fmt_pts1(cells[g.median].points),
             cells[g.median].max_points as u32
         ),
@@ -1312,10 +1358,10 @@ fn summary_cards(
     };
     let ppd_card = match best_ppd {
         Some((g, value)) => format!(
-            "<div class=\"card\" data-card=\"best-ppd\"><div class=\"k\">Best points per dollar</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">{value:.1} pts/$</div></div>",
+            "<div class=\"card\" data-card=\"best-ppd\"><div class=\"k\">Best median points per dollar</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">{value:.1} pts/$</div></div>",
             swatch(&g.model, colours),
             esc(&g.model),
-            esc(short_model(&g.model))
+            model_name_html(&g.model)
         ),
         None => "<div class=\"card\" data-card=\"best-ppd\"><div class=\"k\">Best points per dollar</div><div class=\"v\">—</div><div class=\"s\">no priced career yet</div></div>".to_string(),
     };
@@ -1324,7 +1370,7 @@ fn summary_cards(
             "<div class=\"card\" data-card=\"cheapest-career\"><div class=\"k\">Cheapest career</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">${:.2}</div></div>",
             swatch(&c.model, colours),
             esc(&c.model),
-            esc(short_model(&c.model)),
+            model_name_html(&c.model),
             c.cost
         ),
         None => "<div class=\"card\" data-card=\"cheapest-career\"><div class=\"k\">Cheapest career</div><div class=\"v\">—</div><div class=\"s\">no ranked career yet</div></div>".to_string(),
@@ -1344,13 +1390,18 @@ fn model_cell(model: &str, colours: &HashMap<String, &'static str>) -> String {
         "<td title=\"{}\">{}<span class=\"mname\">{}</span></td>",
         esc(model),
         swatch(model, colours),
-        esc(short_model(model))
+        model_name_html(model)
     )
 }
 
 /// R69 F3: the sticky section nav; every target id exists below.
 fn section_nav() -> &'static str {
     "<nav class=\"section-nav\" aria-label=\"Sections\"><a href=\"#measured\">What it measured</a><a href=\"#points\">Points vs $</a><a href=\"#survival\">Survival</a><a href=\"#tickets\">Per-ticket</a><a href=\"#head-to-head\">Head-to-head</a><a href=\"#variance\">Variance</a><a href=\"#ranks\">Ranks</a></nav>"
+}
+
+/// R70 F5 (R69-7): the expanded career table's 12 columns are named.
+fn career_table_head() -> &'static str {
+    "<thead><tr><th></th><th>Career</th><th>Highest ticket</th><th>Tickets kept green</th><th class=\"num\">Points</th><th class=\"num\">Perf</th><th class=\"num\">Spend</th><th class=\"num\">Pts / $</th><th class=\"num\">Duration</th><th class=\"num\">Turns</th><th>Tokens out</th><th>State</th></tr></thead><tbody>"
 }
 
 fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
@@ -1366,10 +1417,13 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
     let fp = esc(c.fingerprints.first().map(String::as_str).unwrap_or("—"));
     let name_html = esc(name).replace('/', "/<wbr>");
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id} · {fp}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
+        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id} · {fp}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         mark_badge(c),
-        effort_note(&c.effort),
-        flags_of(c),
+        [effort_note(&c.effort), flags_of(c)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
         strip_html(&c.ladder),
         reached_of(c),
         c.regression_free,
@@ -1521,19 +1575,23 @@ fn model_row(
             fmt_token_value
         )
     );
-    let more = format!(
-        "<details class=\"more\"><summary>×{} {word} ▸</summary>{strips}<div class=\"table-scroll\"><table class=\"career-table\"><tbody>{inner}</tbody></table></div></details>",
-        g.careers.len()
-    );
     let agreement = ticket_agreement(cells, g);
+    let more = format!(
+        "<details class=\"more\"><summary>×{} {word} ▸</summary><div class=\"agree agree-details\">{agreement}</div>{strips}<div class=\"table-scroll\"><table class=\"career-table\">{}{inner}</table></div></details>",
+        g.careers.len(),
+        career_table_head()
+    );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div>{more}</td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{agreement}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div>{more}</td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{agreement}</td></tr>",
         rank_badge(g, stability),
         swatch(&g.model, colours),
         esc(&g.model),
         model_name_html(&g.model),
-        mark_badge(med),
-        effort_note(&g.effort),
+        [mark_badge(med), effort_note(&g.effort)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
         secondary_line(med),
         fmt_pts(worst.points),
         fmt_pts(best.points),
@@ -1625,7 +1683,8 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str(legend_html());
     h.push_str("</div>");
     if !unfinished_current.is_empty() {
-        h.push_str("<div class=\"unfinished\"><div class=\"divider\">unfinished careers (not ranked)</div><div class=\"wrap\"><table class=\"career-table\"><tbody>");
+        h.push_str("<div class=\"unfinished\"><div class=\"divider\">unfinished careers (not ranked)</div><div class=\"wrap\"><table class=\"career-table\">");
+        h.push_str(career_table_head());
         for c in &unfinished_current {
             let name = labels
                 .get(&c.campaign_id)
@@ -1640,26 +1699,8 @@ fn render_board(cells: &[CareerCell]) -> String {
         }
         h.push_str("</tbody></table></div></div>");
     }
-    if !marked.is_empty() {
-        let notes: Vec<String> = marked
-            .iter()
-            .map(|c| {
-                let kind = if c.rehearsal {
-                    "a $0 rehearsal (the harness's reference server, no model)"
-                } else {
-                    "a smoke cell"
-                };
-                format!(
-                    "{kind} scored {} / {}",
-                    fmt_pts(c.points),
-                    c.max_points as u32
-                )
-            })
-            .collect();
-        h.push_str(&format!(
-            "<div class=\"mut note\">Not ranked: {}.</div>",
-            esc(&notes.join("; "))
-        ));
+    if let Some(note) = unranked_note(&marked) {
+        h.push_str(&format!("<div class=\"mut note\">{note}</div>"));
     }
     h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Only the current rule set is shown; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
     h.push_str(&footer_html(&now));
@@ -2103,7 +2144,7 @@ fn chart_legend(models: &[String], colours: &HashMap<String, &'static str>) -> S
         s.push_str(&format!(
             "<span class=\"key\"><span class=\"dot\" style=\"background:{colour}\"></span><span title=\"{}\">{}</span></span>",
             esc(m),
-            esc(short_model(m))
+            model_name_html(m)
         ));
     }
     s.push_str("</div>");
@@ -2426,14 +2467,14 @@ fn render_results(cells: &[CareerCell]) -> String {
                     "{}<span title=\"{}\">{}</span> — none",
                     swatch(m, &colours),
                     esc(m),
-                    esc(short_model(m))
+                    model_name_html(m)
                 )
             } else {
                 format!(
                     "{}<span title=\"{}\">{}</span> — {}",
                     swatch(m, &colours),
                     esc(m),
-                    esc(short_model(m)),
+                    model_name_html(m),
                     esc(detail)
                 )
             }
@@ -2580,33 +2621,15 @@ fn render_results(cells: &[CareerCell]) -> String {
         caps
     ));
     let marked: Vec<&CareerCell> = cells.iter().filter(|c| c.rehearsal || c.smoke).collect();
-    if !marked.is_empty() {
-        let notes: Vec<String> = marked
-            .iter()
-            .map(|c| {
-                let kind = if c.rehearsal {
-                    "a $0 rehearsal (the harness's reference server, no model)"
-                } else {
-                    "a smoke cell"
-                };
-                format!(
-                    "{kind} scored {} / {}",
-                    fmt_pts(c.points),
-                    c.max_points as u32
-                )
-            })
-            .collect();
-        h.push_str(&format!(
-            "<div class=\"mut note\">Not ranked: {}.</div>",
-            notes.join("; ")
-        ));
+    if let Some(note) = unranked_note(&marked) {
+        h.push_str(&format!("<div class=\"mut note\">{note}</div>"));
     }
     let legend = chart_legend(&models, &colours);
     h.push_str(&format!(
-        "<section id=\"points\"><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>{legend}<div class=\"chart-wrap\">{scatter}</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>Career</th><th class=\"num\">Points</th><th class=\"num\">Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"
+        "<section id=\"points\"><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>{legend}<div class=\"chart-wrap\">{scatter}</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>Career</th><th class=\"num\">Points</th><th class=\"num\">Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"
     ));
     h.push_str(&format!(
-        "<section id=\"survival\"><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div>{legend}<div class=\"chart-wrap\">{survival}</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"
+        "<section id=\"survival\"><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div>{legend}<div class=\"chart-wrap\">{survival}</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"
     ));
     // R65 F6: the per-ticket pass share, shaded like the board's agreement.
     let mut ticket_rows = String::new();
@@ -2642,7 +2665,7 @@ fn render_results(cells: &[CareerCell]) -> String {
         ticket_rows.push_str(&format!("<tr>{}{cells}</tr>", model_cell(model, &colours)));
     }
     h.push_str(&format!(
-        "<section id=\"tickets\"><h2>Per-ticket pass share</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div><h3>Cost and robustness</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th class=\"num\">$ / ticket (min / median / max)</th><th class=\"num\">Regression-free rate</th><th class=\"num\">Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"
+        "<section id=\"tickets\"><h2>Per-ticket pass share</h2><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div><h3>Cost and robustness</h3><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th class=\"num\">$ / ticket (min / median / max)</th><th class=\"num\">Regression-free rate</th><th class=\"num\">Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"
     ));
     let stability = rank_stability(cells, &groups);
     let mut h2h_rows = String::new();
@@ -2670,7 +2693,7 @@ fn render_results(cells: &[CareerCell]) -> String {
             ));
         }
     }
-    h.push_str("<section id=\"head-to-head\"><h2>Head-to-head</h2><div class=\"mut\">The share of career pairs where model A's career outscores model B's, by points.</div><div class=\"wrap\"><table><thead><tr><th>Model A</th><th>Model B</th><th class=\"num\">A wins</th><th class=\"num\">B wins</th><th class=\"num\">Ties</th></tr></thead><tbody>");
+    h.push_str("<section id=\"head-to-head\"><h2>Head-to-head</h2><div class=\"mut\">The share of career pairs where model A's career outscores model B's, by points.</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model A</th><th>Model B</th><th class=\"num\">A wins</th><th class=\"num\">B wins</th><th class=\"num\">Ties</th></tr></thead><tbody>");
     h.push_str(&h2h_rows);
     h.push_str("</tbody></table></div></section>");
     let vars = variance_rows(cells, &current_groups);
@@ -2686,10 +2709,10 @@ fn render_results(cells: &[CareerCell]) -> String {
                 .unwrap_or_else(|| "—".to_string())
         ));
     }
-    h.push_str("<section id=\"variance\"><h2>Variance check</h2><div class=\"mut\">The publishing bar: the spread between models must exceed the spread within one model's careers.</div><div class=\"wrap\"><table><thead><tr><th>Metric</th><th class=\"num\">Median within-model spread</th><th class=\"num\">Span of model medians</th><th class=\"num\">Between / within</th></tr></thead><tbody>");
+    h.push_str("<section id=\"variance\"><h2>Variance check</h2><div class=\"mut\">The publishing bar: the spread between models must exceed the spread within one model's careers.</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Metric</th><th class=\"num\">Median within-model spread</th><th class=\"num\">Span of model medians</th><th class=\"num\">Between / within</th></tr></thead><tbody>");
     h.push_str(&var_rows);
     h.push_str("</tbody></table></div></section>");
-    h.push_str("<section id=\"ranks\"><h2>Model ranks</h2><div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th class=\"num\">Best / median / worst points</th></tr></thead><tbody>");
+    h.push_str("<section id=\"ranks\"><h2>Model ranks</h2><div class=\"wrap table-scroll-y\"><table><thead><tr><th>#</th><th>Model</th><th class=\"num\">Best / median / worst points</th></tr></thead><tbody>");
     for (i, g) in current_groups.iter().enumerate() {
         let stab = stability.as_ref().map(|s| &s[i]);
         h.push_str(&format!(
@@ -3148,6 +3171,22 @@ mod tests {
         }
     }
 
+    /// R70 F5: mark a phase over budget in both files.
+    fn set_over_budget(runs: &Path, prefix: &str, phase: u32) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["over_budget"] = serde_json::json!(true);
+            fs::write(path, v.to_string()).unwrap();
+        }
+    }
+
     /// R51 F3: rewrite (or remove) a phase's effort in both files.
     fn set_effort(runs: &Path, prefix: &str, phase: u32, effort: Option<&str>) {
         let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
@@ -3235,6 +3274,28 @@ mod tests {
             }
         }
         out
+    }
+
+    /// R70 F4 (R69-6): the model row's markup, from its `<tr>` to the next
+    /// model row. Used to check rank and share in the same row.
+    fn model_row_html<'a>(html: &'a str, model: &str) -> &'a str {
+        let marker = format!("<b title=\"{model}\">");
+        let start_tag = "<tr class=\"model-row\">";
+        let mut from = 0;
+        while let Some(rel) = html[from..].find(start_tag) {
+            let start = from + rel;
+            let after = start + start_tag.len();
+            let end = html[after..]
+                .find(start_tag)
+                .map(|i| after + i)
+                .unwrap_or(html.len());
+            let row = &html[start..end];
+            if row.contains(&marker) {
+                return row;
+            }
+            from = end;
+        }
+        panic!("no model row for {model}");
     }
 
     #[test]
@@ -3748,9 +3809,10 @@ mod tests {
         let html = read(&out.join("index.html"));
         // R64 F6/D1: exact rank stability replaces the N= groups. b holds
         // #2 in 8 of 9 combinations (c=13 with b=12 is the exception).
+        let row = model_row_html(&html, "b");
         assert!(
-            html.contains("class=\"rank\">#2</div>") && html.contains(">89%</span>"),
-            "the model row has no exact rank cell: {html}"
+            row.contains("#2") && row.contains("89%"),
+            "the model row has no exact rank and share: {row}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -3766,18 +3828,17 @@ mod tests {
         assert!(model_groups(&cells).is_empty(), "a rehearsal must not rank");
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let board = read(&out.join("index.html"));
-        // Portal polish: the rehearsal is a footnote under the table.
+        // R70 F1: one footnote with the count and score.
         assert!(
-            board.contains(
-                "Not ranked: a $0 rehearsal (the harness&#39;s reference server, no model) scored"
-            ) || board.contains(
-                "Not ranked: a $0 rehearsal (the harness's reference server, no model) scored"
-            ),
+            board.contains("1 $0 rehearsal (the reference server; 4 / 76 each) is not ranked"),
             "{board}"
         );
         let results = read(&out.join("results.html"));
-        // R65 F7: the results page shows the rehearsal as a footnote.
-        assert!(results.contains("Not ranked:"), "{results}");
+        // R65 F7 / R70 F1: the results page shows the same one-line footnote.
+        assert!(
+            results.contains("1 $0 rehearsal (the reference server; 4 / 76 each) is not ranked"),
+            "{results}"
+        );
         assert!(results.contains("$0 rehearsal"), "{results}");
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["ranked"], 0);
@@ -4085,13 +4146,15 @@ mod tests {
         assert!((of("C").share - 1.0).abs() < 1e-9);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
+        let a_row = model_row_html(&html, "A");
         assert!(
-            html.contains("class=\"rank\">#1</div>") && html.contains(">56%</span>"),
-            "A's most likely rank and share: {html}"
+            a_row.contains("#1") && a_row.contains("56%"),
+            "A's most likely rank and share are in one row: {a_row}"
         );
+        let c_row = model_row_html(&html, "C");
         assert!(
-            html.contains("class=\"rank\">#3</div>") && html.contains(">100%</span>"),
-            "C's rank and share: {html}"
+            c_row.contains("#3") && c_row.contains("100%"),
+            "C's rank and share are in one row: {c_row}"
         );
         let _ = fs::remove_dir_all(&base);
 
@@ -4305,9 +4368,7 @@ mod tests {
             );
         }
         assert!(
-            text.contains(
-                "Not ranked: a $0 rehearsal (the harness's reference server, no model) scored 71 / 76."
-            ),
+            text.contains("1 $0 rehearsal (the reference server; 71 / 76 each) is not ranked."),
             "the rehearsal is a footnote: {text}"
         );
         assert!(
@@ -4348,7 +4409,10 @@ mod tests {
                 .iter()
                 .enumerate()
             {
-                assert!(legend.contains(name), "short name {name}: {legend}");
+                assert!(
+                    legend.contains(&model_name_html(name)),
+                    "short name {name}: {legend}"
+                );
                 assert!(
                     legend.contains(&format!("background:{}", palette(i))),
                     "series colour {i}: {legend}"
@@ -4408,50 +4472,56 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// R65 F8: the board's phone layout hides the secondary columns and
-    /// keeps rank, model, points, perf and spend.
+    /// R65 F8 / R70 F4 (R69-6): the phone layout keeps rank, model,
+    /// points, perf and spend; the secondary line and the row agreement
+    /// give way to the expanded details, whose agreement copy stays.
     #[test]
     fn r65_f8_mobile_board() {
         let css = include_str!("portal_board.css");
-        assert!(
-            css.contains("@media (max-width: 700px)"),
-            "the board has a phone media query"
-        );
-        for class in [
-            "col-highest",
-            "col-green",
-            "col-ppd",
-            "col-duration",
-            "col-turns",
-            "col-tokens",
-            "col-state",
+        let at = css
+            .find("@media (max-width: 700px)")
+            .expect("the board has a phone media query");
+        let media = &css[at..];
+        for rule in [
+            ".col-agree { display: none; }",
+            ".secondary { display: none; }",
+            ".agree-details { display: block; }",
         ] {
-            assert!(css.contains(class), "the media query names {class}");
+            assert!(media.contains(rule), "the phone rule {rule:?} is missing");
+        }
+        for class in [
+            "col-rank",
+            "col-model",
+            "col-points",
+            "col-perf",
+            "col-spend",
+        ] {
+            assert!(
+                !media.contains(&format!(".{class} {{ display: none; }}")),
+                "the phone layout must keep {class}"
+            );
         }
         let (base, runs, out) = fixture("r65f8");
         career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        for class in [
-            "col-model",
-            "col-highest",
-            "col-green",
-            "col-ppd",
-            "col-duration",
-            "col-turns",
-            "col-tokens",
-            "col-state",
+        let row = model_row_html(&html, "m");
+        for cell in [
+            "class=\"num col-rank\"",
+            "class=\"col-model\"",
+            "class=\"num col-points\"",
+            "class=\"num col-perf\"",
+            "class=\"num col-spend\"",
         ] {
-            assert!(
-                html.contains(&format!("class=\"{class}\"")),
-                "the board uses {class}: {html}"
-            );
+            assert!(row.contains(cell), "the phone row keeps {cell}: {row}");
         }
         assert!(
-            html.contains("<th class=\"num col-points\"")
-                && html.contains("<th class=\"num col-perf\"")
-                && html.contains("<th class=\"num col-spend\""),
-            "the headers keep rank, model, points, perf and spend: {html}"
+            row.contains("class=\"mut secondary\"") && row.contains("class=\"col-agree\""),
+            "the secondary line and row agreement are the parts the phone rule gives way on: {row}"
+        );
+        assert!(
+            html.contains("class=\"agree agree-details\""),
+            "the expanded details keep the agreement strip: {html}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -4681,14 +4751,19 @@ mod tests {
         assert!(html.contains("<th>Prices</th>"), "{html}");
         assert!(html.contains("2026-11-08"), "{html}");
         assert!(html.contains("base rates per call"), "{html}");
+        let mimo = format!(
+            "{}</span> — none",
+            model_name_html("xiaomi/mimo-v2.6-flash")
+        );
+        let qwen = format!("{}</span> — none", model_name_html("qwen/qwen3.8-flash"));
         for needle in [
-            "5× the prompt rate above 100k prompt tokens",
-            "2× above 272k prompt tokens",
-            "2× in weekday peak hours",
-            "mimo-v2.6-flash</span> — none",
-            "qwen3.8-flash</span> — none",
+            "5× the prompt rate above 100k prompt tokens".to_string(),
+            "2× above 272k prompt tokens".to_string(),
+            "2× in weekday peak hours".to_string(),
+            mimo,
+            qwen,
         ] {
-            assert!(html.contains(needle), "missing {needle:?}: {html}");
+            assert!(html.contains(&needle), "missing {needle:?}: {html}");
         }
         let _ = fs::remove_dir_all(&base);
     }
@@ -5054,18 +5129,18 @@ mod tests {
         let rest = &html[at..];
         let details_end =
             rest.find("</details>").expect("the expanded careers") + "</details>".len();
-        let agree_at = rest
-            .find("<div class=\"agree\">")
-            .expect("the agreement strip");
+        let cell_at = rest
+            .find("<td class=\"col-agree\">")
+            .expect("the row agreement cell");
         assert!(
-            agree_at > details_end,
-            "the agreement strip is outside the expanded careers: {rest}"
+            cell_at > details_end,
+            "the row agreement cell is outside the expanded careers: {rest}"
         );
-        let agree = &rest[agree_at..];
-        let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
+        let cell = &rest[cell_at..];
+        let cell = &cell[..cell.find("</td>").unwrap()];
         assert!(
-            agree.contains("passed by 1/2") && agree.matches("title=\"ticket ").count() == 21,
-            "the agreement strip is on the row: {agree}"
+            cell.contains("passed by 1/2") && cell.matches("title=\"ticket ").count() == 21,
+            "the agreement strip is on the row: {cell}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -5250,6 +5325,221 @@ mod tests {
                     }
                 }
             }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+    /// R70 F4/F5: a text node that starts with "· " is a dangling
+    /// separator; the stylesheet's generated `content` is not a text node.
+    fn dangling_separator(html: &str) -> Option<String> {
+        let mut rest = html;
+        let mut in_style = false;
+        loop {
+            let Some(lt) = rest.find('<') else {
+                if !in_style && rest.trim_start().starts_with("· ") {
+                    return Some(rest.to_string());
+                }
+                return None;
+            };
+            let text = &rest[..lt];
+            if !in_style && text.trim_start().starts_with("· ") {
+                return Some(text.to_string());
+            }
+            let gt = rest[lt..].find('>')?;
+            let tag = &rest[lt + 1..lt + gt];
+            let name = tag
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_ascii_lowercase();
+            if name == "style" {
+                in_style = !tag.starts_with('/');
+            }
+            rest = &rest[lt + gt + 1..];
+        }
+    }
+
+    /// R70 F1 (R69-2): three rehearsals share one footnote with the count
+    /// and score, on both pages; a smoke cell keeps its own line.
+    #[test]
+    fn r70_f1_rehearsals_one_line() {
+        let (base, runs, out) = fixture("r70rehearsals");
+        for prefix in ["r1", "r2", "r3"] {
+            career(&runs, prefix, "m", [17.75; 4], [0.0; 4]); // 71
+            set_mark(&runs, prefix, 4, "rehearsal");
+        }
+        career(&runs, "s1", "m", [10.0; 4], [0.01; 4]); // 40
+        set_mark(&runs, "s1", 1, "smoke");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        for page in ["index.html", "results.html"] {
+            let html = read(&out.join(page));
+            assert!(
+                html.contains(
+                    "3 $0 rehearsals (the reference server; 71 / 76 each) are not ranked."
+                ),
+                "{page} must collapse the rehearsals to one line: {html}"
+            );
+            assert_eq!(
+                html.matches("(the reference server;").count(),
+                1,
+                "{page} repeats the rehearsal footnote: {html}"
+            );
+            assert!(
+                html.contains("Not ranked: a smoke cell scored 40 / 76."),
+                "{page} must keep the smoke line: {html}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R70 F2 (R69-3): model names break only after `/` or `-`, and the
+    /// name CSS has no break-all or anywhere.
+    #[test]
+    fn r70_f2_card_name_breaks() {
+        let name = "openrouter/deepseek/deepseek-v4.1-flash-1017";
+        assert!(
+            model_name_html(name).contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
+            "the model name carries a <wbr> after / and -: {}",
+            model_name_html(name)
+        );
+        let css = include_str!("portal_board.css");
+        assert!(!css.contains("break-all"), "no break-all on names");
+        assert!(!css.contains("anywhere"), "no anywhere on names");
+        let (base, runs, out) = fixture("r70namebreak");
+        career(&runs, "c", name, [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let at = pos(&html, "data-card=\"top-model\"");
+        let card = &html[at..at + html[at..].find("</div></div>").unwrap()];
+        assert!(
+            card.contains("<wbr>"),
+            "the summary card name carries break points: {card}"
+        );
+        let row = model_row_html(&html, name);
+        assert!(
+            row.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
+            "the board row name carries break points: {row}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R70 F2 (R69-4): on a phone the row agreement gives way to the copy
+    /// inside the expanded details, which is not display: none.
+    #[test]
+    fn r70_f2_agreement_on_phone() {
+        let css = include_str!("portal_board.css");
+        let at = css
+            .find("@media (max-width: 700px)")
+            .expect("the phone media query");
+        let media = &css[at..];
+        assert!(
+            media.contains(".col-agree { display: none; }"),
+            "the row copy is hidden on a phone"
+        );
+        assert!(
+            media.contains(".agree-details { display: block; }"),
+            "the details copy is shown on a phone"
+        );
+        let (base, runs, out) = fixture("r70agreephone");
+        career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
+        fail_ticket(&runs, "b", 5);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let details = pos(&html, "<details class=\"more\">");
+        let details = &html[details..details + html[details..].find("</details>").unwrap()];
+        let agree = pos(details, "<div class=\"agree agree-details\">");
+        let agree = &details[agree..];
+        let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
+        assert!(
+            agree.matches("title=\"ticket ").count() == 21,
+            "the details copy has the 21-square strip: {agree}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R70 F3 (R69-5): the cards follow the board's #1 and the median
+    /// pts/$ across each model's careers.
+    #[test]
+    fn r70_f3_cards_follow_board() {
+        let (base, runs, out) = fixture("r70cards");
+        // A and B tie on 60 points; A's median career has the higher perf.
+        career(&runs, "a1", "vendor/a", [15.0; 4], [0.1; 4]);
+        career(&runs, "a2", "vendor/a", [15.0; 4], [0.1; 4]);
+        set_career_perf(&runs, "a1", 1.0, serde_json::json!([]));
+        set_career_perf(&runs, "a2", 0.9, serde_json::json!([]));
+        career(&runs, "b1", "vendor/b", [15.0; 4], [0.1; 4]);
+        set_career_perf(&runs, "b1", 0.8, serde_json::json!([]));
+        // C's median-points career is not its median pts/$ career:
+        // 50/$0.02 = 2500, 40/$0.10 = 400, 30/$0.04 = 750.
+        career(&runs, "c1", "vendor/c", [12.5; 4], [0.005; 4]);
+        career(&runs, "c2", "vendor/c", [10.0; 4], [0.025; 4]);
+        career(&runs, "c3", "vendor/c", [7.5; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let top = &html[pos(&html, "data-card=\"top-model\"")..];
+        let top = &top[..top.find("</div></div>").unwrap()];
+        assert!(
+            top.contains("title=\"vendor/a\"") && top.contains("60.0 / 76 median"),
+            "the top card is the board's #1, not the last points tie: {top}"
+        );
+        let ppd = &html[pos(&html, "data-card=\"best-ppd\"")..];
+        let ppd = &ppd[..ppd.find("</div></div>").unwrap()];
+        assert!(
+            ppd.contains("Best median points per dollar"),
+            "the card names the metric: {ppd}"
+        );
+        assert!(
+            ppd.contains("title=\"vendor/c\"") && ppd.contains("750.0 pts/$"),
+            "C's median pts/$ is 750.0, not its median-points career's 400: {ppd}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R70 F5 (R69-7): the expanded career table names its 12 columns.
+    #[test]
+    fn r70_f5_career_table_header() {
+        let (base, runs, out) = fixture("r70tablehead");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let details = &html[pos(&html, "<details class=\"more\">")..];
+        let table = &details[pos(details, "<table class=\"career-table\">")..];
+        let table = &table[..table.find("</table>").unwrap()];
+        let head = &table[..table.find("</thead>").expect("a career-table head")];
+        for column in [
+            "Career",
+            "Highest ticket",
+            "Tickets kept green",
+            "Points",
+            "Perf",
+            "Spend",
+            "Pts / $",
+            "Duration",
+            "Turns",
+            "Tokens out",
+            "State",
+        ] {
+            assert!(head.contains(column), "the head names {column}: {head}");
+        }
+        assert_eq!(head.matches("</th>").count(), 12, "twelve columns: {head}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R70 F5 (R69-7): no text node starts with "· ".
+    #[test]
+    fn r70_f5_no_dangling_separator() {
+        let (base, runs, out) = fixture("r70dangling");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        set_over_budget(&runs, "c", 4);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        for page in ["index.html", "results.html"] {
+            let html = read(&out.join(page));
+            assert_eq!(
+                dangling_separator(&html),
+                None,
+                "{page} has a text node that starts with a separator"
+            );
         }
         let _ = fs::remove_dir_all(&base);
     }

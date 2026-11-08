@@ -86,12 +86,13 @@ code { background: rgba(110,118,129,0.25); border-radius: 3px; padding: 1px 4px;
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: var(--sp-3); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); }
 .card .k { font-size: var(--fs-xs); color: var(--mut); text-transform: uppercase; letter-spacing: .05em; }
-.card .v { font-size: var(--fs-lg); font-weight: 700; color: #fff; margin-top: var(--sp-1); display: flex; align-items: center; gap: var(--sp-2); overflow-wrap: anywhere; }
+.card .v { font-size: var(--fs-lg); font-weight: 700; color: #fff; margin-top: var(--sp-1); display: flex; align-items: center; gap: var(--sp-2); }
 .card .s { font-size: var(--fs-xs); color: var(--mut); margin-top: 2px; }
 .banner { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.45); color: var(--warn); border-radius: var(--radius); padding: 10px 14px; font-size: var(--fs-sm); }
 
 /* Tables (R69 F3). */
 .wrap { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: auto; }
+.table-scroll-y { max-height: 70vh; overflow-y: auto; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 th {
@@ -138,9 +139,10 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .badge.good { color: var(--ok); border-color: rgba(63,185,80,0.45); background: rgba(63,185,80,0.08); }
 .badge.warn { color: var(--warn); border-color: rgba(210,153,34,0.45); background: rgba(210,153,34,0.08); }
 .badge.spend { color: var(--text); }
+.b.effort { color: var(--mut); border-color: var(--line); background: var(--card-2); }
 
 /* Board (R69 F2). */
-.board-table th.col-rank, .board-table td.col-rank { width: 64px; }
+.board-table th.col-rank, .board-table td.col-rank { width: 96px; }
 .board-table th.col-points, .board-table td.col-points { width: 250px; }
 .board-table th.col-perf, .board-table td.col-perf { width: 88px; }
 .board-table th.col-spend, .board-table td.col-spend { width: 96px; }
@@ -152,6 +154,7 @@ tr.model-row:first-child > td { border-top: none; }
 .model-name b { font-size: var(--fs-md); }
 .secondary { line-height: 1.55; margin-top: 2px; }
 .secondary span { white-space: nowrap; }
+.secondary span + span::before { content: " · "; color: var(--mut); }
 .hero { font-size: var(--fs-hero); font-weight: 800; color: #fff; line-height: 1.05; font-variant-numeric: tabular-nums; }
 .range { margin-top: 2px; }
 .points-bar { display: block; width: 220px; max-width: 100%; height: auto; margin: 4px 0 2px; overflow: visible; }
@@ -160,9 +163,10 @@ tr.model-row:first-child > td { border-top: none; }
 .points-bar .dot { opacity: 0.95; }
 .points-bar .med { fill: var(--warn); }
 td.rank { font-weight: 800; color: #fff; white-space: nowrap; }
-.rank { font-size: var(--fs-lg); font-weight: 800; color: #fff; line-height: 1.1; }
-.share { display: inline-block; margin-top: 3px; padding: 1px 7px; border-radius: 999px; background: var(--card-2); border: 1px solid var(--line); font-size: var(--fs-xs); color: var(--mut); }
+.rank { display: inline-block; font-size: var(--fs-lg); font-weight: 800; color: #fff; line-height: 1.1; }
+.share { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--card-2); border: 1px solid var(--line); font-size: var(--fs-xs); color: var(--mut); vertical-align: middle; }
 .agree { margin: 0; }
+.agree-details { display: none; margin: 4px 0; }
 .agree .strip { margin-top: 0; }
 .agree .mut { margin-top: 3px; }
 details.more { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--mut); }
@@ -225,9 +229,13 @@ details.more .line { margin: 2px 0 0 12px; }
 .methodology b { color: var(--text); }
 .measured { padding: 0; overflow: hidden; }
 .measured h2 { padding: var(--sp-4) var(--sp-5) 0; }
-.measured .wrap { border: none; border-radius: 0; background: transparent; }
-.measured-table th { width: 190px; text-transform: none; letter-spacing: 0; font-size: var(--fs-sm); color: var(--mut); vertical-align: top; }
-.measured-table td { font-size: var(--fs-sm); }
+.measured .wrap { border: none; border-radius: 0; background: transparent; overflow: visible; }
+.measured-table { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.measured-table tbody { display: contents; }
+.measured-table tr { display: block; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.measured-table th, .measured-table td { display: block; width: auto; text-transform: none; letter-spacing: 0; font-size: var(--fs-sm); color: var(--mut); padding: 0; border: 0; background: transparent; white-space: normal; }
+.measured-table td { color: var(--text); margin-top: 2px; }
+.measured-table tr:nth-child(odd) { border-right: 1px solid var(--line); }
 
 /* Section nav (R69 F3): sticky, with a horizontal scroll row on a phone. */
 .section-nav {
@@ -258,6 +266,7 @@ details.more .line { margin: 2px 0 0 12px; }
 .chart .pareto-frontier { stroke: var(--mut); stroke-width: 2; stroke-dasharray: 6 4; opacity: 0.85; }
 .chart .career-dot { stroke: var(--card); stroke-width: 1; }
 section { display: flex; flex-direction: column; gap: var(--sp-2); }
+section[id] { scroll-margin-top: 72px; }
 
 /* R65 F8 / R69 F2: the board on a phone. Below 700 px the row keeps
    rank, model, points, perf and spend; the agreement strip and the
@@ -266,6 +275,7 @@ section { display: flex; flex-direction: column; gap: var(--sp-2); }
   body { padding: 12px; }
   th, td { padding: 6px 5px; font-size: var(--fs-xs); }
   .col-agree { display: none; }
+  .agree-details { display: block; }
   .col-highest, .col-green, .col-ppd, .col-duration, .col-turns,
   .col-tokens, .col-state { font-size: 0.68rem; }
   .col-model { overflow-wrap: normal; }
@@ -274,6 +284,7 @@ section { display: flex; flex-direction: column; gap: var(--sp-2); }
   .wrap { overflow-x: auto; }
   .board-table { table-layout: fixed; }
   .board-table th.col-rank, .board-table td.col-rank { width: 40px; }
+  .share { display: block; margin: 2px 0 0; padding: 0 4px; }
   .board-table th.col-points, .board-table td.col-points { width: 96px; }
   .board-table th.col-perf, .board-table td.col-perf { width: 50px; }
   .board-table th.col-spend, .board-table td.col-spend { width: 60px; }
@@ -286,7 +297,7 @@ section { display: flex; flex-direction: column; gap: var(--sp-2); }
   .head-side { align-items: flex-start; text-align: left; }
   .section-nav { gap: var(--sp-3); padding: 8px 10px; font-size: var(--fs-xs); }
   .career-table { display: block; overflow-x: auto; min-width: 0; }
-  .measured-table th { width: 92px; }
-  .measured-table td { overflow-wrap: anywhere; }
+  .measured-table { grid-template-columns: 1fr; }
+  .measured-table tr:nth-child(odd) { border-right: 0; }
   .measured .wrap { overflow-x: visible; }
 }
