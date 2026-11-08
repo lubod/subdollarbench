@@ -1014,6 +1014,34 @@ EOF
     REHEARSAL=0
     PHASE_BUDGET=0.99
 
+    # 16) R67 F4 (R66-3): three lanes probe the long-test lock at the same
+    # instant with no holder; the retry keeps a collision from looking like
+    # a holder, so all three start and no STOP is written. Case 8 keeps the
+    # real-holder refusal.
+    scenario="$dir/sixteen"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 c2 c3 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=3
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    load_careers "$CAREERS_FILE"
+    ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=1 \
+        SDB_LONG_TEST_LOCK="$scenario/long-test.lock"; run_grid ) \
+        >"$scenario/out" 2>&1 || {
+        echo "probe race: the grid failed"; cat "$scenario/out"; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 3 ]] || {
+        echo "probe race: expected 3 rows, got $(($(wc -l < "$LEDGER") - 1))"
+        cat "$scenario/out"; exit 1; }
+    [[ ! -f "$STOP" ]] || { echo "probe race: a false STOP"; exit 1; }
+    MAX_PHASE=4
+
     echo "RESULT: PASS (grid self-test)"
 }
 
