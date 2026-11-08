@@ -92,6 +92,12 @@ on `claude-agent`, which failed every `review` call in rounds 64-66 (the
 Claude plan's 5-hour limit, shared with the reviewer). It was chosen
 over Kimi K3.1 Pro on a blind review of round 69 (`docs/DECISIONS.md`
 #27). Its calls count against the same Go plan as the implementer.
+- **It needs an `OpenCode Go` connection.** The plugin checks
+  `integration.connection.active("opencode-go")`, and OpenCode keeps
+  `opencode-go` as its own integration, apart from `opencode` (the
+  Console). `opencode auth list` must show `OpenCode Go`: the Console key,
+  registered a second time (`cred_1a1bbb9c021lnJB7H7KrbDxLh`). If the
+  Console key is rotated, rotate both.
 
 The implementer (opencode, `deepseek-v4.1-flash`) has an `advisor` tool:
 the `@pfoundation/ocadvisor` plugin, configured in the repo's

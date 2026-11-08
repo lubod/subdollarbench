@@ -680,6 +680,16 @@ The benchmark answers "what does a dollar buy" (round 23):
     bar, the split rank/share assertions. It missed R69-3.
 - **Chosen:** Gemini, for coverage and speed. Its severity labels are
   advice; the round file decides.
+- **The connection** (round 70, R70-1): the plugin's first calls failed
+  in about 50 ms with `No opencode-go connection configured`. OpenCode
+  has separate `opencode` and `opencode-go` integrations; the Go plan's
+  calls had been using the Console credential through a fallback, so
+  no `opencode-go` connection existed for the plugin's check
+  (`@pfoundation/ocadvisor` 26.9.4, `dist/ocAdvisor.js:1130`). The fix
+  (operator: "find the way how to use opencode go"): the Console key
+  imported once more as an `OpenCode Go` credential, through `opencode
+  auth export | ... | opencode auth import` on stdin (never printed). Go
+  calls (deepseek, gemini) and an advisor call succeed with it.
 
 ### AGENTS.md history (moved here on 2026-10-31)
 
