@@ -1118,6 +1118,241 @@ fn model_name_html(model: &str) -> String {
     esc(short_model(model)).replace('/', "/<wbr>")
 }
 
+/// R69 F1: the head both pages share: description, Open Graph title and
+/// description, an inline SVG favicon, then the stylesheet. The favicon's
+/// SVG namespace is percent-encoded so the page never names an external
+/// `http(s)://` URL.
+fn head_html(title: &str, description: &str, css: &str) -> String {
+    let icon = "data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Ctext x='16' y='23' font-size='20' font-weight='700' text-anchor='middle' fill='%2356B4E9'%3E%24%3C/text%3E%3C/svg%3E";
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><meta name=\"description\" content=\"{}\"><meta property=\"og:title\" content=\"{}\"><meta property=\"og:description\" content=\"{}\"><link rel=\"icon\" href=\"{}\"><style>{}</style></head><body><main>",
+        esc(title),
+        esc(description),
+        esc(title),
+        esc(description),
+        icon,
+        css
+    )
+}
+
+/// R69 F1: the title, one plain sentence and the updated time. The rules,
+/// fingerprints, cap basis and price list live on the results page.
+fn page_header(
+    title: &str,
+    lede: &str,
+    link_href: &str,
+    link_label: &str,
+    updated: &str,
+) -> String {
+    format!(
+        "<header class=\"page-head\"><div class=\"head-main\"><h1>{title}</h1><p class=\"lede\">{lede}</p></div><div class=\"head-side\"><a class=\"button\" href=\"{link_href}\">{link_label}</a><div class=\"mut updated\">Updated {updated}</div></div></header>"
+    )
+}
+
+/// R69 F1: the footer both pages share.
+fn footer_html(updated: &str) -> String {
+    format!(
+        "<footer class=\"page-foot\"><a href=\"https://github.com/lubod/subdollarbench\">GitHub</a><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">Methodology</a><span>Rules {}</span><span>Updated {}</span></footer>",
+        esc(crate::report::rules::RULES_VERSION),
+        esc(updated)
+    )
+}
+
+/// R69 F2: the rank is large, the share is a small badge, and the badge's
+/// title carries the full distribution.
+fn rank_badge(g: &ModelGroup, stability: Option<&RankStability>) -> String {
+    if !g.current {
+        return "<div class=\"rank\">—</div>".to_string();
+    }
+    match stability {
+        Some(s) => {
+            let distribution: Vec<String> = s
+                .counts
+                .iter()
+                .enumerate()
+                .map(|(r, n)| format!("#{} {:.0}%", r + 1, *n as f64 / s.total as f64 * 100.0))
+                .collect();
+            format!(
+                "<div class=\"rank\">#{}{}</div><span class=\"share\" title=\"{}\">{:.0}%</span>",
+                s.most_likely + 1,
+                if s.tie_with_above { "=" } else { "" },
+                esc(&distribution.join(" · ")),
+                s.share * 100.0
+            )
+        }
+        None => format!("<div class=\"rank\">#{}</div>", g.rank_label()),
+    }
+}
+
+/// R69 F2: the points hero bar: every career a dot, the best-worst range
+/// shaded, the median marked, on the fixed 0-76 scale.
+fn points_bar(cells: &[CareerCell], g: &ModelGroup, colour: &str) -> String {
+    let w = 220.0;
+    let h = 26.0;
+    let pad = 8.0;
+    let x = |points: f64| pad + (points / CAREER_MAX_POINTS).clamp(0.0, 1.0) * (w - 2.0 * pad);
+    let values: Vec<String> = g
+        .careers
+        .iter()
+        .map(|i| fmt_pts1(cells[*i].points))
+        .collect();
+    let mut s = format!(
+        "<svg class=\"points-bar\" data-metric=\"points\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\" role=\"img\">"
+    );
+    s.push_str(&format!(
+        "<title>points: {} · median {}</title>",
+        esc(&values.join(", ")),
+        esc(&fmt_pts1(cells[g.median].points))
+    ));
+    s.push_str(&format!(
+        "<line class=\"track\" x1=\"{pad:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"/>",
+        h / 2.0,
+        w - pad,
+        h / 2.0
+    ));
+    let lo = cells[g.worst].points.min(cells[g.best].points);
+    let hi = cells[g.best].points.max(cells[g.worst].points);
+    s.push_str(&format!(
+        "<rect class=\"range\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"10\" rx=\"5\" fill=\"{colour}\"/>",
+        x(lo),
+        h / 2.0 - 5.0,
+        (x(hi) - x(lo)).max(2.0)
+    ));
+    for i in &g.careers {
+        let c = &cells[*i];
+        s.push_str(&format!(
+            "<circle class=\"dot\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.6\" fill=\"{colour}\"><title>{} · {} pts</title></circle>",
+            x(c.points),
+            h / 2.0,
+            esc(short_model(&c.model)),
+            fmt_pts1(c.points)
+        ));
+    }
+    let cx = x(cells[g.median].points);
+    s.push_str(&format!(
+        "<polygon class=\"med\" points=\"{cx:.1},{:.1} {:.1},{:.1} {cx:.1},{:.1} {:.1},{:.1}\"/>",
+        h / 2.0 - 4.5,
+        cx + 5.0,
+        h / 2.0,
+        h / 2.0 + 4.5,
+        cx - 5.0,
+        h / 2.0
+    ));
+    s.push_str("</svg>");
+    s
+}
+
+/// R69 F2: a compact perf badge; the colour says above or below 1.0x and
+/// the tooltip keeps every workload's numbers.
+fn perf_badge(c: &CareerCell) -> String {
+    let Some(perf) = &c.perf else {
+        return "<span class=\"badge\">—</span>".to_string();
+    };
+    let title = esc(&perf_tooltip(perf));
+    match perf.score {
+        Some(score) => {
+            let class = if score >= 1.0 {
+                "badge good"
+            } else {
+                "badge warn"
+            };
+            format!("<span class=\"{class}\" title=\"{title}\">{score:.2}×</span>")
+        }
+        None => format!("<span class=\"badge\" title=\"{title}\">—</span>"),
+    }
+}
+
+/// R69 F2: the secondary numbers, one muted line under the model name.
+/// Their dot strips stay in the expanded careers.
+fn secondary_line(c: &CareerCell) -> String {
+    format!(
+        "<div class=\"mut secondary\"><span class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">highest {}</span><span class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\"> · kept {} green</span><span class=\"col-ppd\"> · {} pts/$</span><span class=\"col-duration\"> · {}</span><span class=\"col-turns\"> · {} turns</span><span class=\"col-tokens\"> · {}</span><span class=\"col-state\"> · {}</span></div>",
+        reached_of(c),
+        c.regression_free,
+        ppd_of(c),
+        duration_cell(c),
+        turns_cell(c),
+        token_cell(c),
+        state_of(c)
+    )
+}
+
+/// R69 F2: the four summary cards answer who wins, what it costs and what
+/// is cheapest per point.
+fn summary_cards(
+    cells: &[CareerCell],
+    groups: &[&ModelGroup],
+    ranked: &[&CareerCell],
+    colours: &HashMap<String, &'static str>,
+) -> String {
+    let top = groups.iter().max_by(|a, b| {
+        cells[a.median]
+            .points
+            .partial_cmp(&cells[b.median].points)
+            .unwrap_or(Ordering::Equal)
+    });
+    let best_ppd = groups
+        .iter()
+        .filter_map(|g| cells[g.median].points_per_dollar().map(|v| (*g, v)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    let cheapest = ranked
+        .iter()
+        .min_by(|a, b| a.cost.partial_cmp(&b.cost).unwrap_or(Ordering::Equal));
+    let spend: f64 = ranked.iter().map(|c| c.cost).sum();
+    let top_card = match top {
+        Some(g) => format!(
+            "<div class=\"card\" data-card=\"top-model\"><div class=\"k\">Top model</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">{} / {} median</div></div>",
+            swatch(&g.model, colours),
+            esc(&g.model),
+            esc(short_model(&g.model)),
+            fmt_pts1(cells[g.median].points),
+            cells[g.median].max_points as u32
+        ),
+        None => "<div class=\"card\" data-card=\"top-model\"><div class=\"k\">Top model</div><div class=\"v\">—</div><div class=\"s\">no ranked career yet</div></div>".to_string(),
+    };
+    let ppd_card = match best_ppd {
+        Some((g, value)) => format!(
+            "<div class=\"card\" data-card=\"best-ppd\"><div class=\"k\">Best points per dollar</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">{value:.1} pts/$</div></div>",
+            swatch(&g.model, colours),
+            esc(&g.model),
+            esc(short_model(&g.model))
+        ),
+        None => "<div class=\"card\" data-card=\"best-ppd\"><div class=\"k\">Best points per dollar</div><div class=\"v\">—</div><div class=\"s\">no priced career yet</div></div>".to_string(),
+    };
+    let cheap_card = match cheapest {
+        Some(c) => format!(
+            "<div class=\"card\" data-card=\"cheapest-career\"><div class=\"k\">Cheapest career</div><div class=\"v\">{}<b title=\"{}\">{}</b></div><div class=\"s\">${:.2}</div></div>",
+            swatch(&c.model, colours),
+            esc(&c.model),
+            esc(short_model(&c.model)),
+            c.cost
+        ),
+        None => "<div class=\"card\" data-card=\"cheapest-career\"><div class=\"k\">Cheapest career</div><div class=\"v\">—</div><div class=\"s\">no ranked career yet</div></div>".to_string(),
+    };
+    let careers = format!(
+        "<div class=\"card\" data-card=\"careers\"><div class=\"k\">Careers</div><div class=\"v\">{} across {} {}</div><div class=\"s\">${spend:.2} spent</div></div>",
+        ranked.len(),
+        groups.len(),
+        if groups.len() == 1 { "model" } else { "models" }
+    );
+    format!("<div class=\"cards\">{top_card}{ppd_card}{cheap_card}{careers}</div>")
+}
+
+/// R69 F1/F3: a model name with its shared colour square, for a table cell.
+fn model_cell(model: &str, colours: &HashMap<String, &'static str>) -> String {
+    format!(
+        "<td title=\"{}\">{}<span class=\"mname\">{}</span></td>",
+        esc(model),
+        swatch(model, colours),
+        esc(short_model(model))
+    )
+}
+
+/// R69 F3: the sticky section nav; every target id exists below.
+fn section_nav() -> &'static str {
+    "<nav class=\"section-nav\" aria-label=\"Sections\"><a href=\"#measured\">What it measured</a><a href=\"#points\">Points vs $</a><a href=\"#survival\">Survival</a><a href=\"#tickets\">Per-ticket</a><a href=\"#head-to-head\">Head-to-head</a><a href=\"#variance\">Variance</a><a href=\"#ranks\">Ranks</a></nav>"
+}
+
 fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
@@ -1179,11 +1414,13 @@ fn model_row(
     labels: &HashMap<String, String>,
     stability: Option<&RankStability>,
     scales: &DotScales,
+    colours: &HashMap<String, &'static str>,
     html: &mut String,
 ) {
     let med = &cells[g.median];
     let best = &cells[g.best];
     let worst = &cells[g.worst];
+    let colour = colours.get(&g.model).copied().unwrap_or(palette(0));
     // R64 F4: the model row no longer repeats the median career's line, so
     // every career (even a single one) lives in the expanded list with its
     // ladder strip. R64 F6 adds the ticket-agreement strip there.
@@ -1201,15 +1438,6 @@ fn model_row(
     } else {
         "careers"
     };
-    let agreement = if g.careers.len() > 1 {
-        ticket_agreement(cells, g)
-    } else {
-        String::new()
-    };
-    let more = format!(
-        "<details class=\"more\"><summary>×{} {word} ▸</summary>{agreement}<table class=\"career-table\"><tbody>{inner}</tbody></table></details>",
-        g.careers.len()
-    );
     let points: Vec<Option<f64>> = g.careers.iter().map(|i| Some(cells[*i].points)).collect();
     let perfs: Vec<Option<f64>> = g
         .careers
@@ -1241,75 +1469,85 @@ fn model_row(
         })
         .collect();
     let token_med = med.tokens.map(|t| t.completion as f64).filter(|v| *v > 0.0);
-    let points_cell = strip_cell(
-        &points,
-        Some(med.points),
-        0.0,
-        CAREER_MAX_POINTS,
-        false,
-        "points",
-        fmt_pts1,
+    // R69 F2: the points bar is the hero; the other metrics keep their dot
+    // strips in the expanded view.
+    let bar = points_bar(cells, g, colour);
+    let strips = format!(
+        "<div class=\"more-strips\"><div class=\"strip-metric\"><span class=\"mut\">points</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">perf</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">$</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">duration</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">turns</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">tokens out</span>{}</div></div>",
+        strip_cell(
+            &points,
+            Some(med.points),
+            0.0,
+            CAREER_MAX_POINTS,
+            false,
+            "points",
+            fmt_pts1
+        ),
+        strip_cell(&perfs, perf_med, 0.1, 10.0, true, "perf", fmt_perf),
+        strip_cell(
+            &costs,
+            Some(med.cost),
+            0.0,
+            CAREER_CAP_USD,
+            false,
+            "$",
+            fmt_dollars
+        ),
+        strip_cell(
+            &walls,
+            wall_med,
+            0.0,
+            scales.wall,
+            false,
+            "duration",
+            fmt_duration_value
+        ),
+        strip_cell(
+            &turn_vals,
+            turn_med,
+            0.0,
+            scales.turns,
+            false,
+            "turns",
+            fmt_turns_value
+        ),
+        strip_cell(
+            &token_vals,
+            token_med,
+            0.0,
+            scales.tokens,
+            false,
+            "tokens out",
+            fmt_token_value
+        )
     );
-    let perf_cell = strip_cell(&perfs, perf_med, 0.1, 10.0, true, "perf", fmt_perf);
-    let spend_cell = strip_cell(
-        &costs,
-        Some(med.cost),
-        0.0,
-        CAREER_CAP_USD,
-        false,
-        "$",
-        fmt_dollars,
+    let more = format!(
+        "<details class=\"more\"><summary>×{} {word} ▸</summary>{strips}<div class=\"table-scroll\"><table class=\"career-table\"><tbody>{inner}</tbody></table></div></details>",
+        g.careers.len()
     );
-    let duration = strip_cell(
-        &walls,
-        wall_med,
-        0.0,
-        scales.wall,
-        false,
-        "duration",
-        fmt_duration_value,
-    );
-    let turns = strip_cell(
-        &turn_vals,
-        turn_med,
-        0.0,
-        scales.turns,
-        false,
-        "turns",
-        fmt_turns_value,
-    );
-    let tokens = strip_cell(
-        &token_vals,
-        token_med,
-        0.0,
-        scales.tokens,
-        false,
-        "tokens out",
-        fmt_token_value,
-    );
+    let agreement = ticket_agreement(cells, g);
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num rank\">{}</td><td class=\"col-model\"><b title=\"{}\">{}</b>{}<div class=\"mut\">{}{} · {} ({}-{}) · {} {}</div>{}</td><td class=\"col-highest\" title=\"the median career's\">{}</td><td class=\"num col-green\" title=\"the median career's\">{}</td><td class=\"num\">{points_cell}</td><td class=\"num\">{perf_cell}</td><td class=\"num\">{spend_cell}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{duration}</td><td class=\"num col-turns\">{turns}</td><td class=\"col-tokens\">{tokens}</td><td class=\"col-state\">{}</td></tr>",
-        rank_label(g, stability),
+        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div>{more}</td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{agreement}</td></tr>",
+        rank_badge(g, stability),
+        swatch(&g.model, colours),
         esc(&g.model),
         model_name_html(&g.model),
         mark_badge(med),
-        esc(&g.harness),
         effort_note(&g.effort),
-        fmt_pts1(med.points),
+        secondary_line(med),
         fmt_pts(worst.points),
         fmt_pts(best.points),
         g.careers.len(),
-        word,
-        more,
-        reached_of(med),
-        med.regression_free,
-        ppd_of(med),
-        state_of(med),
+        fmt_pts1(med.points),
+        med.max_points as u32,
+        perf_badge(med),
+        med.cost
     ));
 }
 
 fn render_board(cells: &[CareerCell]) -> String {
     let groups = model_groups(cells);
+    let colours = model_colours(cells);
     // R64 F1: the header counts only careers that rank: finished, current
     // rules, never a $0 rehearsal or a smoke cell. An older rule set is
     // incomparable and counts nowhere.
@@ -1317,9 +1555,6 @@ fn render_board(cells: &[CareerCell]) -> String {
         .iter()
         .filter(|c| c.finished && c.key.current_rules && !c.rehearsal && !c.smoke)
         .collect();
-    let ranked_models = groups.iter().filter(|g| g.current).count();
-    let best_points = ranked.iter().map(|c| c.points).fold(0.0f64, f64::max);
-    let spend: f64 = ranked.iter().map(|c| c.cost).sum();
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     // Portal polish (operator, 2026-11-06: "remove old rule set results"):
     // the board shows the current rules only. A $0 rehearsal or a smoke
@@ -1352,46 +1587,23 @@ fn render_board(cells: &[CareerCell]) -> String {
     let mut rows = String::new();
     for (i, g) in current_groups.iter().enumerate() {
         let stab = stability.as_ref().map(|s| &s[i]);
-        model_row(cells, g, &labels, stab, &scales, &mut rows);
-    }
-    if !unfinished_current.is_empty() {
-        rows.push_str(
-            "<tr class=\"divider\"><td colspan=\"12\">unfinished careers (not ranked)</td></tr>",
-        );
-        for c in unfinished_current {
-            let name = labels
-                .get(&c.campaign_id)
-                .map(String::as_str)
-                .unwrap_or(&c.campaign_id);
-            rows.push_str(&career_row(
-                c,
-                name,
-                Some(&unfinished_label(c)),
-                "unfinished",
-            ));
-        }
+        model_row(cells, g, &labels, stab, &scales, &colours, &mut rows);
     }
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
-    let mut h = String::new();
-    h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — sdb-sql campaign careers</title><style>");
-    h.push_str(include_str!("portal_board.css"));
-    h.push_str("</style></head><body><main>");
-    h.push_str("<header><div><h1>💰 SubDollarBench — sdb-sql campaign careers</h1><div class=\"sub\">One ticket ladder, one task: a differential SQL database checked statement by statement against SQLite. A model ranks by its median career; careers rank by difficulty-weighted points, then the perf score on a tie, then points per dollar.</div></div><div class=\"right\"><a href=\"results.html\">📈 Results</a>");
-    h.push_str(&format!(
-        "<div class=\"mut\">Updated {}</div></div></header>",
-        esc(&now)
-    ));
-    h.push_str(&format!(
-        "<div class=\"sub\">Rules {} · SQLite {} · cap policy: at list price (model_prices.json) for runs from .39; each career records its own.</div><div class=\"sub\">A career is 4 phases, 21 tickets, at most $0.99 per phase.</div>",
-        esc(crate::report::rules::RULES_VERSION),
-        esc(crate::report::rules::sqlite_version())
+    let mut h = head_html(
+        "SubDollarBench — sdb-sql campaign careers",
+        "Budget LLMs build a SQL database, ticket by ticket, for at most $0.99 per phase. Graded against SQLite.",
+        include_str!("portal_board.css"),
+    );
+    h.push_str(&page_header(
+        "💰 SubDollarBench <span class=\"page-sub\">sdb-sql campaign careers</span>",
+        "Budget LLMs build a SQL database, ticket by ticket, for at most $0.99 per phase. Graded against SQLite.",
+        "results.html",
+        "📈 Results",
+        &now,
     ));
     // R64 F3 (M3): a grid with a career still running says so.
-    let grid_total = ranked.len()
-        + cells
-            .iter()
-            .filter(|c| !c.finished && c.key.current_rules && !c.rehearsal && !c.smoke)
-            .count();
+    let grid_total = ranked.len() + unfinished_current.len();
     if ranked.len() < grid_total {
         h.push_str(&format!(
             "<div class=\"banner\">Grid in progress: {} of {} careers finished; ranks are provisional.</div>",
@@ -1399,23 +1611,35 @@ fn render_board(cells: &[CareerCell]) -> String {
             grid_total
         ));
     }
-    h.push_str(&format!(
-        "<div class=\"cards\"><div class=\"card\"><div class=\"k\">Careers</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Models</div><div class=\"v\">{ranked_models}</div></div><div class=\"card\"><div class=\"k\">Best points</div><div class=\"v\">{}</div></div><div class=\"card\"><div class=\"k\">Spend</div><div class=\"v\">${spend:.2}</div></div></div>",
-        ranked.len(),
-        fmt_pts1(best_points)
-    ));
+    h.push_str(&summary_cards(cells, &current_groups, &ranked, &colours));
     if !current_groups.is_empty() && stability.is_none() {
         h.push_str("<div class=\"mut\">Rank stability: too many combinations to enumerate; ranks follow the board order.</div>");
     }
-    h.push_str("<div class=\"wrap\"><table class=\"board-table\"><thead><tr><th>#</th><th class=\"col-model\">Model / career</th><th class=\"col-highest\" title=\"the highest ladder ticket whose checks passed\">Highest ticket</th><th class=\"col-green\" title=\"tickets that passed with no regression in their acceptance suite\">Tickets kept green</th><th>Points</th><th>Perf</th><th>Spend</th><th class=\"col-ppd\">Pts / $</th><th class=\"col-duration\" title=\"wall time summed over the career's phases; hover for the agent's share\">Duration</th><th class=\"col-turns\" title=\"turns summed over the career's tickets\">Turns</th><th class=\"col-tokens\" title=\"completion tokens from every ticket manifest; hover for prompt, cached, total and the cache share\">Tokens out</th><th class=\"col-state\">State</th></tr></thead><tbody>");
+    h.push_str("<div class=\"wrap\"><table class=\"board-table\"><thead><tr><th class=\"col-rank\">#</th><th class=\"col-model\">Model</th><th class=\"num col-points\">Points <span class=\"mut\">(of 76)</span></th><th class=\"num col-perf\">Perf</th><th class=\"num col-spend\">Spend</th><th class=\"col-agree\">Tickets agreed</th></tr></thead><tbody>");
     if rows.is_empty() {
-        h.push_str("<tr><td colspan=\"12\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
+        h.push_str("<tr><td colspan=\"6\" class=\"mut\">No sdb-sql careers yet (run one with <code>scripts/sql-cell.sh &lt;model&gt;</code>).</td></tr>");
     } else {
         h.push_str(&rows);
     }
     h.push_str("</tbody></table>");
     h.push_str(legend_html());
     h.push_str("</div>");
+    if !unfinished_current.is_empty() {
+        h.push_str("<div class=\"unfinished\"><div class=\"divider\">unfinished careers (not ranked)</div><div class=\"wrap\"><table class=\"career-table\"><tbody>");
+        for c in &unfinished_current {
+            let name = labels
+                .get(&c.campaign_id)
+                .map(String::as_str)
+                .unwrap_or(&c.campaign_id);
+            h.push_str(&career_row(
+                c,
+                name,
+                Some(&unfinished_label(c)),
+                "unfinished",
+            ));
+        }
+        h.push_str("</tbody></table></div></div>");
+    }
     if !marked.is_empty() {
         let notes: Vec<String> = marked
             .iter()
@@ -1437,7 +1661,8 @@ fn render_board(cells: &[CareerCell]) -> String {
             esc(&notes.join("; "))
         ));
     }
-    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf cell for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1 (70%)</code> means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Only the current rule set is shown; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
+    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Only the current rule set is shown; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
+    h.push_str(&footer_html(&now));
     h.push_str("</main></body></html>");
     h
 }
@@ -1567,24 +1792,6 @@ fn rank_stability(cells: &[CareerCell], groups: &[ModelGroup]) -> Option<Vec<Ran
         out[i].tie_with_above = same && both;
     }
     Some(out)
-}
-
-/// R64 F6: the rank cell. With exact stability it reads `#1 (61%)`, with
-/// `=` when D1 shows a tie with the row above; a grid too large to
-/// enumerate keeps the board order's label.
-fn rank_label(g: &ModelGroup, stability: Option<&RankStability>) -> String {
-    if !g.current {
-        return "—".to_string();
-    }
-    match stability {
-        Some(s) => format!(
-            "#{}{} ({:.0}%)",
-            s.most_likely + 1,
-            if s.tie_with_above { "=" } else { "" },
-            s.share * 100.0
-        ),
-        None => g.rank_label(),
-    }
 }
 
 /// R64 F6: one dot per career and a diamond at the median, on a fixed
@@ -1818,12 +2025,39 @@ fn variance_rows(
     out
 }
 
+/// R69 F1: the model palette, assigned in board order and shared by the
+/// board, both charts, their legends and every results table. Okabe-Ito's
+/// eight colours, with black swapped for a light grey so every mark stays
+/// visible on the dark background (all eight clear 3:1 against `--bg` and
+/// `--card`; see `r69_f4_contrast`).
 fn palette(i: usize) -> &'static str {
-    const COLORS: [&str; 10] = [
-        "#58a6ff", "#3fb950", "#d29922", "#f85149", "#bc8cff", "#39c5cf", "#ff7b72", "#a5d6ff",
-        "#7ee787", "#ffa657",
+    const COLORS: [&str; 8] = [
+        "#56B4E9", "#E69F00", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#BBBBBB",
     ];
     COLORS[i % COLORS.len()]
+}
+
+/// R69 F1: one colour per model, assigned in board order (the first group
+/// that names the model). Both pages and every chart read this map, so a
+/// model never changes colour between views.
+fn model_colours(cells: &[CareerCell]) -> HashMap<String, &'static str> {
+    let mut order: Vec<String> = Vec::new();
+    for g in model_groups(cells) {
+        if !order.iter().any(|m| m == &g.model) {
+            order.push(g.model.clone());
+        }
+    }
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| (m, palette(i)))
+        .collect()
+}
+
+/// R69 F1: a model's colour square, used beside every name on both pages.
+fn swatch(model: &str, colours: &HashMap<String, &'static str>) -> String {
+    let colour = colours.get(model).copied().unwrap_or(palette(0));
+    format!("<span class=\"swatch\" style=\"background:{colour}\"></span>")
 }
 
 /// The non-dominated career ids, for tests and for the results page.
@@ -1860,14 +2094,14 @@ fn pareto<'a>(cars: &'a [&'a CareerCell]) -> Vec<&'a CareerCell> {
     out
 }
 
-/// R65 F6: one legend for both charts: a swatch in the series colour and
-/// the short model name (the full id stays in the title).
-fn chart_legend(models: &[String]) -> String {
+/// R65 F6 / R69 F3: one legend above each chart: a swatch in the model's
+/// shared colour and the short model name (the full id stays in the title).
+fn chart_legend(models: &[String], colours: &HashMap<String, &'static str>) -> String {
     let mut s = String::from("<div class=\"legend chart-legend\">");
-    for (i, m) in models.iter().enumerate() {
+    for m in models {
+        let colour = colours.get(m).copied().unwrap_or(palette(0));
         s.push_str(&format!(
-            "<span class=\"key\"><span class=\"dot\" style=\"background:{}\"></span><span title=\"{}\">{}</span></span>",
-            palette(i),
+            "<span class=\"key\"><span class=\"dot\" style=\"background:{colour}\"></span><span title=\"{}\">{}</span></span>",
             esc(m),
             esc(short_model(m))
         ));
@@ -1876,13 +2110,15 @@ fn chart_legend(models: &[String]) -> String {
     s
 }
 
-fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
+/// R69 F3: the scatter has axis titles, gridlines at round values, the
+/// shared model palette and a 760x560 viewBox (560 px tall on desktop).
+fn svg_scatter(cars: &[&CareerCell], colours: &HashMap<String, &'static str>) -> String {
     let w = 760.0;
-    let h = 340.0;
-    let l = 48.0;
-    let r = 16.0;
-    let t = 16.0;
-    let b = 40.0;
+    let h = 560.0;
+    let l = 74.0;
+    let r = 24.0;
+    let t = 24.0;
+    let b = 82.0;
     let pw = w - l - r;
     let ph = h - t - b;
     let x = |cost: f64| l + (cost / CAREER_CAP_USD).clamp(0.0, 1.0) * pw;
@@ -1890,33 +2126,64 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     let mut s = format!(
         "<svg class=\"chart\" viewBox=\"0 0 {w} {h}\" role=\"img\" aria-label=\"points against dollars\">"
     );
-    s.push_str("<rect x=\"0\" y=\"0\" width=\"760\" height=\"340\" fill=\"#0d1117\"/>");
     s.push_str(&format!(
-        "<line x1=\"{l}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#30363d\"/><line x1=\"{l}\" y1=\"{t}\" x2=\"{l}\" y2=\"{}\" stroke=\"#30363d\"/>",
+        "<rect class=\"chart-bg\" x=\"0\" y=\"0\" width=\"{w}\" height=\"{h}\"/>"
+    ));
+    // Horizontal gridlines at 0, 19, 38, 57 and 76 points.
+    for (frac, label) in [
+        (0.0, "0"),
+        (0.25, "19"),
+        (0.5, "38"),
+        (0.75, "57"),
+        (1.0, "76"),
+    ] {
+        let yy = t + (1.0 - frac) * ph;
+        s.push_str(&format!(
+            "<line class=\"grid\" x1=\"{l}\" y1=\"{yy:.1}\" x2=\"{:.1}\" y2=\"{yy:.1}\"/><text class=\"axis\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{label}</text>",
+            l + pw,
+            l - 10.0,
+            yy + 4.0
+        ));
+    }
+    // Vertical gridlines every $0.99 up to the $3.96 career cap.
+    for (i, label) in ["$0", "$0.99", "$1.98", "$2.97", "$3.96"]
+        .iter()
+        .enumerate()
+    {
+        let frac = i as f64 / 4.0;
+        let xx = l + frac * pw;
+        let anchor = if i == 0 {
+            "start"
+        } else if i == 4 {
+            "end"
+        } else {
+            "middle"
+        };
+        s.push_str(&format!(
+            "<line class=\"grid\" x1=\"{xx:.1}\" y1=\"{t}\" x2=\"{xx:.1}\" y2=\"{:.1}\"/><text class=\"axis\" x=\"{xx:.1}\" y=\"{:.1}\" text-anchor=\"{anchor}\">{label}</text>",
+            t + ph,
+            t + ph + 18.0
+        ));
+    }
+    s.push_str(&format!(
+        "<line class=\"axis-line\" x1=\"{l}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"/><line class=\"axis-line\" x1=\"{l}\" y1=\"{t}\" x2=\"{l}\" y2=\"{}\"/>",
         t + ph,
         l + pw,
         t + ph,
         t + ph
     ));
-    for (frac, label) in [(0.0, "0"), (0.5, "1.98"), (1.0, "3.96")] {
-        let xx = l + frac * pw;
-        let anchor = if frac == 1.0 {
-            " text-anchor=\"end\""
-        } else {
-            ""
-        };
-        s.push_str(&format!(
-            "<text x=\"{xx:.1}\" y=\"{:.1}\" fill=\"#8b949e\" font-size=\"10\"{anchor}>${label}</text>",
-            t + ph + 15.0
-        ));
-    }
-    for (frac, label) in [(0.0, "0"), (0.5, "38"), (1.0, "76")] {
-        let yy = t + (1.0 - frac) * ph;
-        s.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{yy:.1}\" fill=\"#8b949e\" font-size=\"10\">{label}</text>",
-            l - 28.0
-        ));
-    }
+    s.push_str(&format!(
+        "<text class=\"axis-title\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">$ per career</text>",
+        l + pw / 2.0,
+        h - 18.0
+    ));
+    s.push_str(&format!(
+        "<text class=\"axis-title\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" transform=\"rotate(-90 {:.1} {:.1})\">points (of 76)</text>",
+        20.0,
+        t + ph / 2.0,
+        20.0,
+        t + ph / 2.0
+    ));
     let frontier = pareto(cars);
     let line: String = frontier
         .iter()
@@ -1925,13 +2192,13 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
         .join(" ");
     if !line.is_empty() {
         s.push_str(&format!(
-            "<polyline class=\"pareto-frontier\" points=\"{line}\" fill=\"none\" stroke=\"#58a6ff\" stroke-width=\"2\" opacity=\"0.8\"/>"
+            "<polyline class=\"pareto-frontier\" points=\"{line}\" fill=\"none\"/>"
         ));
     }
     for c in cars {
-        let color = palette(models.iter().position(|m| m == &c.model).unwrap_or(0));
+        let colour = colours.get(&c.model).copied().unwrap_or(palette(0));
         s.push_str(&format!(
-            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{color}\"><title>{}: {:.1} pts · ${:.2}</title></circle>",
+            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{colour}\"><title>{}: {:.1} pts · ${:.2}</title></circle>",
             esc(&c.model),
             c.points,
             c.cost,
@@ -1946,31 +2213,73 @@ fn svg_scatter(cars: &[&CareerCell], models: &[String]) -> String {
     s
 }
 
-fn svg_survival(series: &[(String, Vec<f64>)]) -> String {
+/// R69 F3: the survival chart has axis titles, gridlines every 25% and
+/// every five tickets, the shared palette and a 760x560 viewBox.
+fn svg_survival(series: &[(String, Vec<f64>)], colours: &HashMap<String, &'static str>) -> String {
     let w = 760.0;
-    let h = 260.0;
-    let l = 42.0;
-    let t = 16.0;
-    let pw = w - l - 16.0;
-    let ph = h - t - 34.0;
+    let h = 560.0;
+    let l = 74.0;
+    let r = 24.0;
+    let t = 24.0;
+    let b = 82.0;
+    let pw = w - l - r;
+    let ph = h - t - b;
     let mut s = format!(
         "<svg class=\"chart\" viewBox=\"0 0 {w} {h}\" role=\"img\" aria-label=\"ticket survival\">"
     );
-    s.push_str("<rect x=\"0\" y=\"0\" width=\"760\" height=\"260\" fill=\"#0d1117\"/>");
     s.push_str(&format!(
-        "<line x1=\"{l}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#30363d\"/><line x1=\"{l}\" y1=\"{t}\" x2=\"{l}\" y2=\"{}\" stroke=\"#30363d\"/>",
+        "<rect class=\"chart-bg\" x=\"0\" y=\"0\" width=\"{w}\" height=\"{h}\"/>"
+    ));
+    for (frac, label) in [
+        (0.0, "0%"),
+        (0.25, "25%"),
+        (0.5, "50%"),
+        (0.75, "75%"),
+        (1.0, "100%"),
+    ] {
+        let yy = t + (1.0 - frac) * ph;
+        s.push_str(&format!(
+            "<line class=\"grid\" x1=\"{l}\" y1=\"{yy:.1}\" x2=\"{:.1}\" y2=\"{yy:.1}\"/><text class=\"axis\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{label}</text>",
+            l + pw,
+            l - 10.0,
+            yy + 4.0
+        ));
+    }
+    for i in 0..=4 {
+        let ticket = i * 5;
+        let xx = l + (ticket as f64 / 20.0) * pw;
+        let anchor = if i == 0 {
+            "start"
+        } else if i == 4 {
+            "end"
+        } else {
+            "middle"
+        };
+        s.push_str(&format!(
+            "<line class=\"grid\" x1=\"{xx:.1}\" y1=\"{t}\" x2=\"{xx:.1}\" y2=\"{:.1}\"/><text class=\"axis\" x=\"{xx:.1}\" y=\"{:.1}\" text-anchor=\"{anchor}\">{ticket}</text>",
+            t + ph,
+            t + ph + 18.0
+        ));
+    }
+    s.push_str(&format!(
+        "<line class=\"axis-line\" x1=\"{l}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"/><line class=\"axis-line\" x1=\"{l}\" y1=\"{t}\" x2=\"{l}\" y2=\"{}\"/>",
         t + ph,
         l + pw,
         t + ph,
         t + ph
     ));
-    for (frac, label) in [(0.0, "0"), (0.5, "50%"), (1.0, "100%")] {
-        let yy = t + (1.0 - frac) * ph;
-        s.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{yy:.1}\" fill=\"#8b949e\" font-size=\"10\">{label}</text>",
-            l - 34.0
-        ));
-    }
+    s.push_str(&format!(
+        "<text class=\"axis-title\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">ticket</text>",
+        l + pw / 2.0,
+        h - 18.0
+    ));
+    s.push_str(&format!(
+        "<text class=\"axis-title\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" transform=\"rotate(-90 {:.1} {:.1})\">P(highest passed ≥ i)</text>",
+        20.0,
+        t + ph / 2.0,
+        20.0,
+        t + ph / 2.0
+    ));
     for (mi, (model, vals)) in series.iter().enumerate() {
         let pts: String = vals
             .iter()
@@ -1996,10 +2305,11 @@ fn svg_survival(series: &[(String, Vec<f64>)]) -> String {
         } else {
             format!(" stroke-dasharray=\"{dash}\"")
         };
+        let colour = colours.get(model).copied().unwrap_or(palette(mi));
         s.push_str(&format!(
             "<polyline class=\"survival-line\" data-model=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"{dash_attr}><title>{} · P(highest passed ticket ≥ i)</title></polyline>",
             esc(model),
-            palette(mi),
+            colour,
             esc(short_model(model))
         ));
     }
@@ -2009,13 +2319,26 @@ fn svg_survival(series: &[(String, Vec<f64>)]) -> String {
 
 fn render_results(cells: &[CareerCell]) -> String {
     let labels = career_labels(cells);
+    let groups = model_groups(cells);
+    let colours = model_colours(cells);
+    let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let current: Vec<&CareerCell> = cells
         .iter()
         .filter(|c| c.finished && c.key.current_rules)
         .collect();
-    let mut models: Vec<String> = current.iter().map(|c| c.model.clone()).collect();
-    models.sort();
-    models.dedup();
+    // R69 F1: the charts and tables follow the board's model order, so a
+    // model keeps its colour and its place on both pages.
+    let mut models: Vec<String> = Vec::new();
+    for g in &current_groups {
+        if !models.iter().any(|m| m == &g.model) {
+            models.push(g.model.clone());
+        }
+    }
+    for c in &current {
+        if !models.iter().any(|m| m == &c.model) {
+            models.push(c.model.clone());
+        }
+    }
     let caps = current.len();
     let binary_fingerprint = crate::report::rules::fingerprint();
     let mut recorded: Vec<String> = current
@@ -2100,13 +2423,15 @@ fn render_results(cells: &[CareerCell]) -> String {
             let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
             if detail.is_empty() {
                 format!(
-                    "<span title=\"{}\">{}</span> — none",
+                    "{}<span title=\"{}\">{}</span> — none",
+                    swatch(m, &colours),
                     esc(m),
                     esc(short_model(m))
                 )
             } else {
                 format!(
-                    "<span title=\"{}\">{}</span> — {}",
+                    "{}<span title=\"{}\">{}</span> — {}",
+                    swatch(m, &colours),
                     esc(m),
                     esc(short_model(m)),
                     esc(detail)
@@ -2115,8 +2440,9 @@ fn render_results(cells: &[CareerCell]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ");
+    // R69 F1: the price list and the cap basis moved here from the board.
     let prices = format!(
-        "base rates per call (snapshot {}); overrides: {}",
+        "base rates per call from model_prices.json (snapshot {}); overrides: {}",
         esc(crate::cost::calculator::price_snapshot_as_of()),
         if overrides.is_empty() {
             "—"
@@ -2173,9 +2499,8 @@ fn render_results(cells: &[CareerCell]) -> String {
             None => format!("${list:.2} / —"),
         };
         metrics.push_str(&format!(
-            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
-            esc(model),
-            esc(short_model(model)),
+            "<tr>{}<td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+            model_cell(model, &colours),
             costs.first().copied().unwrap_or(0.0),
             median(&costs).unwrap_or(0.0),
             costs.last().copied().unwrap_or(0.0),
@@ -2185,9 +2510,8 @@ fn render_results(cells: &[CareerCell]) -> String {
         ));
     }
 
-    let scatter = svg_scatter(&current, &models);
-    let survival = svg_survival(&series);
-    let groups = model_groups(cells);
+    let scatter = svg_scatter(&current, &colours);
+    let survival = svg_survival(&series, &colours);
     let model_order: HashMap<&str, usize> = groups
         .iter()
         .enumerate()
@@ -2216,9 +2540,8 @@ fn render_results(cells: &[CareerCell]) -> String {
             .map(String::as_str)
             .unwrap_or(&c.campaign_id);
         scatter_rows.push_str(&format!(
-            "<tr id=\"{id}\" title=\"{id} · {fp}\"><td title=\"{}\">{}</td><td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.2}</td></tr>",
-            esc(&c.model),
-            esc(short_model(&c.model)),
+            "<tr id=\"{id}\" title=\"{id} · {fp}\">{}<td>{}</td><td class=\"num\">{:.1}</td><td class=\"num\">${:.2}</td></tr>",
+            model_cell(&c.model, &colours),
             esc(name),
             c.points,
             c.cost
@@ -2229,23 +2552,23 @@ fn render_results(cells: &[CareerCell]) -> String {
         let cells = (0..=20)
             .map(|i| format!("<td class=\"num\">{:.0}%</td>", vals[i] * 100.0))
             .collect::<String>();
-        survival_rows.push_str(&format!(
-            "<tr><td title=\"{}\">{}</td>{cells}</tr>",
-            esc(model),
-            esc(short_model(model))
-        ));
+        survival_rows.push_str(&format!("<tr>{}{cells}</tr>", model_cell(model, &colours)));
     }
-    let mut h = String::new();
-    h.push_str("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>SubDollarBench — results</title><style>");
-    h.push_str(include_str!("portal_board.css"));
-    h.push_str("</style></head><body><main>");
-    h.push_str("<header><div><h1>📈 SubDollarBench — results</h1><div class=\"sub\">The career grid: what was measured, how the models spread, and how far each got.</div></div><div class=\"right\"><a href=\"index.html\">← Board</a>");
-    h.push_str(&format!(
-        "<div class=\"mut\">Updated {}</div></div></header>",
-        esc(&chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string())
+    let mut h = head_html(
+        "SubDollarBench — results",
+        "What the sdb-sql career grid measured: points against dollars, survival by ticket, per-ticket pass share, head-to-head results and rank stability.",
+        include_str!("portal_board.css"),
+    );
+    h.push_str(&page_header(
+        "📈 SubDollarBench <span class=\"page-sub\">results</span>",
+        "Budget LLMs build a SQL database, ticket by ticket, for at most $0.99 per phase. Graded against SQLite.",
+        "index.html",
+        "← Board",
+        &chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
     ));
+    h.push_str(section_nav());
     h.push_str(&format!(
-        "<section class=\"methodology\"><h2>What it measured</h2><div class=\"wrap\"><table><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>$0.99 per phase × 4 phases = ${:.2}</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}</section>",
+        "<section id=\"measured\" class=\"methodology measured\"><h2>What it measured</h2><div class=\"wrap\"><table class=\"measured-table\"><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>cap policy: at list price for runs from .39; each career records its own; $0.99 per phase × 4 phases = ${:.2}; 21 tickets (0-20)</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}</section>",
         esc(rules),
         esc(crate::report::rules::sqlite_version()),
         esc(image),
@@ -2278,15 +2601,13 @@ fn render_results(cells: &[CareerCell]) -> String {
             notes.join("; ")
         ));
     }
+    let legend = chart_legend(&models, &colours);
     h.push_str(&format!(
-        "<section><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>"
+        "<section id=\"points\"><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>{legend}<div class=\"chart-wrap\">{scatter}</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>Career</th><th class=\"num\">Points</th><th class=\"num\">Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"
     ));
-    let legend_html = chart_legend(&models);
-    h.push_str(&format!("<div class=\"wrap\">{scatter}</div>{legend_html}"));
-    h.push_str(&format!("<div class=\"wrap\"><table><thead><tr><th>Model</th><th>Career</th><th>Points</th><th>Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"));
-    h.push_str("<section><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div><div class=\"wrap\">");
-    h.push_str(&survival);
-    h.push_str(&format!("</div>{legend_html}<div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"));
+    h.push_str(&format!(
+        "<section id=\"survival\"><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div>{legend}<div class=\"chart-wrap\">{survival}</div><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"
+    ));
     // R65 F6: the per-ticket pass share, shaded like the board's agreement.
     let mut ticket_rows = String::new();
     for model in &models {
@@ -2318,16 +2639,12 @@ fn render_results(cells: &[CareerCell]) -> String {
                 )
             })
             .collect::<String>();
-        ticket_rows.push_str(&format!(
-            "<tr><td title=\"{}\">{}</td>{cells}</tr>",
-            esc(model),
-            esc(short_model(model))
-        ));
+        ticket_rows.push_str(&format!("<tr>{}{cells}</tr>", model_cell(model, &colours)));
     }
-    h.push_str(&format!("<section><h3>Per-ticket pass share</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div></section>"));
-    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th><th>Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
+    h.push_str(&format!(
+        "<section id=\"tickets\"><h2>Per-ticket pass share</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div><h3>Cost and robustness</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th class=\"num\">$ / ticket (min / median / max)</th><th class=\"num\">Regression-free rate</th><th class=\"num\">Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"
+    ));
     let stability = rank_stability(cells, &groups);
-    let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let mut h2h_rows = String::new();
     for i in 0..models.len() {
         for j in (i + 1)..models.len() {
@@ -2344,18 +2661,16 @@ fn render_results(cells: &[CareerCell]) -> String {
             }
             let (aw, bw, ties) = head_to_head(&a, &b);
             h2h_rows.push_str(&format!(
-                "<tr><td title=\"{}\">{}</td><td title=\"{}\">{}</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
-                esc(&models[i]),
-                esc(short_model(&models[i])),
-                esc(&models[j]),
-                esc(short_model(&models[j])),
+                "<tr>{}{}<td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td><td class=\"num\">{:.0}%</td></tr>",
+                model_cell(&models[i], &colours),
+                model_cell(&models[j], &colours),
                 aw * 100.0,
                 bw * 100.0,
                 ties * 100.0
             ));
         }
     }
-    h.push_str("<section><h2>Head-to-head</h2><div class=\"mut\">The share of career pairs where model A's career outscores model B's, by points.</div><div class=\"wrap\"><table><thead><tr><th>Model A</th><th>Model B</th><th>A wins</th><th>B wins</th><th>Ties</th></tr></thead><tbody>");
+    h.push_str("<section id=\"head-to-head\"><h2>Head-to-head</h2><div class=\"mut\">The share of career pairs where model A's career outscores model B's, by points.</div><div class=\"wrap\"><table><thead><tr><th>Model A</th><th>Model B</th><th class=\"num\">A wins</th><th class=\"num\">B wins</th><th class=\"num\">Ties</th></tr></thead><tbody>");
     h.push_str(&h2h_rows);
     h.push_str("</tbody></table></div></section>");
     let vars = variance_rows(cells, &current_groups);
@@ -2371,23 +2686,25 @@ fn render_results(cells: &[CareerCell]) -> String {
                 .unwrap_or_else(|| "—".to_string())
         ));
     }
-    h.push_str("<section><h2>Variance check</h2><div class=\"mut\">The publishing bar: the spread between models must exceed the spread within one model's careers.</div><div class=\"wrap\"><table><thead><tr><th>Metric</th><th>Median within-model spread</th><th>Span of model medians</th><th>Between / within</th></tr></thead><tbody>");
+    h.push_str("<section id=\"variance\"><h2>Variance check</h2><div class=\"mut\">The publishing bar: the spread between models must exceed the spread within one model's careers.</div><div class=\"wrap\"><table><thead><tr><th>Metric</th><th class=\"num\">Median within-model spread</th><th class=\"num\">Span of model medians</th><th class=\"num\">Between / within</th></tr></thead><tbody>");
     h.push_str(&var_rows);
     h.push_str("</tbody></table></div></section>");
-    h.push_str("<section><h2>Model ranks</h2><div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th>Best / median / worst points</th></tr></thead><tbody>");
+    h.push_str("<section id=\"ranks\"><h2>Model ranks</h2><div class=\"wrap\"><table><thead><tr><th>#</th><th>Model</th><th class=\"num\">Best / median / worst points</th></tr></thead><tbody>");
     for (i, g) in current_groups.iter().enumerate() {
         let stab = stability.as_ref().map(|s| &s[i]);
         h.push_str(&format!(
-            "<tr><td>{}</td><td title=\"{}\">{}</td><td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
-            rank_label(g, stab),
-            esc(&g.model),
-            esc(short_model(&g.model)),
+            "<tr><td>{}</td>{}<td class=\"num\">{:.1} / {:.1} / {:.1}</td></tr>",
+            rank_badge(g, stab),
+            model_cell(&g.model, &colours),
             cells[g.best].points,
             cells[g.median].points,
             cells[g.worst].points
         ));
     }
     h.push_str("</tbody></table></div></section>");
+    h.push_str(&footer_html(
+        &chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+    ));
     h.push_str("</main></body></html>");
     h
 }
@@ -3058,11 +3375,15 @@ mod tests {
         career(&runs, "m3", "m", [3.0; 4], [0.01; 4]);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        // R64 F3: the row is median (worst-best) · careers, not a repeated
-        // best/median/worst line.
+        // R69 F2: the points are the hero (`median / 76`), with the
+        // best-worst range and career count under the bar.
         assert!(
-            html.contains("8.0 (4-12) · 3 careers"),
-            "the model row is the median with its range: {html}"
+            html.contains("class=\"hero\">8.0 / 76"),
+            "the model row leads with the median points: {html}"
+        );
+        assert!(
+            html.contains("4 - 12 · 3 careers"),
+            "the model row carries its range and career count: {html}"
         );
         assert!(
             !html.contains("best 12.0 · median 8.0 · worst 4.0"),
@@ -3428,7 +3749,7 @@ mod tests {
         // R64 F6/D1: exact rank stability replaces the N= groups. b holds
         // #2 in 8 of 9 combinations (c=13 with b=12 is the exception).
         assert!(
-            html.contains("<td class=\"num rank\">#2 (89%)</td>"),
+            html.contains("class=\"rank\">#2</div>") && html.contains(">89%</span>"),
             "the model row has no exact rank cell: {html}"
         );
         let _ = fs::remove_dir_all(&base);
@@ -3513,19 +3834,15 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         assert!(
-            html.contains("<div class=\"k\">Careers</div><div class=\"v\">2</div>"),
+            html.contains("data-card=\"careers\"") && html.contains("2 across 2 models"),
             "only the two ranked careers count: {html}"
         );
         assert!(
-            html.contains("<div class=\"k\">Models</div><div class=\"v\">2</div>"),
-            "the old and rehearsal models count nowhere: {html}"
+            html.contains("data-card=\"top-model\"") && html.contains("70.0 / 76 median"),
+            "the $0 rehearsal's 71 must not be the top model: {html}"
         );
         assert!(
-            html.contains("<div class=\"k\">Best points</div><div class=\"v\">70.0</div>"),
-            "the $0 rehearsal's 71 must not be the header best: {html}"
-        );
-        assert!(
-            html.contains("$0.80<"),
+            html.contains("$0.80 spent"),
             "spend is the ranked careers' $0.80: {html}"
         );
         assert!(
@@ -3553,8 +3870,8 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         assert!(
-            html.contains("65.0 (63-70) · 3 careers"),
-            "the model row is median · worst-best · careers: {html}"
+            html.contains("class=\"hero\">65.0 / 76") && html.contains("63 - 70 · 3 careers"),
+            "the model row is median / 76 with its worst-best range: {html}"
         );
         assert!(
             !html.contains("best 70.0 · median 65.0 · worst 63.0"),
@@ -3614,29 +3931,29 @@ mod tests {
                 && html.contains("results.html#campaign_c_p4"),
             "the campaign id lives in the tooltip and the link: {html}"
         );
-        // R66 F2: the fingerprint rows name the rules version too; the
-        // header's "Rules <version>" is the one place it is stated as a rule.
+        // R69 F1: the rules version moved to the footer; the header is a
+        // plain sentence and the updated time.
         assert_eq!(
             text.matches("Rules ").count(),
             1,
-            "the rules version shows once, in the header: {text}"
+            "the rules version shows once, in the footer: {text}"
         );
         assert!(
             text.contains(&format!("Rules {}", crate::report::rules::RULES_VERSION)),
-            "the header names the rules version: {text}"
+            "the footer names the rules version: {text}"
         );
         assert_eq!(
             text.matches("Updated").count(),
-            1,
-            "only the page's Updated line survives: {text}"
+            2,
+            "the header and the footer each carry Updated: {text}"
         );
         assert!(
             html.contains("70 / 76"),
             "the Points cell is `70 / 76`: {html}"
         );
         assert!(
-            html.contains(">Highest ticket</th>") && html.contains(">Tickets kept green</th>"),
-            "the columns are renamed: {html}"
+            text.contains("highest ticket 20") && text.contains("kept 21 green"),
+            "the secondary line carries the highest ticket and kept-green count: {text}"
         );
         assert!(
             !html.contains(">Reached</th>")
@@ -3646,7 +3963,9 @@ mod tests {
             "the retired columns are gone: {html}"
         );
         assert!(
-            text.contains("A career is 4 phases, 21 tickets, at most $0.99 per phase."),
+            text.contains(
+                "Budget LLMs build a SQL database, ticket by ticket, for at most $0.99 per phase. Graded against SQLite."
+            ),
             "the one-line definition is under the title: {text}"
         );
         let results = read(&out.join("results.html"));
@@ -3766,8 +4085,14 @@ mod tests {
         assert!((of("C").share - 1.0).abs() < 1e-9);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        assert!(html.contains("#1 (56%)"), "A's most likely rank: {html}");
-        assert!(html.contains("#3 (100%)"), "C's rank: {html}");
+        assert!(
+            html.contains("class=\"rank\">#1</div>") && html.contains(">56%</span>"),
+            "A's most likely rank and share: {html}"
+        );
+        assert!(
+            html.contains("class=\"rank\">#3</div>") && html.contains(">100%</span>"),
+            "C's rank and share: {html}"
+        );
         let _ = fs::remove_dir_all(&base);
 
         // Identical careers hold their rank in every combination.
@@ -3875,13 +4200,16 @@ mod tests {
         }
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("results.html"));
-        let h2h = &html[pos(&html, "Head-to-head")..];
+        let h2h = &html[pos(&html, "<section id=\"head-to-head\">")..];
         let at = pos(
             h2h,
-            "<td title=\"openrouter/deepseek/deepseek-v4.1-flash-1017\">deepseek/deepseek-v4.1-flash-1017</td><td title=\"openrouter/xiaomi/mimo-v2.6-flash\">xiaomi/mimo-v2.6-flash</td>",
+            "title=\"openrouter/deepseek/deepseek-v4.1-flash-1017\"",
         );
         let row = &h2h[at..at + h2h[at..].find("</tr>").unwrap()];
-        assert!(row.contains("mimo"), "deepseek vs mimo row: {row}");
+        assert!(
+            row.contains("title=\"openrouter/xiaomi/mimo-v2.6-flash\""),
+            "deepseek vs mimo row: {row}"
+        );
         assert!(
             row.contains("67%"),
             "deepseek beats mimo in 4 of 6 pairs: {row}"
@@ -4071,7 +4399,7 @@ mod tests {
             "ticket 15 passed: {html}"
         );
         let surv = &html[pos(&html, "Survival: P(highest")..];
-        let at = pos(surv, "<td title=\"m\">m</td>");
+        let at = pos(surv, "<td title=\"m\">");
         let row = &surv[at..at + surv[at..].find("</tr>").unwrap()];
         let cells: Vec<&str> = row.split("<td class=\"num\">").skip(1).collect();
         assert_eq!(cells.len(), 21, "one cell per ticket: {row}");
@@ -4120,9 +4448,10 @@ mod tests {
             );
         }
         assert!(
-            html.contains("<th class=\"col-highest\"")
-                && html.contains("<th class=\"col-duration\""),
-            "the headers carry the collapsed columns: {html}"
+            html.contains("<th class=\"num col-points\"")
+                && html.contains("<th class=\"num col-perf\"")
+                && html.contains("<th class=\"num col-spend\""),
+            "the headers keep rank, model, points, perf and spend: {html}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -4457,7 +4786,7 @@ mod tests {
         assert_eq!(perf.key.perf, Some(1.32));
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        assert!(html.contains("<th>Perf</th>"), "{html}");
+        assert!(html.contains(">Perf</th>"), "{html}");
         assert!(html.contains("1.32×"), "{html}");
         assert!(html.contains("W1: ref 1.000"), "{html}");
         assert!(html.contains("candidate 0.760"), "{html}");
@@ -4465,8 +4794,9 @@ mod tests {
             html.contains("0.10× · floored · not durable"),
             "the W4 floor and its recorded note: {html}"
         );
-        let plain = &html[pos(&html, "plain-model")..];
-        let row = &plain[..plain.find("</tr>").unwrap()];
+        let at = html.rfind("<b title=\"plain-model\">").unwrap();
+        let start = html[..at].rfind("<tr").unwrap();
+        let row = &html[start..start + html[start..].find("</tr>").unwrap()];
         assert!(row.contains(">—<"), "a career with no perf shows —: {row}");
         assert!(
             html.contains("Performance section") && html.contains("score decides"),
@@ -4505,6 +4835,422 @@ mod tests {
         // without error and is not on the board.
         assert!(!html.contains("old-model"), "{html}");
         assert!(!html.contains("older rule sets"), "{html}");
+        let _ = fs::remove_dir_all(&base);
+    }
+    // R69 F1: WCAG relative luminance and contrast, for the CSS palette
+    // test. The values are computed, not asserted as constants.
+    fn srgb(v: u8) -> f64 {
+        let c = v as f64 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn luminance(hex: &str) -> f64 {
+        let h = hex.trim().trim_start_matches('#');
+        assert_eq!(h.len(), 6, "a six-digit hex colour: {hex}");
+        let r = u8::from_str_radix(&h[0..2], 16).unwrap();
+        let g = u8::from_str_radix(&h[2..4], 16).unwrap();
+        let b = u8::from_str_radix(&h[4..6], 16).unwrap();
+        0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b)
+    }
+
+    fn contrast_ratio(a: &str, b: &str) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    fn css_token(css: &str, name: &str) -> String {
+        let needle = format!("--{name}:");
+        let at = css
+            .find(&needle)
+            .unwrap_or_else(|| panic!("the stylesheet has {needle}"));
+        let rest = &css[at + needle.len()..];
+        rest[..rest.find(';').unwrap()].trim().to_string()
+    }
+
+    /// R69 F1: one model has the same colour on the board row, both chart
+    /// legends and every results table.
+    #[test]
+    fn r69_f1_one_colour_per_model() {
+        let (base, runs, out) = fixture("r69colour");
+        for (prefix, model) in [
+            ("a1", "vendor/alpha"),
+            ("a2", "vendor/alpha"),
+            ("b1", "vendor/beta"),
+            ("b2", "vendor/beta"),
+            ("c1", "vendor/gamma"),
+        ] {
+            career(&runs, prefix, model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        let mut colours: HashMap<String, String> = HashMap::new();
+        for row in board.split("<tr class=\"model-row\">").skip(1) {
+            let row = &row[..row.find("</tr>").unwrap()];
+            let model = row
+                .split("<b title=\"")
+                .nth(1)
+                .expect("a model name")
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string();
+            let at = row.find("background:").expect("a swatch");
+            let colour = row[at + "background:".len()..]
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string();
+            colours.insert(model, colour);
+        }
+        assert_eq!(colours.len(), 3, "one colour per model: {colours:?}");
+        for (model, colour) in &colours {
+            // Both chart legends carry the model in the same colour.
+            assert!(
+                results.contains(&format!(
+                    "<span class=\"dot\" style=\"background:{colour}\"></span><span title=\"{model}\">"
+                )),
+                "{model} must keep {colour} in a chart legend: {results}"
+            );
+            // Every results table names the model beside the same colour.
+            assert!(
+                results.contains(&format!(
+                    "<td title=\"{model}\"><span class=\"swatch\" style=\"background:{colour}\"></span>"
+                )),
+                "{model} must keep {colour} in the results tables: {results}"
+            );
+        }
+        // Eight distinct colours, so the palette cannot silently collapse.
+        let mut distinct: Vec<&str> = (0..8).map(palette).collect();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 8, "eight distinct model colours");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F1: the board speaks plainly; the rules, cap basis and price list
+    /// live on the results page. Both pages carry the footer, the meta
+    /// description, the Open Graph tags and the inline favicon.
+    #[test]
+    fn r69_f1_header_plain() {
+        let (base, runs, out) = fixture("r69plain");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        let board_text = visible_text(&board);
+        let results_text = visible_text(&results);
+        assert!(
+            !board_text.contains("model_prices.json") && !board_text.contains("cap policy"),
+            "the board header speaks plainly: {board_text}"
+        );
+        assert!(
+            board_text.contains(
+                "Budget LLMs build a SQL database, ticket by ticket, for at most $0.99 per phase. Graded against SQLite."
+            ),
+            "the board leads with the plain sentence: {board_text}"
+        );
+        assert!(
+            results_text.contains("model_prices.json") && results_text.contains("cap policy"),
+            "the results page names the price list and the cap basis: {results_text}"
+        );
+        for (page, html) in [("board", &board), ("results", &results)] {
+            assert!(
+                html.contains("<meta name=\"description\" content=\""),
+                "{page} has a meta description"
+            );
+            assert!(
+                html.contains("<meta property=\"og:title\" content=\"")
+                    && html.contains("<meta property=\"og:description\" content=\""),
+                "{page} has the Open Graph tags"
+            );
+            assert!(
+                html.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"),
+                "{page} has the inline favicon"
+            );
+            assert!(
+                html.contains("<footer class=\"page-foot\">")
+                    && html.contains("https://github.com/lubod/subdollarbench")
+                    && html.contains("docs/PROPOSAL-sdb-sql.md")
+                    && html.contains(&format!("Rules {}", crate::report::rules::RULES_VERSION))
+                    && html.contains("Updated "),
+                "{page} has the footer"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F2: the four cards answer who wins, what costs least per point,
+    /// the cheapest career and how many careers/models the board holds.
+    #[test]
+    fn r69_f2_summary_cards() {
+        let (base, runs, out) = fixture("r69cards");
+        // The 15-career fixture: five models, three careers each.
+        for (prefix, points) in [("a1", 50.0), ("a2", 60.0), ("a3", 70.0)] {
+            career(&runs, prefix, "vendor/a", [points / 4.0; 4], [0.01; 4]);
+        }
+        for (prefix, points) in [("b1", 30.0), ("b2", 20.0), ("b3", 10.0)] {
+            career(&runs, prefix, "vendor/b", [points / 4.0; 4], [0.005; 4]);
+        }
+        for (prefix, points) in [("c1", 40.0), ("c2", 45.0), ("c3", 55.0)] {
+            career(&runs, prefix, "vendor/c", [points / 4.0; 4], [0.0125; 4]);
+        }
+        for (prefix, points) in [("d1", 25.0), ("d2", 35.0), ("d3", 65.0)] {
+            career(&runs, prefix, "vendor/d", [points / 4.0; 4], [0.025; 4]);
+        }
+        for (prefix, points) in [("e1", 5.0), ("e2", 15.0), ("e3", 75.0)] {
+            career(&runs, prefix, "vendor/e", [points / 4.0; 4], [0.05; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let card = |name: &str| {
+            let at = pos(&html, &format!("data-card=\"{name}\""));
+            let end = html[at..]
+                .find("</div></div>")
+                .map(|i| at + i + 12)
+                .unwrap();
+            &html[at..end]
+        };
+        let top = card("top-model");
+        assert!(
+            top.contains("title=\"vendor/a\"") && top.contains("60.0 / 76 median"),
+            "top model is A at its 60.0 median: {top}"
+        );
+        let ppd = card("best-ppd");
+        assert!(
+            ppd.contains("title=\"vendor/a\"") && ppd.contains("1500.0 pts/$"),
+            "A's median is 60.0 / $0.04 = 1500.0 pts/$: {ppd}"
+        );
+        let cheap = card("cheapest-career");
+        assert!(
+            cheap.contains("title=\"vendor/b\"") && cheap.contains("$0.02"),
+            "B's career is the cheapest at $0.02: {cheap}"
+        );
+        let careers = card("careers");
+        assert!(
+            careers.contains("15 across 5 models") && careers.contains("$1.23 spent"),
+            "fifteen careers across five models: {careers}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F2: the 21-square agreement strip is on the model row itself,
+    /// outside the expanded careers.
+    #[test]
+    fn r69_f2_agreement_on_row() {
+        let (base, runs, out) = fixture("r69agree");
+        career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
+        fail_ticket(&runs, "b", 5);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let start_tag = "<tr class=\"model-row\">";
+        let at = pos(&html, start_tag);
+        let rest = &html[at..];
+        let details_end =
+            rest.find("</details>").expect("the expanded careers") + "</details>".len();
+        let agree_at = rest
+            .find("<div class=\"agree\">")
+            .expect("the agreement strip");
+        assert!(
+            agree_at > details_end,
+            "the agreement strip is outside the expanded careers: {rest}"
+        );
+        let agree = &rest[agree_at..];
+        let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
+        assert!(
+            agree.contains("passed by 1/2") && agree.matches("title=\"ticket ").count() == 21,
+            "the agreement strip is on the row: {agree}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F3: every nav anchor points at a section that exists, in order.
+    #[test]
+    fn r69_f3_section_nav() {
+        let (base, runs, out) = fixture("r69nav");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        let at = pos(&html, "<nav class=\"section-nav\"");
+        let nav = &html[at..at + html[at..].find("</nav>").unwrap()];
+        let labels = [
+            "What it measured",
+            "Points vs $",
+            "Survival",
+            "Per-ticket",
+            "Head-to-head",
+            "Variance",
+            "Ranks",
+        ];
+        let mut cursor = 0;
+        for label in labels {
+            let label_at = nav[cursor..]
+                .find(label)
+                .unwrap_or_else(|| panic!("nav label {label}: {nav}"));
+            cursor += label_at + label.len();
+            let href = &nav[..cursor];
+            let href_at = href.rfind("href=\"#").unwrap();
+            let id = href[href_at + 7..].split('"').next().unwrap();
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "the nav target #{id} exists: {html}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F3: both charts carry axis titles and gridlines at round values.
+    #[test]
+    fn r69_f3_axis_titles() {
+        let (base, runs, out) = fixture("r69axes");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert_eq!(
+            html.matches("<svg class=\"chart\"").count(),
+            2,
+            "two charts: {html}"
+        );
+        for (start, titles) in [
+            (
+                "aria-label=\"points against dollars\"",
+                ["$ per career", "points (of 76)"],
+            ),
+            (
+                "aria-label=\"ticket survival\"",
+                ["ticket", "P(highest passed ≥ i)"],
+            ),
+        ] {
+            let at = pos(&html, start);
+            let chart = &html[at..at + html[at..].find("</svg>").unwrap()];
+            for title in titles {
+                assert!(
+                    chart.contains("class=\"axis-title\""),
+                    "the chart has axis titles: {chart}"
+                );
+                assert!(
+                    chart.contains(&format!(">{title}</text>")),
+                    "the chart names {title:?}: {chart}"
+                );
+            }
+            assert!(
+                chart.matches("class=\"grid\"").count() >= 5,
+                "the chart has gridlines: {chart}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F4: the text and chart colours clear WCAG AA on the dark theme.
+    #[test]
+    fn r69_f4_contrast() {
+        let css = include_str!("portal_board.css");
+        let bg = css_token(css, "bg");
+        let card = css_token(css, "card");
+        for name in ["text", "mut", "pri", "ok", "warn", "bad"] {
+            let colour = css_token(css, name);
+            for background in [&bg, &card] {
+                let ratio = contrast_ratio(&colour, background);
+                assert!(
+                    ratio >= 4.5,
+                    "--{name} {colour} on {background} is {ratio:.2}:1, below AA 4.5"
+                );
+            }
+        }
+        for i in 0..8 {
+            let colour = palette(i);
+            for background in [&bg, &card] {
+                let ratio = contrast_ratio(colour, background);
+                assert!(
+                    ratio >= 3.0,
+                    "chart colour {i} {colour} on {background} is {ratio:.2}:1, below 3.0"
+                );
+            }
+        }
+    }
+
+    /// R69 F4: the 15-career board and results stay at or under 150 KB.
+    #[test]
+    fn r69_f4_page_size() {
+        let (base, runs, out) = fixture("r69size");
+        for model in 0..5 {
+            for c in 0..3 {
+                let prefix = format!("m{model}c{c}");
+                career(
+                    &runs,
+                    &prefix,
+                    &format!("vendor/model-{model}"),
+                    [4.0 + model as f64, 5.0, 6.0, 7.0],
+                    [0.01; 4],
+                );
+                set_tokens(&runs, &prefix, 1, 0, 10_000, 8_000, 500, 10_500);
+                set_career_perf(
+                    &runs,
+                    &prefix,
+                    1.1,
+                    serde_json::json!([
+                        {"id": "W1", "metric": "latency", "reference": 1.0, "candidate": 0.9, "ratio": 1.11, "correct": true},
+                        {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 90.0, "ratio": 0.9, "correct": false, "note": "not durable"}
+                    ]),
+                );
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        for page in ["index.html", "results.html"] {
+            let bytes = fs::metadata(out.join(page)).unwrap().len();
+            assert!(
+                bytes <= 150 * 1024,
+                "{page} is {bytes} bytes, above the 150 KB limit"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F4: the pages are self-contained: no external src, link href or
+    /// CSS url(). Anchor links to the code and the method are allowed.
+    #[test]
+    fn r69_f4_self_contained() {
+        let (base, runs, out) = fixture("r69self");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let css = include_str!("portal_board.css");
+        assert!(!css.contains("url("), "the stylesheet has no CSS url()");
+        for page in ["index.html", "results.html"] {
+            let html = read(&out.join(page));
+            assert!(!html.contains("<script"), "{page} has no script");
+            for raw in html.split('<').skip(1) {
+                let Some(end) = raw.find('>') else { continue };
+                let tag = &raw[..end];
+                let name = tag
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if name == "a" {
+                    continue;
+                }
+                for attr in ["src", "href"] {
+                    let needle = format!("{attr}=");
+                    if let Some(i) = tag.find(&needle) {
+                        let rest = &tag[i + needle.len()..];
+                        let quote = rest.chars().next().unwrap_or('"');
+                        let value = rest[1..].split(quote).next().unwrap_or("");
+                        assert!(
+                            !value.starts_with("http://")
+                                && !value.starts_with("https://")
+                                && !value.starts_with("//"),
+                            "{page} has an external {attr}: {value}"
+                        );
+                    }
+                }
+            }
+        }
         let _ = fs::remove_dir_all(&base);
     }
 }
