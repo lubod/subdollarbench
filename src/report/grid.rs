@@ -1568,9 +1568,9 @@ fn model_row(
     let agreement = ticket_agreement(cells, g);
     let link = agreement_link(cells, g);
     let more = format!(
-        "<details id=\"agree-{}\" class=\"more\"><summary>×{} {word} ▸</summary><div class=\"agree\">{agreement}</div>{strips}<div class=\"table-scroll\"><table class=\"career-table\">{}{inner}</table></div></details>",
-        g.median,
+        "<details class=\"more\"><summary>×{} {word} ▸</summary><div class=\"agree\" id=\"agree-{}\">{agreement}</div>{strips}<div class=\"table-scroll\"><table class=\"career-table\">{}{inner}</table></div></details>",
         g.careers.len(),
+        g.median,
         career_table_head()
     );
     html.push_str(&format!(
@@ -1674,44 +1674,13 @@ fn render_board(cells: &[CareerCell]) -> String {
     h.push_str("</tbody></table>");
     h.push_str(legend_html());
     h.push_str("</div>");
-    if !unfinished_current.is_empty() {
-        h.push_str("<div class=\"unfinished\"><div class=\"divider\">unfinished careers (not ranked)</div><div class=\"wrap\"><table class=\"career-table\">");
-        h.push_str(career_table_head());
-        for c in &unfinished_current {
-            let name = labels
-                .get(&c.campaign_id)
-                .map(String::as_str)
-                .unwrap_or(&c.campaign_id);
-            h.push_str(&career_row(
-                c,
-                name,
-                Some(&unfinished_label(c)),
-                "unfinished",
-            ));
-        }
-        h.push_str("</tbody></table></div></div>");
-    }
     if let Some(note) = unranked_note(&marked) {
         h.push_str(&format!("<div class=\"mut note\">{note}</div>"));
     }
-    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Unfinished careers (fewer than four phases, or a phase still running) are listed under the divider and are not ranked. Only the current rule set is shown; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
+    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Only the current rule set is shown. A career still running is counted in the in-progress banner, never shown as a row; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
     h.push_str(&footer_html(&now));
     h.push_str("</main></body></html>");
     h
-}
-
-fn unfinished_label(c: &CareerCell) -> String {
-    if c.rehearsal {
-        "rehearsal (not ranked)".to_string()
-    } else if c.smoke {
-        "smoke (not ranked)".to_string()
-    } else {
-        match (c.phase, c.phase_total) {
-            (Some(p), t) if t > 0 => format!("phase {p} of {t}"),
-            (Some(p), _) => format!("phase {p}"),
-            _ => "in progress".to_string(),
-        }
-    }
 }
 
 /// R51 F4: a grid date is printed to the minute.
@@ -2960,7 +2929,7 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
         "fingerprint": fingerprint,
         "ranked_fingerprints": ranked_fingerprints,
         "fingerprint_careers": fingerprint_careers,
-        "careers": cells.len(),
+        "careers": ranked.len(),
         "ranked": ranked.len(),
         "ranked_rehearsal": ranked.iter().filter(|c| c.rehearsal || c.smoke).count(),
         "models": model_groups(&cells).iter().map(|g| g.model.clone()).collect::<Vec<_>>(),
@@ -3561,18 +3530,23 @@ mod tests {
         let html = read(&out.join("index.html"));
         assert_eq!(html.matches("class=\"model-row\"").count(), 2, "{html}");
         assert_eq!(html.matches("class=\"career-row\"").count(), 6, "{html}");
+        // R71 F4 (operator): the public board shows finished careers only.
+        // The running career is a banner count, never a row or a link.
         assert_eq!(
             html.matches("class=\"career-row unfinished\"").count(),
-            1,
-            "{html}"
+            0,
+            "the unfinished row is gone: {html}"
         );
         assert!(
-            pos(&html, "unfinished careers") < pos(&html, "campaign_u1_p2"),
-            "{html}"
+            !html.contains("unfinished careers")
+                && !html.contains("campaign_u1_p2")
+                && !html.contains("phase 2 of 4")
+                && !html.contains(">unfinished<"),
+            "the running career is absent from the board: {html}"
         );
         assert!(
-            pos(&html, "phase 2 of 4") < pos(&html, "campaign_u1_p2"),
-            "{html}"
+            html.contains("Grid in progress: 6 of 7 careers finished; ranks are provisional."),
+            "the banner keeps the count and names no run: {html}"
         );
         assert!(
             pos(&html, "alpha") < pos(&html, "beta"),
@@ -4733,7 +4707,8 @@ mod tests {
             "the secondary line and row agreement are the parts the phone rule gives way on: {row}"
         );
         assert!(
-            html.contains("<details id=\"agree-") && html.contains("<div class=\"agree\">"),
+            html.contains("<details class=\"more\">")
+                && html.contains("<div class=\"agree\" id=\"agree-"),
             "the expanded details keep the one agreement strip: {html}"
         );
         let _ = fs::remove_dir_all(&base);
@@ -5365,9 +5340,9 @@ mod tests {
                 && cell.contains("differs: 5"),
             "the row links to the one agreement strip: {cell}"
         );
-        let details = &rest[pos(rest, "<details id=\"agree-")..];
+        let details = &rest[pos(rest, "<details class=\"more\">")..];
         let details = &details[..details.find("</details>").unwrap()];
-        let agree = &details[pos(details, "<div class=\"agree\">")..];
+        let agree = &details[pos(details, "<div class=\"agree\" id=\"agree-")..];
         let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
         assert!(
             agree.matches("title=\"t").count() == 21,
@@ -5559,6 +5534,82 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&base);
     }
+    /// R71 F4 (operator): the public pages and grid.json show finished
+    /// careers only; the banner keeps the count and names no run.
+    #[test]
+    fn r71_f4_finished_only() {
+        let (base, runs, out) = fixture("r71finished");
+        career(&runs, "a", "model-a", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "model-b", [2.0; 4], [0.01; 4]);
+        // One running career: phase 2 of 4, the model's only career.
+        write_phase(
+            &runs,
+            "run",
+            "model-run",
+            1,
+            None,
+            &["campaign_run_p1".into()],
+            &[0, 1, 2, 3, 4, 5, 6],
+            1.0,
+            0.01,
+            "done",
+            1.0,
+            0.01,
+        );
+        write_phase(
+            &runs,
+            "run",
+            "model-run",
+            2,
+            Some("campaign_run_p1"),
+            &["campaign_run_p1".into(), "campaign_run_p2".into()],
+            &[7, 8, 9, 10],
+            2.0,
+            0.01,
+            "running",
+            3.0,
+            0.02,
+        );
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        for page in ["index.html", "results.html"] {
+            let html = read(&out.join(page));
+            assert!(
+                !html.contains("campaign_run_p2")
+                    && !html.to_lowercase().contains("unfinished careers")
+                    && !html.contains("model-run"),
+                "{page} shows the running career: {html}"
+            );
+        }
+        let board = read(&out.join("index.html"));
+        assert_eq!(
+            board.matches("class=\"model-row\"").count(),
+            2,
+            "only the two finished models: {board}"
+        );
+        assert!(
+            board.contains("Grid in progress: 2 of 3 careers finished; ranks are provisional."),
+            "the banner keeps the count and names no run: {board}"
+        );
+        let grid_raw = read(&out.join("grid.json"));
+        assert!(
+            !grid_raw.contains("campaign_run_p2")
+                && !grid_raw.to_lowercase().contains("unfinished"),
+            "grid.json shows the running career: {grid_raw}"
+        );
+        let meta: Value = serde_json::from_str(&grid_raw).unwrap();
+        assert_eq!(meta["careers"], 2, "{meta}");
+        assert_eq!(meta["ranked"], 2, "{meta}");
+        assert!(
+            !meta["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.as_str() == Some("model-run")),
+            "grid.json has no running model: {meta}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R71 F1 (R70-2): each model's agreement strip appears once, inside
     /// its details, and the phone rule does not hide that ancestor.
     #[test]
@@ -5572,7 +5623,7 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let board = read(&out.join("index.html"));
         assert_eq!(
-            board.matches("<div class=\"agree\">").count(),
+            board.matches("<div class=\"agree\"").count(),
             3,
             "one agreement strip per model: {board}"
         );
@@ -5583,22 +5634,44 @@ mod tests {
             .collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 3, "the three details ids are unique: {ids:?}");
+        assert_eq!(ids.len(), 3, "the three strip ids are unique: {ids:?}");
         for model in ["vendor/a", "vendor/b", "vendor/c"] {
             let row = model_row_html(&board, model);
             assert_eq!(
-                row.matches("<div class=\"agree\">").count(),
+                row.matches("<div class=\"agree\"").count(),
                 1,
                 "{model} has one strip: {row}"
             );
-            let details = &row[pos(row, "<details id=\"agree-")..];
+            let details = &row[pos(row, "<details class=\"more\">")..];
             let details = &details[..details.find("</details>").unwrap()];
-            let agree = &details[pos(details, "<div class=\"agree\">")..];
+            let agree = &details[pos(details, "<div class=\"agree\" id=\"agree-")..];
             let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
             assert_eq!(
                 agree.matches("title=\"t").count(),
                 21,
                 "{model}'s one strip has 21 squares: {agree}"
+            );
+            let id = agree
+                .split("id=\"agree-")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let link = row
+                .find("<a class=\"agree-link\" href=\"#agree-")
+                .expect("the row link");
+            let href = row[link..]
+                .split("href=\"#agree-")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            assert_eq!(href, id, "{model}'s link targets the strip inside details");
+            assert!(
+                !row.contains("<details id=\"agree-"),
+                "the id is on the strip, not the details: {row}"
             );
         }
         let css = include_str!("portal_board.css");
@@ -5615,7 +5688,7 @@ mod tests {
         }
         let results = read(&out.join("results.html"));
         assert_eq!(
-            results.matches("<div class=\"agree\">").count(),
+            results.matches("<div class=\"agree\"").count(),
             0,
             "the results page has no duplicate agreement strip: {results}"
         );
@@ -5766,7 +5839,7 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         assert_eq!(
-            html.matches("<details id=\"agree-").count(),
+            html.matches("<details class=\"more\">").count(),
             10,
             "ten expanded model blocks"
         );
@@ -5880,7 +5953,7 @@ mod tests {
             row.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
             "the board row name carries break points: {row}"
         );
-        let details = &html[pos(&html, "<details id=\"agree-")..];
+        let details = &html[pos(&html, "<details class=\"more\">")..];
         let career = &details[pos(details, "<tr class=\"career-row\">")..];
         assert!(
             career.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
@@ -5918,9 +5991,9 @@ mod tests {
         fail_ticket(&runs, "b", 5);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        let details = pos(&html, "<details id=\"agree-");
+        let details = pos(&html, "<details class=\"more\">");
         let details = &html[details..details + html[details..].find("</details>").unwrap()];
-        let agree = pos(details, "<div class=\"agree\">");
+        let agree = pos(details, "<div class=\"agree\" id=\"agree-");
         let agree = &details[agree..];
         let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
         assert!(
@@ -5980,7 +6053,7 @@ mod tests {
         career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        let details = &html[pos(&html, "<details id=\"agree-")..];
+        let details = &html[pos(&html, "<details class=\"more\">")..];
         let table = &details[pos(details, "<table class=\"career-table\">")..];
         let table = &table[..table.find("</table>").unwrap()];
         let head = &table[..table.find("</thead>").expect("a career-table head")];
