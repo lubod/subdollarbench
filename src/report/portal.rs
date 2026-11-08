@@ -3002,7 +3002,7 @@ mod tests {
             "the duplicate career folds under its model row: {html}"
         );
         assert!(
-            html.contains("8.0 (8-12) · 2 careers"),
+            html.contains("class=\"hero\">8.0 / 36") && html.contains("8 - 12 · 2 careers"),
             "the model row is the worse middle career with its range: {html}"
         );
         assert!(
@@ -3085,7 +3085,7 @@ mod tests {
             assert!(!html.contains(gone), "{gone} must not show: {html}");
         }
         assert_eq!(
-            html.matches(">m</b>").count(),
+            html.matches("<tr class=\"model-row\">").count(),
             1,
             "one model row, the current rules only: {html}"
         );
@@ -3150,17 +3150,14 @@ mod tests {
         PortalExporter::export_sql_board(runs.to_str().unwrap(), out.to_str().unwrap())
             .expect("sql board");
         let html = fs::read_to_string(out.join("index.html")).unwrap();
-        let pos = |m: &str| {
-            html.find(m)
-                .unwrap_or_else(|| panic!("missing {m}: {html}"))
-        };
         let row_end = |at: usize| {
             html[at..]
                 .find("</tr>")
                 .map(|i| at + i + 5)
                 .unwrap_or(html.len())
         };
-        let dead = pos("dead-model");
+        let dead = html.rfind("<b title=\"dead-model\">").unwrap();
+        let dead = html[..dead].rfind("<tr").unwrap();
         let seg = &html[dead..row_end(dead)];
         assert!(
             seg.contains("stalled"),
@@ -3170,7 +3167,8 @@ mod tests {
             !seg.contains("RUNNING"),
             "a dead writer must not be RUNNING: {seg}"
         );
-        let live = pos("live-model");
+        let live = html.rfind("<b title=\"live-model\">").unwrap();
+        let live = html[..live].rfind("<tr").unwrap();
         let seg = &html[live..row_end(live)];
         assert!(seg.contains("RUNNING"), "a fresh writer stays live: {seg}");
         let _ = fs::remove_dir_all(&dir);
