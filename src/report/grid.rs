@@ -1151,12 +1151,14 @@ fn short_model(model: &str) -> &str {
     model.strip_prefix("openrouter/").unwrap_or(model)
 }
 
-/// R65-1 / R70 F2: the short model name breaks only after `/` or `-`
-/// (never mid-word): every such character gets a `<wbr>`.
+/// R70 F2: a display name breaks only after `/` or `-`, never mid-word.
+fn break_name_html(s: &str) -> String {
+    esc(s).replace('/', "/<wbr>").replace('-', "-<wbr>")
+}
+
+/// R65-1 / R70 F2: the short model name gets the same break points.
 fn model_name_html(model: &str) -> String {
-    esc(short_model(model))
-        .replace('/', "/<wbr>")
-        .replace('-', "-<wbr>")
+    break_name_html(short_model(model))
 }
 
 /// R69 F1: the head both pages share: description, Open Graph title and
@@ -1415,7 +1417,11 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
     };
     let id = esc(&c.campaign_id);
     let fp = esc(c.fingerprints.first().map(String::as_str).unwrap_or("—"));
-    let name_html = esc(name).replace('/', "/<wbr>");
+    // R70 F2: break the model part at / and -, never the date's hyphens.
+    let name_html = match name.split_once(" · ") {
+        Some((model, rest)) => format!("{} · {}", break_name_html(model), esc(rest)),
+        None => break_name_html(name),
+    };
     format!(
         "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id} · {fp}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         mark_badge(c),
@@ -4353,7 +4359,7 @@ mod tests {
                 "{page} holds a dollar amount with more than two decimals: {text}"
             );
         }
-        let text = visible_text(&results);
+        let text = visible_text(&results.replace("<wbr>", ""));
         for (i, date) in ["2026-11-04", "2026-11-05", "2026-11-06"]
             .iter()
             .enumerate()
@@ -5420,6 +5426,12 @@ mod tests {
             row.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
             "the board row name carries break points: {row}"
         );
+        let details = &html[pos(&html, "<details class=\"more\">")..];
+        let career = &details[pos(details, "<tr class=\"career-row\">")..];
+        assert!(
+            career.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
+            "the expanded career row name carries break points: {career}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -5471,10 +5483,15 @@ mod tests {
         career(&runs, "b1", "vendor/b", [15.0; 4], [0.1; 4]);
         set_career_perf(&runs, "b1", 0.8, serde_json::json!([]));
         // C's median-points career is not its median pts/$ career:
-        // 50/$0.02 = 2500, 40/$0.10 = 400, 30/$0.04 = 750.
+        // 50/$0.02 = 2500, 40/$0.10 = 400, 38/$0.05 = 760.
         career(&runs, "c1", "vendor/c", [12.5; 4], [0.005; 4]);
         career(&runs, "c2", "vendor/c", [10.0; 4], [0.025; 4]);
-        career(&runs, "c3", "vendor/c", [7.5; 4], [0.01; 4]);
+        career(&runs, "c3", "vendor/c", [9.5; 4], [0.0125; 4]);
+        // D ties two careers at 750 pts/$; deduplicating before the median
+        // would read 825 and wrongly beat C.
+        career(&runs, "d1", "vendor/d", [7.5; 4], [0.01; 4]);
+        career(&runs, "d2", "vendor/d", [7.5; 4], [0.01; 4]);
+        career(&runs, "d3", "vendor/d", [11.25; 4], [0.0125; 4]);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         let top = &html[pos(&html, "data-card=\"top-model\"")..];
@@ -5490,8 +5507,8 @@ mod tests {
             "the card names the metric: {ppd}"
         );
         assert!(
-            ppd.contains("title=\"vendor/c\"") && ppd.contains("750.0 pts/$"),
-            "C's median pts/$ is 750.0, not its median-points career's 400: {ppd}"
+            ppd.contains("title=\"vendor/c\"") && ppd.contains("760.0 pts/$"),
+            "C's median pts/$ is 760.0, not its median-points career's 400 or D's deduped 825: {ppd}"
         );
         let _ = fs::remove_dir_all(&base);
     }

@@ -235,6 +235,7 @@ details.more .line { margin: 2px 0 0 12px; }
 .measured-table tr { display: block; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .measured-table th, .measured-table td { display: block; width: auto; text-transform: none; letter-spacing: 0; font-size: var(--fs-sm); color: var(--mut); padding: 0; border: 0; background: transparent; white-space: normal; }
 .measured-table td { color: var(--text); margin-top: 2px; }
+.measured-table code { overflow-wrap: break-word; }
 .measured-table tr:nth-child(odd) { border-right: 1px solid var(--line); }
 
 /* Section nav (R69 F3): sticky, with a horizontal scroll row on a phone. */
