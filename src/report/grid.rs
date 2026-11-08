@@ -4837,4 +4837,411 @@ mod tests {
         assert!(!html.contains("older rule sets"), "{html}");
         let _ = fs::remove_dir_all(&base);
     }
+    // R69 F1: WCAG relative luminance and contrast, for the CSS palette
+    // test. The values are computed, not asserted as constants.
+    fn srgb(v: u8) -> f64 {
+        let c = v as f64 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn luminance(hex: &str) -> f64 {
+        let h = hex.trim().trim_start_matches('#');
+        assert_eq!(h.len(), 6, "a six-digit hex colour: {hex}");
+        let r = u8::from_str_radix(&h[0..2], 16).unwrap();
+        let g = u8::from_str_radix(&h[2..4], 16).unwrap();
+        let b = u8::from_str_radix(&h[4..6], 16).unwrap();
+        0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b)
+    }
+
+    fn contrast_ratio(a: &str, b: &str) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    fn css_token(css: &str, name: &str) -> String {
+        let needle = format!("--{name}:");
+        let at = css
+            .find(&needle)
+            .unwrap_or_else(|| panic!("the stylesheet has {needle}"));
+        let rest = &css[at + needle.len()..];
+        rest[..rest.find(';').unwrap()].trim().to_string()
+    }
+
+    /// R69 F1: one model has the same colour on the board row, both chart
+    /// legends and every results table.
+    #[test]
+    fn r69_f1_one_colour_per_model() {
+        let (base, runs, out) = fixture("r69colour");
+        for (prefix, model) in [
+            ("a1", "vendor/alpha"),
+            ("a2", "vendor/alpha"),
+            ("b1", "vendor/beta"),
+            ("b2", "vendor/beta"),
+            ("c1", "vendor/gamma"),
+        ] {
+            career(&runs, prefix, model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        let mut colours: HashMap<String, String> = HashMap::new();
+        for row in board.split("<tr class=\"model-row\">").skip(1) {
+            let row = &row[..row.find("</tr>").unwrap()];
+            let model = row
+                .split("<b title=\"")
+                .nth(1)
+                .expect("a model name")
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string();
+            let at = row.find("background:").expect("a swatch");
+            let colour = row[at + "background:".len()..]
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string();
+            colours.insert(model, colour);
+        }
+        assert_eq!(colours.len(), 3, "one colour per model: {colours:?}");
+        for (model, colour) in &colours {
+            // Both chart legends carry the model in the same colour.
+            assert!(
+                results.contains(&format!(
+                    "<span class=\"dot\" style=\"background:{colour}\"></span><span title=\"{model}\">"
+                )),
+                "{model} must keep {colour} in a chart legend: {results}"
+            );
+            // Every results table names the model beside the same colour.
+            assert!(
+                results.contains(&format!(
+                    "<td title=\"{model}\"><span class=\"swatch\" style=\"background:{colour}\"></span>"
+                )),
+                "{model} must keep {colour} in the results tables: {results}"
+            );
+        }
+        // Eight distinct colours, so the palette cannot silently collapse.
+        let mut distinct: Vec<&str> = (0..8).map(palette).collect();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 8, "eight distinct model colours");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F1: the board speaks plainly; the rules, cap basis and price list
+    /// live on the results page. Both pages carry the footer, the meta
+    /// description, the Open Graph tags and the inline favicon.
+    #[test]
+    fn r69_f1_header_plain() {
+        let (base, runs, out) = fixture("r69plain");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        let board_text = visible_text(&board);
+        let results_text = visible_text(&results);
+        assert!(
+            !board_text.contains("model_prices.json") && !board_text.contains("cap policy"),
+            "the board header speaks plainly: {board_text}"
+        );
+        assert!(
+            board_text.contains(
+                "Budget LLMs build a SQL database, ticket by ticket, for at most $0.99 per phase. Graded against SQLite."
+            ),
+            "the board leads with the plain sentence: {board_text}"
+        );
+        assert!(
+            results_text.contains("model_prices.json") && results_text.contains("cap policy"),
+            "the results page names the price list and the cap basis: {results_text}"
+        );
+        for (page, html) in [("board", &board), ("results", &results)] {
+            assert!(
+                html.contains("<meta name=\"description\" content=\""),
+                "{page} has a meta description"
+            );
+            assert!(
+                html.contains("<meta property=\"og:title\" content=\"")
+                    && html.contains("<meta property=\"og:description\" content=\""),
+                "{page} has the Open Graph tags"
+            );
+            assert!(
+                html.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"),
+                "{page} has the inline favicon"
+            );
+            assert!(
+                html.contains("<footer class=\"page-foot\">")
+                    && html.contains("https://github.com/lubod/subdollarbench")
+                    && html.contains("docs/PROPOSAL-sdb-sql.md")
+                    && html.contains(&format!("Rules {}", crate::report::rules::RULES_VERSION))
+                    && html.contains("Updated "),
+                "{page} has the footer"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F2: the four cards answer who wins, what costs least per point,
+    /// the cheapest career and how many careers/models the board holds.
+    #[test]
+    fn r69_f2_summary_cards() {
+        let (base, runs, out) = fixture("r69cards");
+        for (prefix, points) in [("a1", 50.0), ("a2", 60.0), ("a3", 70.0)] {
+            career(&runs, prefix, "vendor/a", [points / 4.0; 4], [0.01; 4]);
+        }
+        for (prefix, points) in [("b1", 30.0), ("b2", 20.0)] {
+            career(&runs, prefix, "vendor/b", [points / 4.0; 4], [0.005; 4]);
+        }
+        career(&runs, "c1", "vendor/c", [10.0 / 4.0; 4], [0.1; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let card = |name: &str| {
+            let at = pos(&html, &format!("data-card=\"{name}\""));
+            let end = html[at..]
+                .find("</div></div>")
+                .map(|i| at + i + 12)
+                .unwrap();
+            &html[at..end]
+        };
+        let top = card("top-model");
+        assert!(
+            top.contains("title=\"vendor/a\"") && top.contains("60.0 / 76 median"),
+            "top model is A at its 60.0 median: {top}"
+        );
+        let ppd = card("best-ppd");
+        assert!(
+            ppd.contains("title=\"vendor/a\"") && ppd.contains("1500.0 pts/$"),
+            "A's median is 60.0 / $0.04 = 1500.0 pts/$: {ppd}"
+        );
+        let cheap = card("cheapest-career");
+        assert!(
+            cheap.contains("title=\"vendor/b\"") && cheap.contains("$0.02"),
+            "B's career is the cheapest at $0.02: {cheap}"
+        );
+        let careers = card("careers");
+        assert!(
+            careers.contains("6 across 3 models") && careers.contains("$0.56 spent"),
+            "six careers across three models: {careers}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F2: the 21-square agreement strip is on the model row itself,
+    /// outside the expanded careers.
+    #[test]
+    fn r69_f2_agreement_on_row() {
+        let (base, runs, out) = fixture("r69agree");
+        career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
+        career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
+        fail_ticket(&runs, "b", 5);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let start_tag = "<tr class=\"model-row\">";
+        let at = pos(&html, start_tag);
+        let rest = &html[at..];
+        let details_end =
+            rest.find("</details>").expect("the expanded careers") + "</details>".len();
+        let agree_at = rest
+            .find("<div class=\"agree\">")
+            .expect("the agreement strip");
+        assert!(
+            agree_at > details_end,
+            "the agreement strip is outside the expanded careers: {rest}"
+        );
+        let agree = &rest[agree_at..];
+        let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
+        assert!(
+            agree.contains("passed by 1/2") && agree.matches("title=\"ticket ").count() == 21,
+            "the agreement strip is on the row: {agree}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F3: every nav anchor points at a section that exists, in order.
+    #[test]
+    fn r69_f3_section_nav() {
+        let (base, runs, out) = fixture("r69nav");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        let at = pos(&html, "<nav class=\"section-nav\"");
+        let nav = &html[at..at + html[at..].find("</nav>").unwrap()];
+        let labels = [
+            "What it measured",
+            "Points vs $",
+            "Survival",
+            "Per-ticket",
+            "Head-to-head",
+            "Variance",
+            "Ranks",
+        ];
+        let mut cursor = 0;
+        for label in labels {
+            let label_at = nav[cursor..]
+                .find(label)
+                .unwrap_or_else(|| panic!("nav label {label}: {nav}"));
+            cursor += label_at + label.len();
+            let href = &nav[..cursor];
+            let href_at = href.rfind("href=\"#").unwrap();
+            let id = href[href_at + 7..].split('"').next().unwrap();
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "the nav target #{id} exists: {html}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F3: both charts carry axis titles and gridlines at round values.
+    #[test]
+    fn r69_f3_axis_titles() {
+        let (base, runs, out) = fixture("r69axes");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert_eq!(
+            html.matches("<svg class=\"chart\"").count(),
+            2,
+            "two charts: {html}"
+        );
+        for (start, titles) in [
+            (
+                "aria-label=\"points against dollars\"",
+                ["$ per career", "points (of 76)"],
+            ),
+            (
+                "aria-label=\"ticket survival\"",
+                ["ticket", "P(highest passed ≥ i)"],
+            ),
+        ] {
+            let at = pos(&html, start);
+            let chart = &html[at..at + html[at..].find("</svg>").unwrap()];
+            for title in titles {
+                assert!(
+                    chart.contains("class=\"axis-title\""),
+                    "the chart has axis titles: {chart}"
+                );
+                assert!(
+                    chart.contains(&format!(">{title}</text>")),
+                    "the chart names {title:?}: {chart}"
+                );
+            }
+            assert!(
+                chart.matches("class=\"grid\"").count() >= 5,
+                "the chart has gridlines: {chart}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F4: the text and chart colours clear WCAG AA on the dark theme.
+    #[test]
+    fn r69_f4_contrast() {
+        let css = include_str!("portal_board.css");
+        let bg = css_token(css, "bg");
+        let card = css_token(css, "card");
+        for name in ["text", "mut", "pri", "ok", "warn", "bad"] {
+            let colour = css_token(css, name);
+            for background in [&bg, &card] {
+                let ratio = contrast_ratio(&colour, background);
+                assert!(
+                    ratio >= 4.5,
+                    "--{name} {colour} on {background} is {ratio:.2}:1, below AA 4.5"
+                );
+            }
+        }
+        for i in 0..8 {
+            let colour = palette(i);
+            for background in [&bg, &card] {
+                let ratio = contrast_ratio(colour, background);
+                assert!(
+                    ratio >= 3.0,
+                    "chart colour {i} {colour} on {background} is {ratio:.2}:1, below 3.0"
+                );
+            }
+        }
+    }
+
+    /// R69 F4: the 15-career board and results stay at or under 150 KB.
+    #[test]
+    fn r69_f4_page_size() {
+        let (base, runs, out) = fixture("r69size");
+        for model in 0..5 {
+            for c in 0..3 {
+                let prefix = format!("m{model}c{c}");
+                career(
+                    &runs,
+                    &prefix,
+                    &format!("vendor/model-{model}"),
+                    [4.0 + model as f64, 5.0, 6.0, 7.0],
+                    [0.01; 4],
+                );
+                set_tokens(&runs, &prefix, 1, 0, 10_000, 8_000, 500, 10_500);
+                set_career_perf(
+                    &runs,
+                    &prefix,
+                    1.1,
+                    serde_json::json!([
+                        {"id": "W1", "metric": "latency", "reference": 1.0, "candidate": 0.9, "ratio": 1.11, "correct": true},
+                        {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 90.0, "ratio": 0.9, "correct": false, "note": "not durable"}
+                    ]),
+                );
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        for page in ["index.html", "results.html"] {
+            let bytes = fs::metadata(out.join(page)).unwrap().len();
+            assert!(
+                bytes <= 150 * 1024,
+                "{page} is {bytes} bytes, above the 150 KB limit"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R69 F4: the pages are self-contained: no external src, link href or
+    /// CSS url(). Anchor links to the code and the method are allowed.
+    #[test]
+    fn r69_f4_self_contained() {
+        let (base, runs, out) = fixture("r69self");
+        career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let css = include_str!("portal_board.css");
+        assert!(!css.contains("url("), "the stylesheet has no CSS url()");
+        for page in ["index.html", "results.html"] {
+            let html = read(&out.join(page));
+            assert!(!html.contains("<script"), "{page} has no script");
+            for raw in html.split('<').skip(1) {
+                let Some(end) = raw.find('>') else { continue };
+                let tag = &raw[..end];
+                let name = tag
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if name == "a" {
+                    continue;
+                }
+                for attr in ["src", "href"] {
+                    let needle = format!("{attr}=");
+                    if let Some(i) = tag.find(&needle) {
+                        let rest = &tag[i + needle.len()..];
+                        let quote = rest.chars().next().unwrap_or('"');
+                        let value = rest[1..].split(quote).next().unwrap_or("");
+                        assert!(
+                            !value.starts_with("http://")
+                                && !value.starts_with("https://")
+                                && !value.starts_with("//"),
+                            "{page} has an external {attr}: {value}"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
 }
