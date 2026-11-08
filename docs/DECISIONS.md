@@ -643,6 +643,24 @@ The benchmark answers "what does a dollar buy" (round 23):
   used for graded cells until a round gives it a per-run config and data
   dir with auth only. That round changes `src/sandbox`, so it needs a bar.
 
+## 26. The bar guards the grader, not every graded file (2026-11-08)
+
+- **Now (operator, "now 2"):** the bar on `22b02ab0b9b9` (round 67) is
+  waived. No grader code changed since `flake-589e9fd33cd2.txt` passed.
+  The waiver is a labelled record, not a bar run (`67.md`, "After the
+  merge").
+- **Future (operator, "future 3"):** a 20-pass bar is required only when
+  **grading** changes. That covers `src/verifier`, `campaigns`, `tasks`,
+  `src/prompts`, `extensions`, and the grading path of
+  `src/pipeline.rs`. Pricing, harness plumbing, recording and display
+  changes need the `--ready` gate and a $0 rehearsal, and their key
+  carries a waiver that points to the last real bar. Round 68 encodes
+  the rule.
+- **Why:** the bar's live proofs grade the reference server; they never
+  call a provider, read a price or render a page. A change outside the
+  grader re-runs 7 h of proofs whose behaviour it can't affect (rounds 65
+  and 67).
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
