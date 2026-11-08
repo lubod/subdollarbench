@@ -69,4 +69,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [68](68.md) | The bar is required only when grading changes; plumbing changes need `--ready` and a $0 rehearsal (DECISIONS #26) | draft |
 | [69](69.md) | A facelift for the public pages: one palette, a plain header, the board leads with the answer, the results page reads as a report (display only) | merged `6e6c8ee` |
 | [70](70.md) | The facelift's follow-ups: the rehearsal footnote, the phone board, cards that match the board, restored tests, polish (R69-2 to R69-7; display only) | merged `5356bd7`, follow-up `2fef700` |
-| [71](71.md) | The board stays small and distinct as the grid grows: one agreement strip, a 30-career size budget enforced at publish, 10+ colours with a second channel (R70-2 to R70-4; display only) | open |
+| [71](71.md) | The board stays small and distinct as the grid grows: one agreement strip, a 30-career size budget enforced at publish, 10+ colours with a second channel (R70-2 to R70-4; display only) | merged `aa36801` |
