@@ -2923,7 +2923,7 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
         }
     }
     let meta = serde_json::json!({
-        "rules_version": cells.iter().map(|c| c.rules.as_str()).find(|r| !r.is_empty()).unwrap_or(crate::report::rules::RULES_VERSION),
+        "rules_version": ranked.iter().map(|c| c.rules.as_str()).find(|r| !r.is_empty()).unwrap_or(crate::report::rules::RULES_VERSION),
         "current_rules": crate::report::rules::RULES_VERSION,
         "ranked_rules": ranked_rules,
         "fingerprint": fingerprint,
@@ -5607,7 +5607,58 @@ mod tests {
                 .any(|m| m.as_str() == Some("model-run")),
             "grid.json has no running model: {meta}"
         );
+        // The acceptance's literal "1 of 3" fixture: one finished career
+        // and two running careers.
+        let (base2, runs2, out2) = fixture("r71finished1of3");
+        career(&runs2, "a", "model-a", [1.0; 4], [0.01; 4]);
+        for (prefix, model) in [("r1", "model-run1"), ("r2", "model-run2")] {
+            write_phase(
+                &runs2,
+                prefix,
+                model,
+                1,
+                None,
+                &[format!("campaign_{prefix}_p1")],
+                &[0, 1, 2, 3, 4, 5, 6],
+                1.0,
+                0.01,
+                "done",
+                1.0,
+                0.01,
+            );
+            write_phase(
+                &runs2,
+                prefix,
+                model,
+                2,
+                Some(&format!("campaign_{prefix}_p1")),
+                &[
+                    format!("campaign_{prefix}_p1"),
+                    format!("campaign_{prefix}_p2"),
+                ],
+                &[7, 8, 9, 10],
+                2.0,
+                0.01,
+                "running",
+                3.0,
+                0.02,
+            );
+        }
+        export(runs2.to_str().unwrap(), out2.to_str().unwrap()).unwrap();
+        let board2 = read(&out2.join("index.html"));
+        assert!(
+            board2.contains("Grid in progress: 1 of 3 careers finished; ranks are provisional."),
+            "the 1-of-3 banner: {board2}"
+        );
+        assert!(
+            !board2.contains("campaign_r1_p2")
+                && !board2.contains("campaign_r2_p2")
+                && !board2.contains("model-run1")
+                && !board2.contains("model-run2"),
+            "both running careers are absent: {board2}"
+        );
         let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R71 F1 (R70-2): each model's agreement strip appears once, inside
@@ -5642,9 +5693,13 @@ mod tests {
                 1,
                 "{model} has one strip: {row}"
             );
-            let details = &row[pos(row, "<details class=\"more\">")..];
+            let details = &row[pos(row, "<details ")..];
             let details = &details[..details.find("</details>").unwrap()];
-            let agree = &details[pos(details, "<div class=\"agree\" id=\"agree-")..];
+            assert!(
+                !row.contains("<details id=\"agree-"),
+                "the id is on the strip, not the details: {row}"
+            );
+            let agree = &details[pos(details, "<div class=\"agree\"")..];
             let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
             assert_eq!(
                 agree.matches("title=\"t").count(),
@@ -5669,10 +5724,6 @@ mod tests {
                 .next()
                 .unwrap();
             assert_eq!(href, id, "{model}'s link targets the strip inside details");
-            assert!(
-                !row.contains("<details id=\"agree-"),
-                "the id is on the strip, not the details: {row}"
-            );
         }
         let css = include_str!("portal_board.css");
         let media = &css[css.find("@media (max-width: 700px)").expect("phone rule")..];
