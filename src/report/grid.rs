@@ -1067,22 +1067,30 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
         g.sort_by(|a, b| {
             let ca = &cells[*a];
             let cb = &cells[*b];
-            let ranked_a = ca.finished && ca.key.current_rules && !ca.rehearsal && !ca.smoke;
-            let ranked_b = cb.finished && cb.key.current_rules && !cb.rehearsal && !cb.smoke;
-            // R64 F4: the ranked careers number first, so a rehearsal or an
-            // unfinished cell never shifts the paid careers' indices.
-            ranked_b
-                .cmp(&ranked_a)
+            // R67 F3 (R64-3): only a paid career (ranked or unfinished) is
+            // numbered; a rehearsal or smoke cell is not.
+            let numbered_a = ca.key.current_rules && !ca.rehearsal && !ca.smoke;
+            let numbered_b = cb.key.current_rules && !cb.rehearsal && !cb.smoke;
+            numbered_b
+                .cmp(&numbered_a)
                 .then_with(|| ca.started.cmp(&cb.started))
                 .then_with(|| ca.campaign_id.cmp(&cb.campaign_id))
         });
-        for (i, idx) in g.iter().enumerate() {
+        let mut n = 0usize;
+        for idx in g {
             let c = &cells[*idx];
             let date = c.started.get(..10).filter(|d| !d.is_empty()).unwrap_or("—");
-            out.insert(
-                c.campaign_id.clone(),
-                format!("{} · career {} · {}", short_model(&c.model), i + 1, date),
-            );
+            let label = if c.key.current_rules && !c.rehearsal && !c.smoke {
+                n += 1;
+                format!("{} · career {} · {}", short_model(&c.model), n, date)
+            } else if c.rehearsal {
+                format!("{} · rehearsal · {}", short_model(&c.model), date)
+            } else if c.smoke {
+                format!("{} · smoke · {}", short_model(&c.model), date)
+            } else {
+                format!("{} · unranked · {}", short_model(&c.model), date)
+            };
+            out.insert(c.campaign_id.clone(), label);
         }
     }
     out
@@ -4187,6 +4195,52 @@ mod tests {
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["fingerprint_careers"]["fp-a"], 3, "{meta}");
         assert_eq!(meta["fingerprint_careers"]["fp-b"], 2, "{meta}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R67 F3 (R64-3): the paid careers are numbered 1-3 by start time;
+    /// a rehearsal is never numbered.
+    #[test]
+    fn r67_f3_rehearsal_never_numbered() {
+        let (base, runs, _out) = fixture("r67f3num");
+        for (prefix, date) in [
+            ("p1", "2026-11-04"),
+            ("p2", "2026-11-05"),
+            ("p3", "2026-11-06"),
+        ] {
+            career(&runs, prefix, "m", [1.0; 4], [0.01; 4]);
+            for phase in 1..=4 {
+                set_phase_times(
+                    &runs,
+                    prefix,
+                    phase,
+                    &format!("{date}T0{phase}:00:00Z"),
+                    &format!("{date}T0{phase}:30:00Z"),
+                );
+            }
+        }
+        career(&runs, "reh", "m", [1.0; 4], [0.0; 4]);
+        set_mark(&runs, "reh", 4, "rehearsal");
+        let cells = careers(runs.to_str().unwrap());
+        let labels = career_labels(&cells);
+        for (prefix, n, date) in [
+            ("p1", 1, "2026-11-04"),
+            ("p2", 2, "2026-11-05"),
+            ("p3", 3, "2026-11-06"),
+        ] {
+            let id = format!("campaign_{prefix}_p4");
+            let label = labels.get(&id).unwrap_or_else(|| panic!("{id} label"));
+            assert!(
+                label.contains(&format!("career {n} · {date}")),
+                "{id}: {label}"
+            );
+        }
+        let reh = labels.get("campaign_reh_p4").expect("rehearsal label");
+        assert!(
+            !reh.contains("career"),
+            "the rehearsal is not numbered: {reh}"
+        );
+        assert!(reh.contains("rehearsal"), "{reh}");
         let _ = fs::remove_dir_all(&base);
     }
 
