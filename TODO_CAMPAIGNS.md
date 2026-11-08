@@ -215,6 +215,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     `runs/grid-v21-minimax.careers` (3 careers), 3 lanes, `--cap 10`,
     and its own ledger `runs/.grid-v21-minimax-ledger.tsv`. The script
     refuses to start inside the 2× hours.
+  - **Stopped 2026-11-08** (operator): minimax was billed 1.75× its
+    snapshot price, because OpenRouter routes across providers (R66-5).
+    Its runs are hidden. Round 67 pins one provider per model; minimax
+    reruns after round 67's bar, then luna-pro, mimo-pro and hy4.
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
