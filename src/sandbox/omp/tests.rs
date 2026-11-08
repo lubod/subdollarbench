@@ -435,6 +435,40 @@ fn test_extract_session_stats_and_finding() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+/// R67 F1: the omp model argument carries the pinned endpoint suffix, and
+/// an unpinned model is passed through unchanged.
+#[test]
+fn r67_f1_cell_pins_provider() {
+    let pinned = omp_task_args(
+        "p",
+        "openrouter/openai/gpt-6-luna",
+        "/tmp/s",
+        None,
+        None,
+        "high",
+    );
+    assert!(
+        pinned
+            .iter()
+            .any(|a| a == "--model=openrouter/openai/gpt-6-luna@openai"),
+        "the paid cell must pin openai: {pinned:?}"
+    );
+    let plain = omp_task_args(
+        "p",
+        "openrouter/covtest/model",
+        "/tmp/s",
+        None,
+        None,
+        "high",
+    );
+    assert!(
+        plain
+            .iter()
+            .any(|a| a == "--model=openrouter/covtest/model"),
+        "an unpinned test model stays plain: {plain:?}"
+    );
+}
+
 /// R65 F5: prompt tokens come from the field each provider route sends:
 /// deepseek/OpenAI chat (`prompt_tokens`), Anthropic (`input_tokens`), and
 /// OpenAI's Responses shape (`input_tokens` + `input_tokens_details`).

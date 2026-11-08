@@ -137,6 +137,19 @@ async fn r66_f1_price_preflight_accepts_the_new_grid() {
     );
 }
 
+/// R67 F1: a priced row without a pinned provider is refused, and a pinned
+/// grid model passes.
+#[tokio::test]
+async fn r67_f1_unpinned_refused() {
+    let err = require_model_list_price("google/gemini-2.5-flash", false)
+        .await
+        .unwrap_err();
+    assert!(err.contains("no pinned provider"), "{err}");
+    require_model_list_price("openai/gpt-6-luna", false)
+        .await
+        .expect("a pinned grid model must pass");
+}
+
 /// gui-spec.md §5.2: the classifier's six kinds, one fixture each.
 #[test]
 fn failure_classifier_kinds() {
@@ -1513,7 +1526,7 @@ async fn r23_8_stage_api_cost_sums_to_total() {
 async fn r23_d3_a_model_without_a_list_price_is_refused() {
     let dead = "http://127.0.0.1:9/models";
     assert!(
-        require_model_list_price_at("google/gemini-2.5-flash", dead, false)
+        require_model_list_price_at("openai/gpt-6-luna", dead, false)
             .await
             .is_ok()
     );

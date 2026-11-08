@@ -2190,14 +2190,18 @@ pub async fn require_model_list_price_at(
     }
     if crate::cost::calculator::ModelPricing::list_price_for_model_async_at(model, url)
         .await
-        .is_some()
+        .is_none()
     {
-        Ok(())
-    } else {
-        Err(format!(
+        return Err(format!(
             "model {model} has no entry in the price snapshot src/cost/model_prices.json; add the model's catalog id there, then retry the paid campaign launch"
-        ))
+        ));
     }
+    if crate::cost::calculator::provider_for_model(model).is_none() {
+        return Err(format!(
+            "model {model} has no pinned provider in src/cost/model_prices.json; add the provider endpoint and its prices, then retry the paid campaign launch"
+        ));
+    }
+    Ok(())
 }
 
 pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<(), String> {

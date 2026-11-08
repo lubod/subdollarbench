@@ -127,8 +127,14 @@ fn omp_task_args(
     timeout_seconds: Option<u64>,
     thinking: &str,
 ) -> Vec<String> {
+    // R67 F1: omp's `@<slug>` suffix sets OpenRouter's `provider.only` to
+    // that endpoint, so every call goes to the pinned provider.
+    let wire_model = match crate::cost::calculator::provider_for_model(model) {
+        Some(provider) => format!("{model}@{provider}"),
+        None => model.to_string(),
+    };
     let mut args = vec![
-        format!("--model={model}"),
+        format!("--model={wire_model}"),
         "--cwd=/workspace".to_string(),
         format!("--session-dir={session_dir}"),
     ];
