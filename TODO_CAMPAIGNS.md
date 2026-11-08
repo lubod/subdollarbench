@@ -219,6 +219,15 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     snapshot price, because OpenRouter routes across providers (R66-5).
     Its runs are hidden. Round 67 pins one provider per model; minimax
     reruns after round 67's bar, then luna-pro, mimo-pro and hy4.
+  - **Minimax rerun done 2026-11-08** (pinned `gmicloud/fp8`, bar waived,
+    DECISIONS #26): median career 11.4 / 76 (1.2, 11.4, 17), last of 6.
+    $7.61 at list, $5.64 billed (0.74×). Every phase 1 scored 0 (no
+    `go.mod`; ticket 0's $0.09 spent).
+  - **Luna-pro started 2026-11-08 17:18 CET** (operator: "start luna"):
+    `runs/grid-arm-luna-pro.sh`, a $0 rehearsal, then
+    `runs/grid-v21-luna-pro.careers` (3 careers), 3 lanes, `--cap 12`,
+    ledger `runs/.grid-v21-luna-pro-ledger.tsv`. The `@openai` pin was
+    checked live (served by OpenAI, not `openai/fast` at 2×).
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
