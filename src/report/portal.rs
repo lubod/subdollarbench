@@ -2959,7 +2959,7 @@ mod tests {
                 .expect("sql board");
         assert_eq!(
             summary.run_count, 6,
-            "the unfinished phase career publishes under the divider; poisoned and retired cells never do"
+            "the finished one-phase career publishes; poisoned and retired cells never do"
         );
         let html = fs::read_to_string(out.join("index.html")).unwrap();
         let pos = |m: &str| {
@@ -2967,8 +2967,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {m}: {html}"))
         };
         // Current rules first: m1 (10 points), then m2 (two careers; the
-        // conservative even median is the worse one, 8), then the running
-        // m5 (0); the stale 20-point m3 groups below them.
+        // conservative even median is the worse one, 8), then the
+        // pre-career running m5 (0; the historical single-cell behaviour);
+        // the stale 20-point m3 groups below them.
         assert!(pos("m1") < pos("m2"), "points order: {html}");
         assert!(
             pos("m2") < pos("m5"),
