@@ -65,4 +65,4 @@ Rounds 1-21 predate this process. Their reviews are in
 in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [65](65.md) | A provider credit failure stops the grid (R63-3); a balance preflight; `publish.sh` uses the one key; fresh input tokens on every route; the published pages read clearly (F6-F8 added after open) (graded: `--ready`, then a bar) | merged `3fae830` |
 | [66](66.md) | Ready for the next grid: four new models priced; one board per rules version, every fingerprint shown (graded: `--ready`, then one bar for 65+66) | merged `1a1aa3b` |
-| [67](67.md) | The bill matches the snapshot (one pinned provider per model; billed recorded beside list); the GUI shows every run (R66-5, R66-4, R64-3, R66-3) (graded: `--ready`, then a bar) | open |
+| [67](67.md) | The bill matches the snapshot (one pinned provider per model; billed recorded beside list); the GUI shows every run (R66-5, R66-4, R64-3, R66-3) (graded: `--ready`, then a bar) | merged `dc3cacb` |
