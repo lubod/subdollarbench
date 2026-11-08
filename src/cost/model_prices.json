@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-11-07",
+  "as_of": "2026-11-08",
   "source": "OpenRouter /api/v1/models; exact catalog ids; cache_read is input_cache_read, cache_write is input_cache_write or the prompt rate when absent",
   "models": [
     {
@@ -7,7 +7,8 @@
       "prompt_per_million": 0.1,
       "completion_per_million": 0.5,
       "cache_read_per_million": 0.01,
-      "cache_write_per_million": 0.125
+      "cache_write_per_million": 0.125,
+      "provider": "anthropic"
     },
     {
       "id": "google/gemini-3.8-flash",
@@ -35,7 +36,8 @@
       "prompt_per_million": 0.15,
       "completion_per_million": 0.6,
       "cache_read_per_million": 0.003,
-      "cache_write_per_million": 0.15
+      "cache_write_per_million": 0.15,
+      "provider": "deepseek"
     },
     {
       "id": "deepseek/deepseek-chat",
@@ -91,49 +93,56 @@
       "prompt_per_million": 0.1,
       "completion_per_million": 0.5,
       "cache_read_per_million": 0.01,
-      "cache_write_per_million": 0.125
+      "cache_write_per_million": 0.125,
+      "provider": "openai"
     },
     {
       "id": "xiaomi/mimo-v2.6-flash",
       "prompt_per_million": 0.14,
       "completion_per_million": 0.28,
       "cache_read_per_million": 0.0028,
-      "cache_write_per_million": 0.14
+      "cache_write_per_million": 0.14,
+      "provider": "xiaomi/fp8"
     },
     {
       "id": "qwen/qwen3.8-flash",
       "prompt_per_million": 0.15,
       "completion_per_million": 0.47,
       "cache_read_per_million": 0.016,
-      "cache_write_per_million": 0.15
+      "cache_write_per_million": 0.15,
+      "provider": "alibaba/us-east-1"
     },
     {
       "id": "tencent/hy4",
       "prompt_per_million": 0.417,
       "completion_per_million": 1.2505,
       "cache_read_per_million": 0.021,
-      "cache_write_per_million": 0.417
+      "cache_write_per_million": 0.417,
+      "provider": "tencent/fp4"
     },
     {
       "id": "minimax/minimax-m3.1-flash",
-      "prompt_per_million": 0.075,
-      "completion_per_million": 0.3,
-      "cache_read_per_million": 0.0075,
-      "cache_write_per_million": 0.075
+      "prompt_per_million": 0.1125,
+      "completion_per_million": 0.45,
+      "cache_read_per_million": 0.01125,
+      "cache_write_per_million": 0.1125,
+      "provider": "gmicloud/fp8"
     },
     {
       "id": "openai/gpt-6-luna-pro",
       "prompt_per_million": 0.1,
       "completion_per_million": 0.5,
       "cache_read_per_million": 0.01,
-      "cache_write_per_million": 0.125
+      "cache_write_per_million": 0.125,
+      "provider": "openai"
     },
     {
       "id": "xiaomi/mimo-v2.6-pro",
       "prompt_per_million": 0.435,
       "completion_per_million": 0.87,
       "cache_read_per_million": 0.0036,
-      "cache_write_per_million": 0.435
+      "cache_write_per_million": 0.435,
+      "provider": "xiaomi/fp8"
     }
   ]
 }

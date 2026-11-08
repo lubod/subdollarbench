@@ -421,6 +421,10 @@ impl ModelPricing {
 #[derive(Debug, Deserialize)]
 struct PriceEntry {
     id: String,
+    /// R67 F1: the OpenRouter endpoint slug every paid call is pinned to.
+    /// The four prices are that endpoint's, not the model-level catalog's.
+    #[serde(default)]
+    provider: Option<String>,
     prompt_per_million: f64,
     completion_per_million: f64,
     cache_read_per_million: f64,
@@ -461,11 +465,9 @@ pub const PRICE_OVERRIDES: &[(&str, &str)] = &[
     ),
     ("xiaomi/mimo-v2.6-flash", ""),
     ("qwen/qwen3.8-flash", ""),
-    // R66 F1: the next grid's four models.
-    (
-        "minimax/minimax-m3.1-flash",
-        "2× the base rate 01:00-15:00 UTC",
-    ),
+    // R66 F1: the next grid's four models. R67 F1 pins minimax to
+    // GMICloud, which has no time-of-day override.
+    ("minimax/minimax-m3.1-flash", ""),
     ("openai/gpt-6-luna-pro", "2× above 272k prompt tokens"),
     ("tencent/hy4", ""),
     ("xiaomi/mimo-v2.6-pro", ""),
@@ -481,6 +483,17 @@ pub fn price_override_for(model: &str) -> Option<&'static str> {
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(m))
         .map(|(_, detail)| *detail)
+}
+
+/// R67 F1: the endpoint slug a model is pinned to, or None when the row
+/// has no provider (a paid launch is refused).
+pub fn provider_for_model(model: &str) -> Option<&'static str> {
+    let m = model.to_lowercase();
+    let m = m.strip_prefix("openrouter/").unwrap_or(&m);
+    snapshot_entries()
+        .iter()
+        .find(|e| e.id.eq_ignore_ascii_case(m))
+        .and_then(|e| e.provider.as_deref())
 }
 
 /// The snapshot's date, for the results page's Prices row.

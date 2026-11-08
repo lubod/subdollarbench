@@ -435,6 +435,63 @@ fn test_extract_session_stats_and_finding() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+/// R67 F1: the omp model argument carries the pinned endpoint suffix, and
+/// an unpinned model is passed through unchanged.
+#[test]
+fn r67_f1_cell_pins_provider() {
+    let pinned = omp_task_args(
+        "p",
+        "openrouter/openai/gpt-6-luna",
+        "/tmp/s",
+        None,
+        None,
+        "high",
+    );
+    assert!(
+        pinned
+            .iter()
+            .any(|a| a == "--model=openrouter/openai/gpt-6-luna@openai"),
+        "the paid cell must pin openai: {pinned:?}"
+    );
+    let plain = omp_task_args(
+        "p",
+        "openrouter/covtest/model",
+        "/tmp/s",
+        None,
+        None,
+        "high",
+    );
+    assert!(
+        plain
+            .iter()
+            .any(|a| a == "--model=openrouter/covtest/model"),
+        "an unpinned test model stays plain: {plain:?}"
+    );
+}
+
+/// R67 F2: the session's per-message `usage.cost.total` sums into
+/// `billed_usd`, beside the list-price `cost_usd`.
+#[test]
+fn r67_f2_billed_from_usage_cost() {
+    let dir = std::env::temp_dir().join(format!("r67_billed_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.jsonl");
+    let content = concat!(
+        "{\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":10,\"output\":2,\"cost\":{\"total\":0.0004}}}}\n",
+        "{\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":10,\"output\":2,\"cost\":{\"total\":0.0006}}}}\n"
+    );
+    std::fs::write(&path, content).unwrap();
+    let stats = OmpRunner::extract_latest_session_stats(Some(&path)).unwrap();
+    assert!(
+        (stats.billed_usd - 0.001).abs() < 1e-12,
+        "{}",
+        stats.billed_usd
+    );
+    assert!((stats.cost_usd - 0.001).abs() < 1e-12, "{}", stats.cost_usd);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// R65 F5: prompt tokens come from the field each provider route sends:
 /// deepseek/OpenAI chat (`prompt_tokens`), Anthropic (`input_tokens`), and
 /// OpenAI's Responses shape (`input_tokens` + `input_tokens_details`).

@@ -84,6 +84,7 @@ func main() {
         ref_drift: None,
         ref_image: None,
         egress_enforced: None,
+        billed_usd: None,
         tokens: RunTokenUsage {
             prompt_tokens: 18500,
             cached_tokens: 14000,

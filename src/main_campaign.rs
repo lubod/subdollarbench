@@ -1373,6 +1373,7 @@ async fn run_one_stage(
         // The provider-billed share: the cap's headroom converts into this
         // unit before it becomes an attempt budget (round-11 finding 1).
         api_cost_usd: br.total_cost_usd,
+        billed_usd: output.manifest.billed_usd.unwrap_or(0.0),
         turns: output.manifest.turns,
         duration_seconds: Some(output.manifest.duration_seconds),
         max_call_usd: output.max_call_usd,
@@ -1534,6 +1535,7 @@ mod tests {
             regressed: Vec::new(),
             regression_severity: 0,
             api_cost_usd: 0.01,
+            billed_usd: 0.0,
             effective_cost_usd: 0.01,
             turns: None,
             duration_seconds: None,
@@ -1582,6 +1584,7 @@ mod tests {
             reached,
             regression_free_tickets: 1,
             total_cost_usd,
+            billed_usd: 0.0,
             over_budget,
             cap_reached: false,
             budget_usd: 0.0,

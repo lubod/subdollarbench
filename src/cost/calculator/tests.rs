@@ -24,7 +24,7 @@ fn r51_f5_every_grid_model_has_an_entry() {
         Some("2× above 272k prompt tokens")
     );
     assert_eq!(price_override_for("unknown/model"), None);
-    assert_eq!(price_snapshot_as_of(), "2026-11-07");
+    assert_eq!(price_snapshot_as_of(), "2026-11-08");
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -191,7 +191,7 @@ fn r46_f1_grid_models_are_priced() {
 fn r66_f1_new_models_priced() {
     let cases = [
         ("tencent/hy4", 0.417, 1.2505, 0.021, 0.417),
-        ("minimax/minimax-m3.1-flash", 0.075, 0.3, 0.0075, 0.075),
+        ("minimax/minimax-m3.1-flash", 0.1125, 0.45, 0.01125, 0.1125),
         ("openai/gpt-6-luna-pro", 0.1, 0.5, 0.01, 0.125),
         ("xiaomi/mimo-v2.6-pro", 0.435, 0.87, 0.0036, 0.435),
     ];
@@ -216,16 +216,97 @@ fn r66_f1_new_models_priced() {
             "{id} must match with the openrouter/ prefix"
         );
     }
-    assert_eq!(
-        price_override_for("minimax/minimax-m3.1-flash"),
-        Some("2× the base rate 01:00-15:00 UTC")
-    );
+    // R67 F1: the pinned GMICloud endpoint has no time-of-day override.
+    assert_eq!(price_override_for("minimax/minimax-m3.1-flash"), Some(""));
     assert_eq!(
         price_override_for("openai/gpt-6-luna-pro"),
         Some("2× above 272k prompt tokens")
     );
     assert_eq!(price_override_for("tencent/hy4"), Some(""));
     assert_eq!(price_override_for("xiaomi/mimo-v2.6-pro"), Some(""));
+}
+
+/// R67 F1: every grid row names the OpenRouter endpoint it is pinned to,
+/// and its four prices are that endpoint's. The fixture is the
+/// `/api/v1/models/<id>/endpoints` reading of 2026-11-08 (per million;
+/// a missing cache-write is the prompt rate, the snapshot's rule).
+#[test]
+fn r67_f1_rows_match_pinned_provider() {
+    let endpoints: [(&str, &str, f64, f64, f64, f64); 9] = [
+        (
+            "anthropic/claude-haiku-5.5",
+            "anthropic",
+            0.10,
+            0.50,
+            0.01,
+            0.125,
+        ),
+        (
+            "deepseek/deepseek-v4.1-flash-1017",
+            "deepseek",
+            0.15,
+            0.60,
+            0.003,
+            0.15,
+        ),
+        ("openai/gpt-6-luna", "openai", 0.10, 0.50, 0.01, 0.125),
+        (
+            "xiaomi/mimo-v2.6-flash",
+            "xiaomi/fp8",
+            0.14,
+            0.28,
+            0.0028,
+            0.14,
+        ),
+        (
+            "qwen/qwen3.8-flash",
+            "alibaba/us-east-1",
+            0.15,
+            0.47,
+            0.016,
+            0.15,
+        ),
+        ("tencent/hy4", "tencent/fp4", 0.417, 1.2505, 0.021, 0.417),
+        (
+            "minimax/minimax-m3.1-flash",
+            "gmicloud/fp8",
+            0.1125,
+            0.45,
+            0.01125,
+            0.1125,
+        ),
+        ("openai/gpt-6-luna-pro", "openai", 0.10, 0.50, 0.01, 0.125),
+        (
+            "xiaomi/mimo-v2.6-pro",
+            "xiaomi/fp8",
+            0.435,
+            0.87,
+            0.0036,
+            0.435,
+        ),
+    ];
+    for (id, provider, prompt, completion, cache_read, cache_write) in endpoints {
+        assert_eq!(
+            provider_for_model(id),
+            Some(provider),
+            "{id} must be pinned"
+        );
+        let p = ModelPricing::list_price_for_model(id)
+            .unwrap_or_else(|| panic!("{id} has no snapshot row"));
+        for (name, got, want) in [
+            ("prompt", p.prompt_per_million, prompt),
+            ("completion", p.completion_per_million, completion),
+            ("cache read", p.cache_read_per_million, cache_read),
+            ("cache write", p.cache_write_per_million, cache_write),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "{id} {name}: snapshot {got} != endpoint {want}"
+            );
+        }
+    }
+    // A row without a provider is not pinned.
+    assert_eq!(provider_for_model("google/gemini-2.5-flash"), None);
 }
 
 /// R24-1: the operator's test/calibration models must be launchable.

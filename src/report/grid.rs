@@ -66,6 +66,9 @@ pub struct CareerCell {
     /// per-workload ratios.
     pub perf: Option<crate::verifier::sql::perfscore::PerfScore>,
     pub cost: f64,
+    /// R67 F2: the provider bill summed over the career's phases; None on
+    /// careers that recorded no bill (the v2 grid ran unpinned).
+    pub billed: Option<f64>,
     pub over_budget: bool,
     pub cap_reached: bool,
     pub over_wall: bool,
@@ -518,6 +521,13 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
     let fingerprints = recorded_fingerprints(cells);
     let (wall_seconds, agent_seconds, turns) = career_effort(cells);
     let tokens = token_totals(cells);
+    let billed: Option<f64> = {
+        let vals: Vec<f64> = cells
+            .iter()
+            .filter_map(|c| c.rollup["billed_usd"].as_f64())
+            .collect();
+        (!vals.is_empty()).then(|| vals.iter().sum())
+    };
     let unique = unique_stage_records(&stage_records);
     let reached = unique.iter().filter(|r| r.passed).map(|r| r.id).max();
     let regression_free = unique
@@ -636,6 +646,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         fingerprints,
         perf,
         cost,
+        billed,
         over_budget: leaf.rollup["over_budget"].as_bool().unwrap_or(false),
         cap_reached: leaf.rollup["cap_reached"].as_bool().unwrap_or(false),
         over_wall: leaf.rollup["over_wall"].as_bool().unwrap_or(false),
@@ -1067,22 +1078,30 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
         g.sort_by(|a, b| {
             let ca = &cells[*a];
             let cb = &cells[*b];
-            let ranked_a = ca.finished && ca.key.current_rules && !ca.rehearsal && !ca.smoke;
-            let ranked_b = cb.finished && cb.key.current_rules && !cb.rehearsal && !cb.smoke;
-            // R64 F4: the ranked careers number first, so a rehearsal or an
-            // unfinished cell never shifts the paid careers' indices.
-            ranked_b
-                .cmp(&ranked_a)
+            // R67 F3 (R64-3): only a paid career (ranked or unfinished) is
+            // numbered; a rehearsal or smoke cell is not.
+            let numbered_a = ca.key.current_rules && !ca.rehearsal && !ca.smoke;
+            let numbered_b = cb.key.current_rules && !cb.rehearsal && !cb.smoke;
+            numbered_b
+                .cmp(&numbered_a)
                 .then_with(|| ca.started.cmp(&cb.started))
                 .then_with(|| ca.campaign_id.cmp(&cb.campaign_id))
         });
-        for (i, idx) in g.iter().enumerate() {
+        let mut n = 0usize;
+        for idx in g {
             let c = &cells[*idx];
             let date = c.started.get(..10).filter(|d| !d.is_empty()).unwrap_or("—");
-            out.insert(
-                c.campaign_id.clone(),
-                format!("{} · career {} · {}", short_model(&c.model), i + 1, date),
-            );
+            let label = if c.key.current_rules && !c.rehearsal && !c.smoke {
+                n += 1;
+                format!("{} · career {} · {}", short_model(&c.model), n, date)
+            } else if c.rehearsal {
+                format!("{} · rehearsal · {}", short_model(&c.model), date)
+            } else if c.smoke {
+                format!("{} · smoke · {}", short_model(&c.model), date)
+            } else {
+                format!("{} · unranked · {}", short_model(&c.model), date)
+            };
+            out.insert(c.campaign_id.clone(), label);
         }
     }
     out
@@ -2147,15 +2166,22 @@ fn render_results(cells: &[CareerCell]) -> String {
         let passed: usize = cs.iter().map(|c| c.tickets_passed()).sum();
         let regfree: u32 = cs.iter().map(|c| c.regression_free).sum();
         let rate = (passed > 0).then(|| regfree as f64 / passed as f64);
+        let list: f64 = cs.iter().map(|c| c.cost).sum();
+        let billed: Option<f64> = cs.iter().filter_map(|c| c.billed).reduce(|a, b| a + b);
+        let spend = match billed {
+            Some(b) => format!("${list:.2} / ${b:.2}"),
+            None => format!("${list:.2} / —"),
+        };
         metrics.push_str(&format!(
-            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td></tr>",
+            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
             esc(model),
             esc(short_model(model)),
             costs.first().copied().unwrap_or(0.0),
             median(&costs).unwrap_or(0.0),
             costs.last().copied().unwrap_or(0.0),
             rate.map(|r| format!("{:.1}%", r * 100.0))
-                .unwrap_or_else(|| "—".to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            spend
         ));
     }
 
@@ -2299,7 +2325,7 @@ fn render_results(cells: &[CareerCell]) -> String {
         ));
     }
     h.push_str(&format!("<section><h3>Per-ticket pass share</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div></section>"));
-    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
+    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th><th>Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
     let stability = rank_stability(cells, &groups);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let mut h2h_rows = String::new();
@@ -2786,6 +2812,22 @@ mod tests {
                 }
                 fs::write(path, v.to_string()).unwrap();
             }
+        }
+    }
+
+    /// R67 F2: record a phase's provider bill in both files.
+    fn set_billed(runs: &Path, prefix: &str, phase: u32, value: f64) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["billed_usd"] = serde_json::json!(value);
+            fs::write(path, v.to_string()).unwrap();
         }
     }
 
@@ -4190,6 +4232,72 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// R67 F2: the results page shows list and billed spend per model,
+    /// with the cap note; a career with no recorded bill shows `—`.
+    #[test]
+    fn r67_f2_results_billed() {
+        let (base, runs, out) = fixture("r67billed");
+        career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("$0.04 / —"), "{html}");
+        assert!(html.contains("The cap counts list price."), "{html}");
+        for phase in 1..=4 {
+            set_billed(&runs, "m", phase, phase as f64 * 0.1);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("$0.04 / $1.00"), "{html}");
+        assert!(html.contains("The cap counts list price."), "{html}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R67 F3 (R64-3): the paid careers are numbered 1-3 by start time;
+    /// a rehearsal is never numbered.
+    #[test]
+    fn r67_f3_rehearsal_never_numbered() {
+        let (base, runs, _out) = fixture("r67f3num");
+        for (prefix, date) in [
+            ("p1", "2026-11-04"),
+            ("p2", "2026-11-05"),
+            ("p3", "2026-11-06"),
+        ] {
+            career(&runs, prefix, "m", [1.0; 4], [0.01; 4]);
+            for phase in 1..=4 {
+                set_phase_times(
+                    &runs,
+                    prefix,
+                    phase,
+                    &format!("{date}T0{phase}:00:00Z"),
+                    &format!("{date}T0{phase}:30:00Z"),
+                );
+            }
+        }
+        career(&runs, "reh", "m", [1.0; 4], [0.0; 4]);
+        set_mark(&runs, "reh", 4, "rehearsal");
+        let cells = careers(runs.to_str().unwrap());
+        let labels = career_labels(&cells);
+        for (prefix, n, date) in [
+            ("p1", 1, "2026-11-04"),
+            ("p2", 2, "2026-11-05"),
+            ("p3", 3, "2026-11-06"),
+        ] {
+            let id = format!("campaign_{prefix}_p4");
+            let label = labels.get(&id).unwrap_or_else(|| panic!("{id} label"));
+            assert!(
+                label.contains(&format!("career {n} · {date}")),
+                "{id}: {label}"
+            );
+        }
+        let reh = labels.get("campaign_reh_p4").expect("rehearsal label");
+        assert!(
+            !reh.contains("career"),
+            "the rehearsal is not numbered: {reh}"
+        );
+        assert!(reh.contains("rehearsal"), "{reh}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R52 F6 (R47-1): the board hover shows a floored workload's 0.10x
     /// and reason, never its raw ratio or a guessed "not durable".
     #[test]
@@ -4242,7 +4350,7 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("results.html"));
         assert!(html.contains("<th>Prices</th>"), "{html}");
-        assert!(html.contains("2026-11-07"), "{html}");
+        assert!(html.contains("2026-11-08"), "{html}");
         assert!(html.contains("base rates per call"), "{html}");
         for needle in [
             "5× the prompt rate above 100k prompt tokens",

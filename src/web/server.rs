@@ -1813,7 +1813,8 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             })
     };
     out.sort_by(|a, b| crate::campaign::board_order(&key(a), &key(b)));
-    out.truncate(50);
+    // R67 F3 (R66-4): never cut phases. The Board groups cells into careers
+    // client-side, so a phase below position 50 is still part of its career.
     Json(out)
 }
 
@@ -5100,6 +5101,71 @@ global.fetch = async (url) => {
             }
             None => eprintln!("no live.log on disk; skipping the real-log kind check"),
         }
+    }
+
+    /// R67 F3 (R66-4): a career's low-scoring phase is never cut by the
+    /// 50-row API cap; the Board can group the whole career.
+    #[tokio::test]
+    async fn r67_f3_api_keeps_every_phase() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let pid = std::process::id();
+        let write_cell = |name: &str, model: &str, phase: Option<u32>, points: f64| {
+            let dir = runs.join(name);
+            fs::create_dir_all(dir.join("s0_full")).unwrap();
+            let mut rollup = serde_json::json!({
+                "campaign_id": name, "name": "sdb-sql", "model": model, "harness": "omp",
+                "effort": "high", "task": "sql", "started_at": "2026-10-19T00:00:00Z",
+                "finished_at": "2026-10-19T01:00:00Z",
+                "stages": [{
+                    "id": 0, "title": "Genesis", "type": "genesis", "passed": true,
+                    "pass_rate": 100.0, "passed_stages": 3, "total_stages": 3,
+                    "regressed": [], "regression_severity": 0,
+                    "effective_cost_usd": 0.01, "turns": 5, "duration_seconds": 60.0,
+                    "status": "passed", "run_id": "s0", "git_commit": null, "git_stat": null
+                }],
+                "reached": 0, "regression_free_tickets": 1, "points": points,
+                "max_points": 76.0, "rules_version": crate::report::rules::RULES_VERSION,
+                "total_cost_usd": 0.01, "over_budget": false, "cap_reached": false,
+                "over_wall": false
+            });
+            if let Some(p) = phase {
+                rollup["phase"] = serde_json::json!(p);
+                rollup["career"] = serde_json::json!({
+                    "points": points, "total_cost_usd": 0.01, "cells": [name]
+                });
+            }
+            fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+            fs::write(
+                dir.join("s0_full/manifest.json"),
+                serde_json::json!({
+                    "run_id": "s0", "model": model, "task": "sql", "status": "passed",
+                    "language": "python", "started_at": "2026-10-19T00:00:00Z",
+                    "completed_at": "2026-10-19T00:01:00Z", "duration_seconds": 60.0,
+                    "pass_rate": 100.0, "passed_stages": 3, "total_stages": 3,
+                    "stages": []
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        for i in 0..60 {
+            write_cell(
+                &format!("campaign_sdb-sql_r67high{i}_{pid}"),
+                &format!("high{i}"),
+                None,
+                70.0,
+            );
+        }
+        let low = format!("campaign_sdb-sql_r67low_{pid}");
+        write_cell(&low, "low", Some(1), 0.0);
+        let Json(cells) = get_campaigns().await;
+        assert!(
+            cells.iter().any(|c| c["id"].as_str() == Some(low.as_str())),
+            "the low-scoring phase must survive the API: {} cells",
+            cells.len()
+        );
+        assert!(cells.len() >= 61, "all cells are returned: {}", cells.len());
     }
 
     /// gui-spec.md §5.4: the detail endpoint carries the full ladder

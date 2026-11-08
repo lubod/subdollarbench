@@ -137,6 +137,53 @@ async fn r66_f1_price_preflight_accepts_the_new_grid() {
     );
 }
 
+/// R67 F1: a priced row without a pinned provider is refused, and a pinned
+/// grid model passes.
+#[tokio::test]
+async fn r67_f1_unpinned_refused() {
+    let err = require_model_list_price("google/gemini-2.5-flash", false)
+        .await
+        .unwrap_err();
+    assert!(err.contains("no pinned provider"), "{err}");
+    require_model_list_price("openai/gpt-6-luna", false)
+        .await
+        .expect("a pinned grid model must pass");
+}
+
+/// R67 F2: the phase rollup sums its tickets' billed totals.
+#[tokio::test]
+async fn r67_f2_rollup_billed() {
+    let lc = fixture_campaign_with_lite();
+    let opts = CampaignRunOptions {
+        campaign_id: "r67billed".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let rollup = run_campaign(
+        &lc,
+        &opts,
+        move |attempt| {
+            let mut o = outcome(true, &[(1, true), (2, true)]);
+            o.billed_usd = if attempt.stage.id == 0 { 0.2 } else { 0.3 };
+            async move { Ok(o) }
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let want: f64 = rollup.stages.iter().map(|r| r.billed_usd).sum();
+    assert!(
+        (rollup.billed_usd - want).abs() < 1e-9,
+        "billed {} vs tickets {}",
+        rollup.billed_usd,
+        want
+    );
+    assert!(want > 0.0);
+}
+
 /// gui-spec.md §5.2: the classifier's six kinds, one fixture each.
 #[test]
 fn failure_classifier_kinds() {
@@ -363,6 +410,7 @@ fn backfill_reads_rounds_from_the_console_and_classifies_the_failure() {
         reached: None,
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
+        billed_usd: 0.0,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -400,6 +448,7 @@ fn backfill_reads_rounds_from_the_console_and_classifies_the_failure() {
         regressed: vec![],
         regression_severity: 0,
         api_cost_usd: 0.02,
+        billed_usd: 0.0,
         effective_cost_usd: 0.02,
         turns: Some(12),
         duration_seconds: Some(200.0),
@@ -426,6 +475,7 @@ fn backfill_reads_rounds_from_the_console_and_classifies_the_failure() {
         regressed: vec![3, 4, 5],
         regression_severity: 3,
         api_cost_usd: 0.1,
+        billed_usd: 0.0,
         effective_cost_usd: 0.1,
         turns: Some(30),
         duration_seconds: Some(900.0),
@@ -849,6 +899,7 @@ fn ladder_derives_every_ticket() {
         regressed: vec![],
         regression_severity: 0,
         api_cost_usd: 0.01,
+        billed_usd: 0.0,
         effective_cost_usd: 0.01,
         turns: Some(3),
         duration_seconds: Some(10.0),
@@ -889,6 +940,7 @@ fn ladder_derives_every_ticket() {
         reached: Some(0),
         regression_free_tickets: 1,
         total_cost_usd: 0.01,
+        billed_usd: 0.0,
         over_budget: true,
         cap_reached: false,
         over_wall: false,
@@ -954,6 +1006,7 @@ fn outcome(passed: bool, result_ids: &[(u32, bool)]) -> StageOutcome {
             .map(|(id, p)| stage_result(*id, *p))
             .collect(),
         api_cost_usd: 0.01,
+        billed_usd: 0.0,
         effective_cost_usd: 0.01,
         turns: Some(10),
         duration_seconds: Some(60.0),
@@ -1513,7 +1566,7 @@ async fn r23_8_stage_api_cost_sums_to_total() {
 async fn r23_d3_a_model_without_a_list_price_is_refused() {
     let dead = "http://127.0.0.1:9/models";
     assert!(
-        require_model_list_price_at("google/gemini-2.5-flash", dead, false)
+        require_model_list_price_at("openai/gpt-6-luna", dead, false)
             .await
             .is_ok()
     );
@@ -2593,6 +2646,7 @@ fn chain_rollup(phase: u32, finished: bool) -> CampaignRollup {
         reached: Some(6),
         regression_free_tickets: 0,
         total_cost_usd: 0.5,
+        billed_usd: 0.0,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -3300,6 +3354,7 @@ fn failed_record(id: u32, title: &str, line: &str, detail: &str) -> StageRecord 
         regressed: Vec::new(),
         regression_severity: 0,
         api_cost_usd: 0.1,
+        billed_usd: 0.0,
         effective_cost_usd: 0.1,
         turns: Some(10),
         duration_seconds: Some(60.0),

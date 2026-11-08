@@ -1091,6 +1091,10 @@ pub struct StageOutcome {
     /// Provider-billed API spend at list price. R23 D3: the campaign cap
     /// and the ticket pool count this number only.
     pub api_cost_usd: f64,
+    /// R67 F2: the provider's own bill from the session's `usage.cost.total`,
+    /// beside the list-price `api_cost_usd`.
+    #[serde(default)]
+    pub billed_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
     /// The largest single provider call this attempt made; the campaign cap
@@ -1140,6 +1144,9 @@ pub struct StageRecord {
     /// the budget and cap use; `effective_cost_usd` adds the compute floor.
     #[serde(default)]
     pub api_cost_usd: f64,
+    /// R67 F2: the provider's own bill for this ticket, beside the list.
+    #[serde(default)]
+    pub billed_usd: f64,
     pub effective_cost_usd: f64,
     pub turns: Option<u32>,
     pub duration_seconds: Option<f64>,
@@ -2137,6 +2144,7 @@ fn live_rollup_stub_at_with(
         reached: None,
         regression_free_tickets: 0,
         total_cost_usd: live["campaign_spent"].as_f64().unwrap_or(0.0),
+        billed_usd: 0.0,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -2190,14 +2198,18 @@ pub async fn require_model_list_price_at(
     }
     if crate::cost::calculator::ModelPricing::list_price_for_model_async_at(model, url)
         .await
-        .is_some()
+        .is_none()
     {
-        Ok(())
-    } else {
-        Err(format!(
+        return Err(format!(
             "model {model} has no entry in the price snapshot src/cost/model_prices.json; add the model's catalog id there, then retry the paid campaign launch"
-        ))
+        ));
     }
+    if crate::cost::calculator::provider_for_model(model).is_none() {
+        return Err(format!(
+            "model {model} has no pinned provider in src/cost/model_prices.json; add the provider endpoint and its prices, then retry the paid campaign launch"
+        ));
+    }
+    Ok(())
 }
 
 pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<(), String> {
@@ -2632,6 +2644,9 @@ pub struct CampaignRollup {
     /// Tickets passed without any regression in their acceptance suite.
     pub regression_free_tickets: u32,
     pub total_cost_usd: f64,
+    /// R67 F2: the phase's provider bill summed over its tickets.
+    #[serde(default)]
+    pub billed_usd: f64,
     /// Spent *at or above* the campaign cap (round-11 finding 2: this stays
     /// strictly "over budget"; the floor stop is `cap_reached`).
     pub over_budget: bool,
@@ -3096,6 +3111,7 @@ where
         reached,
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
+        billed_usd: 0.0,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -3584,6 +3600,7 @@ where
         });
     }
     rollup.finished_at = chrono::Utc::now().to_rfc3339();
+    rollup.billed_usd = rollup.stages.iter().map(|r| r.billed_usd).sum();
     Ok(rollup)
 }
 
@@ -3599,6 +3616,7 @@ fn stop_on_harness_fault(
     rollup.harness_fault = Some(format!("ticket {stage_id}: {reason}"));
     rollup.reached = reached;
     rollup.total_cost_usd = total_cost;
+    rollup.billed_usd = rollup.stages.iter().map(|r| r.billed_usd).sum();
     rollup.points = rollup.stages.iter().map(|r| r.points).sum();
     rollup.regression_free_tickets = rollup
         .stages
@@ -3620,6 +3638,7 @@ fn skipped_record(stage: &StageSpec) -> StageRecord {
         regressed: Vec::new(),
         regression_severity: 0,
         api_cost_usd: 0.0,
+        billed_usd: 0.0,
         effective_cost_usd: 0.0,
         turns: None,
         duration_seconds: None,
@@ -3690,6 +3709,7 @@ fn push_attempt_record(
         regressed,
         regression_severity,
         api_cost_usd: out.api_cost_usd,
+        billed_usd: out.billed_usd,
         effective_cost_usd: out.effective_cost_usd,
         turns: out.turns,
         duration_seconds: out.duration_seconds,
