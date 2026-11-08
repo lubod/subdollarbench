@@ -4350,7 +4350,7 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("results.html"));
         assert!(html.contains("<th>Prices</th>"), "{html}");
-        assert!(html.contains("2026-11-07"), "{html}");
+        assert!(html.contains("2026-11-08"), "{html}");
         assert!(html.contains("base rates per call"), "{html}");
         for needle in [
             "5× the prompt rate above 100k prompt tokens",
