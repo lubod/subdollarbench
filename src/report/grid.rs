@@ -806,26 +806,20 @@ fn strip_html(ladder: &[LadderEntry]) -> String {
     let squares: String = ladder
         .iter()
         .map(|e| {
-            let cls = match e.status.as_str() {
-                "pass" => "pass",
-                "lite" => "lite",
-                "fail" => "fail",
-                "fault" => "fault",
-                "skipped" => "skip",
-                "running" => "run",
-                _ => "na",
+            // R71 F1 (R70-2): one-letter status classes and a terse title;
+            // the legend explains the letters, the square keeps its number.
+            let (cls, short) = match e.status.as_str() {
+                "pass" => ("p", "p"),
+                "lite" => ("l", "l"),
+                "fail" => ("f", "f"),
+                "fault" => ("x", "x"),
+                "skipped" => ("s", "s"),
+                "running" => ("r", "r"),
+                _ => ("n", "n"),
             };
             format!(
-                "<span class=\"sq {cls}\" data-ticket=\"{}\" title=\"ticket {} · {} · {}{}\">{}</span>",
-                e.id,
-                e.id,
-                esc(&e.title),
-                e.status,
-                e.cause
-                    .as_deref()
-                    .map(|c| format!(" · {c}"))
-                    .unwrap_or_default(),
-                e.id
+                "<span class=\"sq {cls}\" data-t=\"{}\" title=\"t{} {short}\">{}</span>",
+                e.id, e.id, e.id
             )
         })
         .collect();
@@ -833,7 +827,7 @@ fn strip_html(ladder: &[LadderEntry]) -> String {
 }
 
 fn legend_html() -> &'static str {
-    "<div class=\"legend\"><span class=\"sq pass\">·</span>pass<span class=\"sq lite\">·</span>lite<span class=\"sq fail\">·</span>fail<span class=\"sq fault\">·</span>fault<span class=\"sq skip\">·</span>skipped<span class=\"sq run\">·</span>running<span class=\"sq na\">·</span>not reached</div>"
+    "<div class=\"legend\"><span class=\"sq p\">·</span>pass<span class=\"sq l\">·</span>lite<span class=\"sq f\">·</span>fail<span class=\"sq x\">·</span>fault<span class=\"sq s\">·</span>skipped<span class=\"sq r\">·</span>running<span class=\"sq n\">·</span>not reached</div>"
 }
 
 /// R64 F1: points print with at most one decimal (`57.6`, never
@@ -1464,7 +1458,7 @@ fn strip_cell(
     format!(
         "<div class=\"val\">{}</div>{}",
         median.map(fmt).unwrap_or_else(|| "—".to_string()),
-        dot_strip(values, median, lo, hi, log, label, fmt)
+        dot_strip(values, median, lo, hi, log, label)
     )
 }
 
@@ -1498,7 +1492,6 @@ fn model_row(
     } else {
         "careers"
     };
-    let points: Vec<Option<f64>> = g.careers.iter().map(|i| Some(cells[*i].points)).collect();
     let perfs: Vec<Option<f64>> = g
         .careers
         .iter()
@@ -1533,16 +1526,7 @@ fn model_row(
     // strips in the expanded view.
     let bar = points_bar(cells, g, colour);
     let strips = format!(
-        "<div class=\"more-strips\"><div class=\"strip-metric\"><span class=\"mut\">points</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">perf</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">$</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">duration</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">turns</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">tokens out</span>{}</div></div>",
-        strip_cell(
-            &points,
-            Some(med.points),
-            0.0,
-            CAREER_MAX_POINTS,
-            false,
-            "points",
-            fmt_pts1
-        ),
+        "<div class=\"more-strips\"><div class=\"strip-metric\"><span class=\"mut\">perf</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">$</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">duration</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">turns</span>{}</div><div class=\"strip-metric\"><span class=\"mut\">tokens out</span>{}</div></div>",
         strip_cell(&perfs, perf_med, 0.1, 10.0, true, "perf", fmt_perf),
         strip_cell(
             &costs,
@@ -1582,13 +1566,15 @@ fn model_row(
         )
     );
     let agreement = ticket_agreement(cells, g);
+    let link = agreement_link(cells, g);
     let more = format!(
-        "<details class=\"more\"><summary>×{} {word} ▸</summary><div class=\"agree agree-details\">{agreement}</div>{strips}<div class=\"table-scroll\"><table class=\"career-table\">{}{inner}</table></div></details>",
+        "<details id=\"agree-{}\" class=\"more\"><summary>×{} {word} ▸</summary><div class=\"agree\">{agreement}</div>{strips}<div class=\"table-scroll\"><table class=\"career-table\">{}{inner}</table></div></details>",
+        g.median,
         g.careers.len(),
         career_table_head()
     );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div>{more}</td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{agreement}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div>{more}</td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{link}</td></tr>",
         rank_badge(g, stability),
         swatch(&g.model, colours),
         esc(&g.model),
@@ -1852,7 +1838,6 @@ fn dot_strip(
     hi: f64,
     log: bool,
     label: &str,
-    fmt: fn(f64) -> String,
 ) -> String {
     let w = 84.0;
     let h = 16.0;
@@ -1871,21 +1856,13 @@ fn dot_strip(
         };
         pad + t * (w - 2.0 * pad)
     };
-    let vals: Vec<String> = values
-        .iter()
-        .map(|v| v.map(fmt).unwrap_or_else(|| "—".to_string()))
-        .collect();
-    let med_text = median.map(fmt).unwrap_or_else(|| "—".to_string());
+    // R71 F1 (R70-2): the career table carries the values; the strip keeps
+    // only its metric name, so the repeated SVG stays small.
     let mut s = format!(
-        "<svg class=\"dots\" data-metric=\"{}\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\" role=\"img\">",
+        "<svg class=\"dots\" data-metric=\"{}\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\" role=\"img\" aria-label=\"{}\">",
+        esc(label),
         esc(label)
     );
-    s.push_str(&format!(
-        "<title>{}: {} · median {}</title>",
-        esc(label),
-        esc(&vals.join(", ")),
-        esc(&med_text)
-    ));
     s.push_str(&format!(
         "<line class=\"baseline\" x1=\"{pad:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\"/>",
         h / 2.0,
@@ -1895,8 +1872,8 @@ fn dot_strip(
     for v in values {
         let vv = v.unwrap_or(lo);
         s.push_str(&format!(
-            "<circle class=\"dot{}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.2\"/>",
-            if v.is_none() { " missing" } else { "" },
+            "<circle class=\"d{}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"3.2\"/>",
+            if v.is_none() { " m" } else { "" },
             x(vv),
             h / 2.0
         ));
@@ -1951,11 +1928,9 @@ fn fmt_variance(name: &str, v: f64) -> String {
     }
 }
 
-/// R64 F6: the expanded model view's ticket agreement. The strip shades
-/// each ticket by the share of the model's careers that passed it, and
-/// the line counts agreement over the 20 non-genesis tickets.
-fn ticket_agreement(cells: &[CareerCell], g: &ModelGroup) -> String {
-    let n = g.careers.len();
+/// R71 F1 (R70-2): the passed counts and the summary shared by the one
+/// agreement strip and its row link.
+fn agreement_passed(cells: &[CareerCell], g: &ModelGroup) -> [usize; 21] {
     let mut passed = [0usize; 21];
     for i in &g.careers {
         for rec in unique_stage_records(&cells[*i].stage_records) {
@@ -1964,22 +1939,10 @@ fn ticket_agreement(cells: &[CareerCell], g: &ModelGroup) -> String {
             }
         }
     }
-    let mut squares = String::new();
-    for (id, p) in passed.iter().enumerate() {
-        let p = *p;
-        let cls = if p == 0 {
-            "agree-none"
-        } else if p == n {
-            "agree-full"
-        } else if p * 2 > n {
-            "agree-most"
-        } else {
-            "agree-some"
-        };
-        squares.push_str(&format!(
-            "<span class=\"sq {cls}\" title=\"ticket {id} · passed by {p}/{n}\">{id}</span>"
-        ));
-    }
+    passed
+}
+
+fn agreement_summary(passed: &[usize; 21], n: usize) -> (usize, Vec<String>) {
     let mut agree = 0;
     let mut differs: Vec<String> = Vec::new();
     for (id, p) in passed.iter().enumerate().skip(1) {
@@ -1989,13 +1952,52 @@ fn ticket_agreement(cells: &[CareerCell], g: &ModelGroup) -> String {
             differs.push(id.to_string());
         }
     }
+    (agree, differs)
+}
+
+/// R64 F6 / R71 F1: the one 21-square agreement strip, inside `<details>`.
+/// The row's cell links to it instead of carrying a second copy.
+fn ticket_agreement(cells: &[CareerCell], g: &ModelGroup) -> String {
+    let n = g.careers.len();
+    let passed = agreement_passed(cells, g);
+    let (agree, differs) = agreement_summary(&passed, n);
+    let mut squares = String::new();
+    for (id, p) in passed.iter().enumerate() {
+        let p = *p;
+        let cls = if p == 0 {
+            "a0"
+        } else if p == n {
+            "a3"
+        } else if p * 2 > n {
+            "a2"
+        } else {
+            "a1"
+        };
+        squares.push_str(&format!(
+            "<span class=\"sq {cls}\" title=\"t{id} {p}/{n}\">{id}</span>"
+        ));
+    }
+    let diff = if differs.is_empty() {
+        String::new()
+    } else {
+        format!(" · differs: {}", differs.join(", "))
+    };
+    format!("<div class=\"strip\">{squares}</div><div class=\"mut\">agree {agree}/20{diff}</div>")
+}
+
+/// R71 F1: the row's compact link to the one strip.
+fn agreement_link(cells: &[CareerCell], g: &ModelGroup) -> String {
+    let n = g.careers.len();
+    let passed = agreement_passed(cells, g);
+    let (agree, differs) = agreement_summary(&passed, n);
     let diff = if differs.is_empty() {
         String::new()
     } else {
         format!(" · differs: {}", differs.join(", "))
     };
     format!(
-        "<div class=\"agree\"><div class=\"strip\">{squares}</div><div class=\"mut\">agree {agree}/20{diff}</div></div>"
+        "<a class=\"agree-link\" href=\"#agree-{}\" title=\"open the 21-square strip\">agree {agree}/20{diff}</a>",
+        g.median
     )
 }
 
@@ -2072,33 +2074,161 @@ fn variance_rows(
     out
 }
 
-/// R69 F1: the model palette, assigned in board order and shared by the
-/// board, both charts, their legends and every results table. Okabe-Ito's
-/// eight colours, with black swapped for a light grey so every mark stays
-/// visible on the dark background (all eight clear 3:1 against `--bg` and
-/// `--card`; see `r69_f4_contrast`).
+/// R69 F1 / R71 F3: the model palette, assigned in board order and shared
+/// by the board, both charts, their legends and every results table. Twelve
+/// colours, all at least 3:1 against `--card`; the second channel (marker
+/// shape and dash) keeps same-family colours apart.
+pub const PALETTE_LEN: usize = 12;
+
 fn palette(i: usize) -> &'static str {
-    const COLORS: [&str; 8] = [
+    const COLORS: [&str; PALETTE_LEN] = [
         "#56B4E9", "#E69F00", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#BBBBBB",
+        "#8C6D31", "#CAB2D6", "#44AA99", "#AA4499",
     ];
-    COLORS[i % COLORS.len()]
+    COLORS[i % PALETTE_LEN]
 }
 
-/// R69 F1: one colour per model, assigned in board order (the first group
-/// that names the model). Both pages and every chart read this map, so a
-/// model never changes colour between views.
-fn model_colours(cells: &[CareerCell]) -> HashMap<String, &'static str> {
+/// R71 F3: the hue family, for the "same family, different shape" rule.
+fn palette_family(i: usize) -> &'static str {
+    const FAMILIES: [&str; PALETTE_LEN] = [
+        "blue", "orange", "green", "yellow", "blue", "orange", "pink", "grey", "brown", "purple",
+        "green", "purple",
+    ];
+    FAMILIES[i % PALETTE_LEN]
+}
+
+/// R71 F3: one marker shape per model, assigned in board order.
+fn model_shape(i: usize) -> &'static str {
+    const SHAPES: [&str; PALETTE_LEN] = [
+        "circle",
+        "square",
+        "triangle",
+        "diamond",
+        "star",
+        "plus",
+        "hexagon",
+        "pentagon",
+        "ring",
+        "bar",
+        "triangle-down",
+        "cross",
+    ];
+    SHAPES[i % PALETTE_LEN]
+}
+
+/// R71 F3: one survival dash per model, assigned in board order.
+fn model_dash(i: usize) -> &'static str {
+    const DASHES: [&str; PALETTE_LEN] = [
+        "", "6 3", "2 3", "8 3 2 3", "4 4", "1 3", "10 4", "6 3 2 3", "3 2 8 2", "12 4", "2 6",
+        "5 2 1 2",
+    ];
+    DASHES[i % PALETTE_LEN]
+}
+
+/// R71 F3: the model order that assigns colour, shape and dash.
+fn model_order(cells: &[CareerCell]) -> HashMap<String, usize> {
     let mut order: Vec<String> = Vec::new();
     for g in model_groups(cells) {
         if !order.iter().any(|m| m == &g.model) {
             order.push(g.model.clone());
         }
     }
-    order
+    order.into_iter().enumerate().map(|(i, m)| (m, i)).collect()
+}
+
+/// R69 F1: one colour per model, assigned in board order.
+fn model_colours(cells: &[CareerCell]) -> HashMap<String, &'static str> {
+    model_order(cells)
         .into_iter()
-        .enumerate()
-        .map(|(i, m)| (m, palette(i)))
+        .map(|(m, i)| (m, palette(i)))
         .collect()
+}
+
+/// R71 F3: one SVG marker in the model's shape and colour.
+fn mark_svg(shape: &str, colour: &str, cx: f64, cy: f64, r: f64) -> String {
+    let poly = |n: usize, rot: f64| -> String {
+        (0..n)
+            .map(|i| {
+                let a = rot + i as f64 * std::f64::consts::TAU / n as f64;
+                format!("{:.1},{:.1}", cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match shape {
+        "circle" => format!(
+            "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.1}\" fill=\"{colour}\"/>"
+        ),
+        "square" => format!(
+            "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"1\" fill=\"{colour}\"/>",
+            cx - r,
+            cy - r,
+            2.0 * r,
+            2.0 * r
+        ),
+        "triangle" => format!(
+            "<polygon points=\"{}\" fill=\"{colour}\"/>",
+            poly(3, -std::f64::consts::FRAC_PI_2)
+        ),
+        "triangle-down" => format!(
+            "<polygon points=\"{}\" fill=\"{colour}\"/>",
+            poly(3, std::f64::consts::FRAC_PI_2)
+        ),
+        "diamond" => format!(
+            "<polygon points=\"{}\" fill=\"{colour}\"/>",
+            poly(4, -std::f64::consts::FRAC_PI_2)
+        ),
+        "star" => {
+            let points = (0..10)
+                .map(|i| {
+                    let a = -std::f64::consts::FRAC_PI_2
+                        + i as f64 * std::f64::consts::PI / 5.0;
+                    let rr = if i % 2 == 0 { r } else { r * 0.45 };
+                    format!("{:.1},{:.1}", cx + rr * a.cos(), cy + rr * a.sin())
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("<polygon points=\"{points}\" fill=\"{colour}\"/>")
+        }
+        "plus" => format!(
+            "<path d=\"M {:.1} {cy:.1} H {:.1} M {cx:.1} {:.1} V {:.1}\" stroke=\"{colour}\" stroke-width=\"2\" fill=\"none\"/>",
+            cx - r,
+            cx + r,
+            cy - r,
+            cy + r
+        ),
+        "cross" => format!(
+            "<path d=\"M {:.1} {:.1} L {:.1} {:.1} M {:.1} {:.1} L {:.1} {:.1}\" stroke=\"{colour}\" stroke-width=\"2\" fill=\"none\"/>",
+            cx - r,
+            cy - r,
+            cx + r,
+            cy + r,
+            cx + r,
+            cy - r,
+            cx - r,
+            cy + r
+        ),
+        "hexagon" => format!(
+            "<polygon points=\"{}\" fill=\"{colour}\"/>",
+            poly(6, -std::f64::consts::FRAC_PI_2)
+        ),
+        "pentagon" => format!(
+            "<polygon points=\"{}\" fill=\"{colour}\"/>",
+            poly(5, -std::f64::consts::FRAC_PI_2)
+        ),
+        "ring" => format!(
+            "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.1}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"2\"/>"
+        ),
+        "bar" => format!(
+            "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"3\" rx=\"1\" fill=\"{colour}\"/>",
+            cx - r,
+            cy - 1.5,
+            2.0 * r
+        ),
+        _ => format!(
+            "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.1}\" fill=\"{colour}\"/>"
+        ),
+    }
 }
 
 /// R69 F1: a model's colour square, used beside every name on both pages.
@@ -2141,17 +2271,43 @@ fn pareto<'a>(cars: &'a [&'a CareerCell]) -> Vec<&'a CareerCell> {
     out
 }
 
-/// R65 F6 / R69 F3: one legend above each chart: a swatch in the model's
-/// shared colour and the short model name (the full id stays in the title).
-fn chart_legend(models: &[String], colours: &HashMap<String, &'static str>) -> String {
+/// R65 F6 / R69 F3 / R71 F3: one legend above each chart. The shape
+/// legend shows the model's marker; the dash legend its survival line.
+fn chart_legend(
+    models: &[String],
+    colours: &HashMap<String, &'static str>,
+    indices: &HashMap<String, usize>,
+    mode: &str,
+) -> String {
     let mut s = String::from("<div class=\"legend chart-legend\">");
     for m in models {
-        let colour = colours.get(m).copied().unwrap_or(palette(0));
-        s.push_str(&format!(
-            "<span class=\"key\"><span class=\"dot\" style=\"background:{colour}\"></span><span title=\"{}\">{}</span></span>",
-            esc(m),
-            model_name_html(m)
-        ));
+        let idx = indices.get(m).copied().unwrap_or(0);
+        let colour = colours.get(m).copied().unwrap_or(palette(idx));
+        if mode == "shape" {
+            let shape = model_shape(idx);
+            s.push_str(&format!(
+                "<span class=\"key\" data-model=\"{}\" data-shape=\"{}\" data-family=\"{}\" data-colour=\"{}\"><svg class=\"key-shape\" viewBox=\"0 0 14 14\" aria-hidden=\"true\">{}</svg><span title=\"{}\">{}</span></span>",
+                esc(m),
+                shape,
+                palette_family(idx),
+                colour,
+                mark_svg(shape, colour, 7.0, 7.0, 4.0),
+                esc(m),
+                model_name_html(m)
+            ));
+        } else {
+            let dash = model_dash(idx);
+            s.push_str(&format!(
+                "<span class=\"key\" data-model=\"{}\" data-dash=\"{}\" data-colour=\"{}\"><svg class=\"key-dash\" viewBox=\"0 0 24 8\" aria-hidden=\"true\"><line x1=\"0\" y1=\"4\" x2=\"24\" y2=\"4\" stroke=\"{}\" stroke-width=\"2\" stroke-dasharray=\"{}\"/></svg><span title=\"{}\">{}</span></span>",
+                esc(m),
+                esc(dash),
+                colour,
+                colour,
+                dash,
+                esc(m),
+                model_name_html(m)
+            ));
+        }
     }
     s.push_str("</div>");
     s
@@ -2159,7 +2315,11 @@ fn chart_legend(models: &[String], colours: &HashMap<String, &'static str>) -> S
 
 /// R69 F3: the scatter has axis titles, gridlines at round values, the
 /// shared model palette and a 760x560 viewBox (560 px tall on desktop).
-fn svg_scatter(cars: &[&CareerCell], colours: &HashMap<String, &'static str>) -> String {
+fn svg_scatter(
+    cars: &[&CareerCell],
+    colours: &HashMap<String, &'static str>,
+    indices: &HashMap<String, usize>,
+) -> String {
     let w = 760.0;
     let h = 560.0;
     let l = 74.0;
@@ -2243,14 +2403,17 @@ fn svg_scatter(cars: &[&CareerCell], colours: &HashMap<String, &'static str>) ->
         ));
     }
     for c in cars {
-        let colour = colours.get(&c.model).copied().unwrap_or(palette(0));
+        let idx = indices.get(&c.model).copied().unwrap_or(0);
+        let shape = model_shape(idx);
+        let colour = colours.get(&c.model).copied().unwrap_or(palette(idx));
+        let mark = mark_svg(shape, colour, x(c.cost), y(c.points), 5.0);
         s.push_str(&format!(
-            "<circle class=\"career-dot\" data-model=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\" cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"{colour}\"><title>{}: {:.1} pts · ${:.2}</title></circle>",
+            "<g class=\"career-dot\" data-model=\"{}\" data-shape=\"{}\" data-family=\"{}\" data-points=\"{:.1}\" data-cost=\"{:.4}\">{mark}<title>{}: {:.1} pts · ${:.2}</title></g>",
             esc(&c.model),
+            shape,
+            palette_family(idx),
             c.points,
             c.cost,
-            x(c.cost),
-            y(c.points),
             esc(short_model(&c.model)),
             c.points,
             c.cost
@@ -2262,7 +2425,11 @@ fn svg_scatter(cars: &[&CareerCell], colours: &HashMap<String, &'static str>) ->
 
 /// R69 F3: the survival chart has axis titles, gridlines every 25% and
 /// every five tickets, the shared palette and a 760x560 viewBox.
-fn svg_survival(series: &[(String, Vec<f64>)], colours: &HashMap<String, &'static str>) -> String {
+fn svg_survival(
+    series: &[(String, Vec<f64>)],
+    colours: &HashMap<String, &'static str>,
+    indices: &HashMap<String, usize>,
+) -> String {
     let w = 760.0;
     let h = 560.0;
     let l = 74.0;
@@ -2340,22 +2507,18 @@ fn svg_survival(series: &[(String, Vec<f64>)], colours: &HashMap<String, &'stati
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let dash = match mi {
-            0 => "",
-            1 => "6 3",
-            2 => "2 3",
-            3 => "8 3 2 3",
-            _ => "4 4",
-        };
+        let idx = indices.get(model).copied().unwrap_or(mi);
+        let dash = model_dash(idx);
         let dash_attr = if dash.is_empty() {
             String::new()
         } else {
             format!(" stroke-dasharray=\"{dash}\"")
         };
-        let colour = colours.get(model).copied().unwrap_or(palette(mi));
+        let colour = colours.get(model).copied().unwrap_or(palette(idx));
         s.push_str(&format!(
-            "<polyline class=\"survival-line\" data-model=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"{dash_attr}><title>{} · P(highest passed ticket ≥ i)</title></polyline>",
+            "<polyline class=\"survival-line\" data-model=\"{}\" data-dash=\"{}\" points=\"{pts}\" fill=\"none\" stroke=\"{}\" stroke-width=\"2\"{dash_attr}><title>{} · P(highest passed ticket ≥ i)</title></polyline>",
             esc(model),
+            esc(dash),
             colour,
             esc(short_model(model))
         ));
@@ -2368,6 +2531,7 @@ fn render_results(cells: &[CareerCell]) -> String {
     let labels = career_labels(cells);
     let groups = model_groups(cells);
     let colours = model_colours(cells);
+    let indices = model_order(cells);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let current: Vec<&CareerCell> = cells
         .iter()
@@ -2557,8 +2721,8 @@ fn render_results(cells: &[CareerCell]) -> String {
         ));
     }
 
-    let scatter = svg_scatter(&current, &colours);
-    let survival = svg_survival(&series, &colours);
+    let scatter = svg_scatter(&current, &colours, &indices);
+    let survival = svg_survival(&series, &colours, &indices);
     let model_order: HashMap<&str, usize> = groups
         .iter()
         .enumerate()
@@ -2630,12 +2794,13 @@ fn render_results(cells: &[CareerCell]) -> String {
     if let Some(note) = unranked_note(&marked) {
         h.push_str(&format!("<div class=\"mut note\">{note}</div>"));
     }
-    let legend = chart_legend(&models, &colours);
+    let shape_legend = chart_legend(&models, &colours, &indices, "shape");
+    let dash_legend = chart_legend(&models, &colours, &indices, "dash");
     h.push_str(&format!(
-        "<section id=\"points\"><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>{legend}<div class=\"chart-wrap\">{scatter}</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>Career</th><th class=\"num\">Points</th><th class=\"num\">Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"
+        "<section id=\"points\"><h2>Points against dollars</h2><div class=\"mut\">One dot per career; the line is the non-dominated frontier. Career cap ${CAREER_CAP_USD:.2}.</div>{shape_legend}<div class=\"chart-wrap\">{scatter}</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>Career</th><th class=\"num\">Points</th><th class=\"num\">Spend</th></tr></thead><tbody>{scatter_rows}</tbody></table></div></section>"
     ));
     h.push_str(&format!(
-        "<section id=\"survival\"><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div>{legend}<div class=\"chart-wrap\">{survival}</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"
+        "<section id=\"survival\"><h2>Survival: P(highest passed ticket ≥ i)</h2><div class=\"mut\">Each line follows the career's highest passed ticket; earlier tickets may have failed. The per-ticket table below shows each one.</div>{dash_legend}<div class=\"chart-wrap\">{survival}</div><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{survival_rows}</tbody></table></div></section>"
     ));
     // R65 F6: the per-ticket pass share, shaded like the board's agreement.
     let mut ticket_rows = String::new();
@@ -3304,6 +3469,15 @@ mod tests {
         panic!("no model row for {model}");
     }
 
+    /// R71 F3: read one attribute from an opening tag.
+    fn attr<'a>(tag: &'a str, name: &str) -> &'a str {
+        let needle = format!("{name}=\"");
+        let at = tag
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {name}: {tag}"));
+        tag[at + needle.len()..].split('"').next().unwrap()
+    }
+
     #[test]
     fn r44_f1_careers_on_the_board() {
         let (base, runs, out) = fixture("r44f1");
@@ -3419,18 +3593,18 @@ mod tests {
         let html = read(&out.join("index.html"));
         for id in 0..=20 {
             assert!(
-                html.contains(&format!("data-ticket=\"{id}\"")),
+                html.contains(&format!("data-t=\"{id}\"")),
                 "ticket {id}: {html}"
             );
         }
         let t = |id: u32| {
-            let marker = format!("data-ticket=\"{id}\"");
+            let marker = format!("data-t=\"{id}\"");
             let at = pos(&html, &marker);
             let end = html[at..].find("</span>").unwrap() + at;
             &html[at..end]
         };
-        assert!(t(0).contains("pass"));
-        assert!(t(7).contains("pass"));
+        assert!(t(0).contains("title=\"t0 p\""));
+        assert!(t(7).contains("title=\"t7 p\""));
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -4230,7 +4404,7 @@ mod tests {
             "the differing tickets are listed: {html}"
         );
         assert!(
-            html.contains("passed by 2/3"),
+            html.contains("title=\"t5 2/3\""),
             "the strip shades by the share that passed: {html}"
         );
         let _ = fs::remove_dir_all(&base);
@@ -4404,30 +4578,50 @@ mod tests {
             "one legend for each chart: {html}"
         );
         assert!(!html.contains("Dots:"), "the broken Dots line is gone");
-        for legend in html.split("class=\"legend chart-legend\"").skip(1) {
+        let legends: Vec<&str> = html
+            .split("class=\"legend chart-legend\"")
+            .skip(1)
+            .collect();
+        assert_eq!(legends.len(), 2, "one legend for each chart");
+        for (li, legend) in legends.iter().enumerate() {
             let legend = &legend[..legend.find("</div>").unwrap()];
-            assert_eq!(
-                legend.matches("class=\"dot\"").count(),
-                3,
-                "one swatch per model: {legend}"
-            );
-            for (i, name) in ["vendor/alpha", "vendor/beta", "vendor/gamma"]
-                .iter()
-                .enumerate()
-            {
+            let keys: Vec<&str> = legend.split("class=\"key\"").skip(1).collect();
+            assert_eq!(keys.len(), 3, "one key per model: {legend}");
+            for (i, key) in keys.iter().enumerate() {
                 assert!(
-                    legend.contains(&model_name_html(name)),
-                    "short name {name}: {legend}"
+                    key[..160].contains(&format!("data-colour=\"{}\"", palette(i))),
+                    "series colour {i}: {key}"
+                );
+                if li == 0 {
+                    assert!(
+                        key[..200].contains(&format!("data-shape=\"{}\"", model_shape(i))),
+                        "shape {i}: {key}"
+                    );
+                    assert!(key.contains("<svg class=\"key-shape\""), "{key}");
+                } else {
+                    assert!(
+                        key[..200].contains(&format!("data-dash=\"{}\"", model_dash(i))),
+                        "dash {i}: {key}"
+                    );
+                    assert!(key.contains("<svg class=\"key-dash\""), "{key}");
+                }
+                let model = key
+                    .split("data-model=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap();
+                let name_html = model_name_html(model);
+                assert!(
+                    key.contains(&format!(">{name_html}</span>")),
+                    "short name {model}: {key}"
                 );
                 assert!(
-                    legend.contains(&format!("background:{}", palette(i))),
-                    "series colour {i}: {legend}"
+                    !name_html.contains("openrouter/"),
+                    "the legend shows no provider prefix: {key}"
                 );
             }
-            assert!(
-                !visible_text(legend).contains("openrouter/"),
-                "the legend shows no provider prefix: {legend}"
-            );
         }
         assert!(
             html.contains("<title>vendor/alpha · P(highest passed ticket ≥ i)</title>"),
@@ -4491,9 +4685,18 @@ mod tests {
         for rule in [
             ".col-agree { display: none; }",
             ".secondary { display: none; }",
-            ".agree-details { display: block; }",
         ] {
             assert!(media.contains(rule), "the phone rule {rule:?} is missing");
+        }
+        for hidden in [
+            ".more { display: none; }",
+            "details { display: none; }",
+            ".agree { display: none; }",
+        ] {
+            assert!(
+                !media.contains(hidden),
+                "the phone rule must not hide the details strip: {hidden}"
+            );
         }
         for class in [
             "col-rank",
@@ -4526,8 +4729,8 @@ mod tests {
             "the secondary line and row agreement are the parts the phone rule gives way on: {row}"
         );
         assert!(
-            html.contains("class=\"agree agree-details\""),
-            "the expanded details keep the agreement strip: {html}"
+            html.contains("<details id=\"agree-") && html.contains("<div class=\"agree\">"),
+            "the expanded details keep the one agreement strip: {html}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -4992,11 +5195,19 @@ mod tests {
         assert_eq!(colours.len(), 3, "one colour per model: {colours:?}");
         for (model, colour) in &colours {
             // Both chart legends carry the model in the same colour.
+            let key = format!("class=\"key\" data-model=\"{model}\"");
+            let mut keys = results.split(&key).skip(1);
+            let first = keys
+                .next()
+                .unwrap_or_else(|| panic!("{model} shape legend"));
             assert!(
-                results.contains(&format!(
-                    "<span class=\"dot\" style=\"background:{colour}\"></span><span title=\"{model}\">"
-                )),
-                "{model} must keep {colour} in a chart legend: {results}"
+                first[..160].contains(&format!("data-colour=\"{colour}\"")),
+                "{model} must keep {colour} in the shape legend: {first}"
+            );
+            let second = keys.next().unwrap_or_else(|| panic!("{model} dash legend"));
+            assert!(
+                second[..160].contains(&format!("data-colour=\"{colour}\"")),
+                "{model} must keep {colour} in the dash legend: {second}"
             );
             // Every results table names the model beside the same colour.
             assert!(
@@ -5006,11 +5217,11 @@ mod tests {
                 "{model} must keep {colour} in the results tables: {results}"
             );
         }
-        // Eight distinct colours, so the palette cannot silently collapse.
-        let mut distinct: Vec<&str> = (0..8).map(palette).collect();
+        // Twelve distinct colours, so the palette cannot silently collapse.
+        let mut distinct: Vec<&str> = (0..PALETTE_LEN).map(palette).collect();
         distinct.sort();
         distinct.dedup();
-        assert_eq!(distinct.len(), 8, "eight distinct model colours");
+        assert_eq!(distinct.len(), PALETTE_LEN, "twelve distinct model colours");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -5133,20 +5344,24 @@ mod tests {
         let start_tag = "<tr class=\"model-row\">";
         let at = pos(&html, start_tag);
         let rest = &html[at..];
-        let details_end =
-            rest.find("</details>").expect("the expanded careers") + "</details>".len();
         let cell_at = rest
             .find("<td class=\"col-agree\">")
             .expect("the row agreement cell");
-        assert!(
-            cell_at > details_end,
-            "the row agreement cell is outside the expanded careers: {rest}"
-        );
         let cell = &rest[cell_at..];
         let cell = &cell[..cell.find("</td>").unwrap()];
         assert!(
-            cell.contains("passed by 1/2") && cell.matches("title=\"ticket ").count() == 21,
-            "the agreement strip is on the row: {cell}"
+            cell.contains("<a class=\"agree-link\" href=\"#agree-")
+                && cell.contains("agree 19/20")
+                && cell.contains("differs: 5"),
+            "the row links to the one agreement strip: {cell}"
+        );
+        let details = &rest[pos(rest, "<details id=\"agree-")..];
+        let details = &details[..details.find("</details>").unwrap()];
+        let agree = &details[pos(details, "<div class=\"agree\">")..];
+        let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
+        assert!(
+            agree.matches("title=\"t").count() == 21,
+            "the details carry the one 21-square strip: {agree}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -5244,7 +5459,7 @@ mod tests {
                 );
             }
         }
-        for i in 0..8 {
+        for i in 0..PALETTE_LEN {
             let colour = palette(i);
             for background in [&bg, &card] {
                 let ratio = contrast_ratio(colour, background);
@@ -5334,6 +5549,215 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&base);
     }
+    /// R71 F1 (R70-2): each model's agreement strip appears once, inside
+    /// its details, and the phone rule does not hide that ancestor.
+    #[test]
+    fn r71_f1_one_agreement_strip() {
+        let (base, runs, out) = fixture("r71agreeone");
+        for (prefix, model) in [("a", "vendor/a"), ("b", "vendor/b"), ("c", "vendor/c")] {
+            for c in 0..2 {
+                career(&runs, &format!("{prefix}{c}"), model, [1.0; 4], [0.01; 4]);
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        assert_eq!(
+            board.matches("<div class=\"agree\">").count(),
+            3,
+            "one agreement strip per model: {board}"
+        );
+        for model in ["vendor/a", "vendor/b", "vendor/c"] {
+            let row = model_row_html(&board, model);
+            assert_eq!(
+                row.matches("<div class=\"agree\">").count(),
+                1,
+                "{model} has one strip: {row}"
+            );
+            let details = &row[pos(row, "<details id=\"agree-")..];
+            let details = &details[..details.find("</details>").unwrap()];
+            let agree = &details[pos(details, "<div class=\"agree\">")..];
+            let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
+            assert_eq!(
+                agree.matches("title=\"t").count(),
+                21,
+                "{model}'s one strip has 21 squares: {agree}"
+            );
+        }
+        let css = include_str!("portal_board.css");
+        let media = &css[css.find("@media (max-width: 700px)").expect("phone rule")..];
+        for hidden in [
+            ".more { display: none; }",
+            "details { display: none; }",
+            ".agree { display: none; }",
+        ] {
+            assert!(
+                !media.contains(hidden),
+                "the phone rule must not hide the strip's ancestor: {hidden}"
+            );
+        }
+        let results = read(&out.join("results.html"));
+        assert_eq!(
+            results.matches("<div class=\"agree\">").count(),
+            0,
+            "the results page has no duplicate agreement strip: {results}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R71 F3 (R70-4): ten models get ten different colours, each at least
+    /// 3:1 against the card.
+    #[test]
+    fn r71_f3_ten_distinct() {
+        let css = include_str!("portal_board.css");
+        let card = css_token(css, "card");
+        let colours: Vec<&str> = (0..10).map(palette).collect();
+        let mut distinct = colours.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 10, "ten different colours: {colours:?}");
+        for (i, colour) in colours.iter().enumerate() {
+            let ratio = contrast_ratio(colour, &card);
+            assert!(
+                ratio >= 3.0,
+                "colour {i} {colour} on {card} is {ratio:.2}:1, below 3.0"
+            );
+        }
+    }
+
+    /// R71 F3 (R70-4): every model's scatter marks share one shape and its
+    /// survival line one dash; no same-family pair shares a shape.
+    #[test]
+    fn r71_f3_second_channel() {
+        let (base, runs, out) = fixture("r71second");
+        for model in 0..10 {
+            for c in 0..2 {
+                let prefix = format!("m{model}c{c}");
+                career(
+                    &runs,
+                    &prefix,
+                    &format!("vendor/model-{model}"),
+                    [4.0 + model as f64, 5.0, 6.0, 7.0],
+                    [0.01; 4],
+                );
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        let mut shapes: HashMap<String, String> = HashMap::new();
+        let mut families: HashMap<String, String> = HashMap::new();
+        for seg in html.split("class=\"career-dot\"").skip(1) {
+            let seg = &seg[..seg.find('>').expect("the opening tag")];
+            let model = attr(seg, "data-model").to_string();
+            let shape = attr(seg, "data-shape").to_string();
+            let family = attr(seg, "data-family").to_string();
+            if let Some(previous) = shapes.get(&model) {
+                assert_eq!(previous, &shape, "{model} has two shapes");
+            } else {
+                shapes.insert(model.clone(), shape);
+                families.insert(model, family);
+            }
+        }
+        assert_eq!(shapes.len(), 10, "ten models in the scatter: {shapes:?}");
+        let mut dashes: HashMap<String, String> = HashMap::new();
+        for seg in html.split("class=\"survival-line\"").skip(1) {
+            let seg = &seg[..seg.find('>').expect("the opening tag")];
+            let model = attr(seg, "data-model").to_string();
+            let dash = attr(seg, "data-dash").to_string();
+            if let Some(previous) = dashes.get(&model) {
+                assert_eq!(previous, &dash, "{model} has two dashes");
+            } else {
+                dashes.insert(model, dash);
+            }
+        }
+        assert_eq!(dashes.len(), 10, "ten models in survival: {dashes:?}");
+        let mut distinct_shapes: Vec<&String> = shapes.values().collect();
+        distinct_shapes.sort();
+        distinct_shapes.dedup();
+        assert_eq!(distinct_shapes.len(), 10, "ten shapes: {shapes:?}");
+        let mut distinct_dashes: Vec<&String> = dashes.values().collect();
+        distinct_dashes.sort();
+        distinct_dashes.dedup();
+        assert_eq!(distinct_dashes.len(), 10, "ten dashes: {dashes:?}");
+        for (a, family) in &families {
+            for (b, other) in &families {
+                if a < b && family == other {
+                    assert_ne!(shapes[a], shapes[b], "{a} and {b} share a family and shape");
+                }
+            }
+        }
+        // The legends carry the same shape and dash per model.
+        for seg in html.split("class=\"key\" data-model=\"").skip(1) {
+            let model = seg.split('"').next().unwrap();
+            let head = &seg[..seg.find('>').expect("the key tag")];
+            if head.contains("data-shape=") {
+                assert_eq!(
+                    attr(head, "data-shape"),
+                    shapes.get(model).expect("a scatter model"),
+                    "{model} legend shape"
+                );
+            } else {
+                assert_eq!(
+                    attr(head, "data-dash"),
+                    dashes.get(model).expect("a survival model"),
+                    "{model} legend dash"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R71 F1 (R70-2): the board and results stay at or under 150 KB with
+    /// 30 careers across 10 models, every model expanded.
+    #[test]
+    fn r71_f1_page_size_30_careers() {
+        let (base, runs, out) = fixture("r71size30");
+        for model in 0..10 {
+            for c in 0..3 {
+                let prefix = format!("m{model}c{c}");
+                career(
+                    &runs,
+                    &prefix,
+                    &format!("vendor/model-{model}"),
+                    [4.0 + model as f64, 5.0, 6.0, 7.0],
+                    [0.01; 4],
+                );
+                set_tokens(&runs, &prefix, 1, 0, 10_000, 8_000, 500, 10_500);
+                set_career_perf(
+                    &runs,
+                    &prefix,
+                    1.1,
+                    serde_json::json!([
+                        {"id": "W1", "metric": "latency", "reference": 1.0, "candidate": 0.9, "ratio": 1.11, "correct": true},
+                        {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 90.0, "ratio": 0.9, "correct": false, "note": "not durable"}
+                    ]),
+                );
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert_eq!(
+            html.matches("<details id=\"agree-").count(),
+            10,
+            "ten expanded model blocks"
+        );
+        assert_eq!(
+            html.matches("<tr class=\"career-row\">").count(),
+            30,
+            "thirty expanded careers"
+        );
+        let board = fs::metadata(out.join("index.html")).unwrap().len();
+        let results = fs::metadata(out.join("results.html")).unwrap().len();
+        assert!(
+            board <= 150 * 1024,
+            "index.html is {board} bytes with 30 careers, over 150 KB"
+        );
+        assert!(
+            results <= 150 * 1024,
+            "results.html is {results} bytes with 30 careers, over 150 KB"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R70 F4/F5: a text node that starts with "· " is a dangling
     /// separator; the stylesheet's generated `content` is not a text node.
     fn dangling_separator(html: &str) -> Option<String> {
@@ -5426,7 +5850,7 @@ mod tests {
             row.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
             "the board row name carries break points: {row}"
         );
-        let details = &html[pos(&html, "<details class=\"more\">")..];
+        let details = &html[pos(&html, "<details id=\"agree-")..];
         let career = &details[pos(details, "<tr class=\"career-row\">")..];
         assert!(
             career.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
@@ -5446,26 +5870,32 @@ mod tests {
         let media = &css[at..];
         assert!(
             media.contains(".col-agree { display: none; }"),
-            "the row copy is hidden on a phone"
+            "the row link is hidden on a phone"
         );
-        assert!(
-            media.contains(".agree-details { display: block; }"),
-            "the details copy is shown on a phone"
-        );
+        for hidden in [
+            ".more { display: none; }",
+            "details { display: none; }",
+            ".agree { display: none; }",
+        ] {
+            assert!(
+                !media.contains(hidden),
+                "the phone rule must not hide the details strip: {hidden}"
+            );
+        }
         let (base, runs, out) = fixture("r70agreephone");
         career(&runs, "a", "m", [1.0; 4], [0.01; 4]);
         career(&runs, "b", "m", [1.0; 4], [0.01; 4]);
         fail_ticket(&runs, "b", 5);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        let details = pos(&html, "<details class=\"more\">");
+        let details = pos(&html, "<details id=\"agree-");
         let details = &html[details..details + html[details..].find("</details>").unwrap()];
-        let agree = pos(details, "<div class=\"agree agree-details\">");
+        let agree = pos(details, "<div class=\"agree\">");
         let agree = &details[agree..];
         let agree = &agree[..agree.find("</div></div>").unwrap() + 12];
         assert!(
-            agree.matches("title=\"ticket ").count() == 21,
-            "the details copy has the 21-square strip: {agree}"
+            agree.matches("title=\"t").count() == 21,
+            "the details carry the 21-square strip: {agree}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -5520,7 +5950,7 @@ mod tests {
         career(&runs, "c", "m", [1.0; 4], [0.01; 4]);
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
-        let details = &html[pos(&html, "<details class=\"more\">")..];
+        let details = &html[pos(&html, "<details id=\"agree-")..];
         let table = &details[pos(details, "<table class=\"career-table\">")..];
         let table = &table[..table.find("</table>").unwrap()];
         let head = &table[..table.find("</thead>").expect("a career-table head")];

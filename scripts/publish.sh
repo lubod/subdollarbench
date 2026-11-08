@@ -81,6 +81,15 @@ validate_export() {
     [[ -s "$dir/index.html" ]] || { echo "[publish] refusal: index.html missing" >&2; return 1; }
     [[ -s "$dir/results.html" ]] || { echo "[publish] refusal: results.html missing" >&2; return 1; }
     [[ -s "$dir/grid.json" ]] || { echo "[publish] refusal: grid.json missing" >&2; return 1; }
+    # R71 F1 (R70-2): the public pages stay under 150 KB each.
+    local page bytes
+    for page in index.html results.html; do
+        bytes=$(wc -c < "$dir/$page")
+        if (( bytes > 150 * 1024 )); then
+            echo "[publish] refusal: $page is $bytes bytes, over the 150 KB cap" >&2
+            return 1
+        fi
+    done
     [[ -z "$(find "$dir" -type d -name runs -print -quit)" ]] || {
         echo "[publish] refusal: export contains runs/ logs or workspaces" >&2
         return 1
@@ -187,6 +196,22 @@ if [[ "$self_test" -eq 1 ]]; then
 
     validate_export "$good" "$bar" || { echo '[self-test] good export rejected' >&2; exit 1; }
     echo '[self-test] good export accepted'
+
+    # R71 F1: a 151 KB page is refused, naming the page and its size.
+    big="$root/big"
+    cp -a "$good" "$big"
+    python3 - "$big/index.html" <<'PY'
+import sys
+open(sys.argv[1], "w").write("x" * (151 * 1024))
+PY
+    rc=0
+    out="$(validate_export "$big" "$bar" 2>&1)" || rc=$?
+    [[ "$rc" -ne 0 ]] || { echo '[self-test] 151 KB index.html accepted' >&2; exit 1; }
+    grep -q 'index.html' <<<"$out" && grep -q '154624' <<<"$out" || {
+        echo "[self-test] the size refusal did not name the page and size: $out" >&2
+        exit 1
+    }
+    echo '[self-test] 151 KB index.html refused'
 
     mixed="$root/mixed"
     cp -a "$good" "$mixed"
