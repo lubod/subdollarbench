@@ -417,7 +417,7 @@ run_lane() {
             rc=0
             run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" || rc=$?
             id="$(result_get "$result" campaign_id)"
-            local got_phase got_chain points cost stop
+            local got_phase got_chain points cost stop billed
             got_phase="$(result_get "$result" phase)"
             got_chain="$(result_get "$result" chain_from)"
             points="$(result_get "$result" points)"
@@ -443,8 +443,16 @@ run_lane() {
             elif awk -v c="$cost" 'BEGIN { exit !(c > 0.99) }'; then
                 stop="cost > 0.99"
             fi
+            billed="$(result_get "$result" billed_usd)"
             ledger_add "$idx" "$model" "$phase" "$worker" "${id:-—}" "${points:-0}" "${cost:-0}" "$stop" "$token"
             rm -f "$result"
+            # R67 F2: a bill above 1.25x list means the pin did not hold.
+            if [[ "$stop" == "ok" && -n "$billed" && "$cost" != "0" ]] \
+                && awk -v b="$billed" -v l="$cost" 'BEGIN { exit !(b > 1.25 * l) }'; then
+                printf 'hold: billed $%s vs list $%s\n' "$billed" "$cost" > "$HOLD"
+                log "hold: billed \$$billed vs list \$$cost"
+                wait_hold
+            fi
             if [[ "$stop" != "ok" ]]; then
                 log "lane $lane: career $idx $model phase $phase stopped: $stop"
                 touch "$STOP"
@@ -547,9 +555,9 @@ stop=0
 [[ "${SDB_FAKE_STOP_ID:-}" == "$id" ]] && stop=1
 res_phase="${SDB_FAKE_RESULT_PHASE:-$phase}"
 res_chain="${SDB_FAKE_RESULT_CHAIN-$chain}"
-python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" <<'PY'
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" "${SDB_FAKE_BILLED:-0}" <<'PY'
 import json, sys
-out, cid, phase, worker, chain, stop, cost, res_phase, res_chain, fault = sys.argv[1:11]
+out, cid, phase, worker, chain, stop, cost, res_phase, res_chain, fault, billed = sys.argv[1:12]
 json.dump({
     "campaign_id": cid,
     "phase": int(res_phase),
@@ -557,6 +565,7 @@ json.dump({
     "worker": int(worker),
     "chain": chain,
     "cost_usd": float(cost),
+    "billed_usd": float(billed),
     "points": 10.0,
     "over_budget": False,
     "over_wall": stop == "1",
@@ -1013,6 +1022,55 @@ EOF
     [[ ! -f "$HOLD" ]] || { echo "a rehearsal wrote a hold"; exit 1; }
     REHEARSAL=0
     PHASE_BUDGET=0.99
+
+    # The balance cases above leave the failing stub; restore a rich one.
+    printf '#!/bin/sh\necho 100.00\n' > "$balance"
+    chmod +x "$balance"
+
+    # 14) R67 F2: a bill above 1.25x list holds the grid; 1.1x does not.
+    scenario="$dir/fourteen"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    SDB_FAKE_COST=0.1
+    SDB_FAKE_BILLED=0.25
+    export SDB_FAKE_COST SDB_FAKE_BILLED
+    load_careers "$CAREERS_FILE"
+    ( run_grid >"$scenario/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 50); do [[ -f "$HOLD" ]] && break; sleep 0.1; done
+    [[ -f "$HOLD" ]] || { kill "$pid" 2>/dev/null || true; echo "billed 2x: no hold"; exit 1; }
+    grep -q 'hold: billed \$0.25 vs list \$0.1' "$scenario/out" || {
+        echo "billed 2x: wrong hold line"; cat "$scenario/out"; kill "$pid" 2>/dev/null || true; exit 1; }
+    rm -f "$HOLD"
+    wait "$pid" || { echo "billed 2x: the grid did not resume"; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 1 ]] || { echo "billed 2x: expected 1 row"; exit 1; }
+
+    scenario="$dir/fifteen"
+    mkdir -p "$scenario"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    SDB_FAKE_BILLED=0.11
+    export SDB_FAKE_BILLED
+    load_careers "$CAREERS_FILE"
+    run_grid
+    [[ ! -f "$HOLD" ]] || { echo "billed 1.1x wrote a hold"; exit 1; }
+    [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 1 ]] || { echo "billed 1.1x: expected 1 row"; exit 1; }
+    unset SDB_FAKE_COST SDB_FAKE_BILLED
+    export -n SDB_FAKE_COST SDB_FAKE_BILLED 2>/dev/null || true
+    MAX_PHASE=4
 
     # 16) R67 F4 (R66-3): three lanes probe the long-test lock at the same
     # instant with no holder; the retry keeps a collision from looking like

@@ -112,6 +112,10 @@ pub struct RunManifest {
     #[serde(default)]
     pub egress_enforced: Option<bool>,
     pub tokens: RunTokenUsage,
+    /// R67 F2: the provider-billed total from the session's per-message
+    /// `usage.cost.total`; None on runs that recorded no bill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billed_usd: Option<f64>,
     pub cost_usd: f64,
     /// R24 R2: always `"snapshot"` — the committed list-price table.
     /// The live key delta is in `live_spend_delta_usd` for audit only.
@@ -604,6 +608,7 @@ mod tests {
             ref_drift: None,
             ref_image: None,
             egress_enforced: None,
+            billed_usd: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 10000,
                 cached_tokens: 8000,
@@ -786,6 +791,7 @@ mod tests {
             ref_drift: None,
             ref_image: None,
             egress_enforced: None,
+            billed_usd: None,
             tokens: RunTokenUsage {
                 prompt_tokens: 1,
                 cached_tokens: 0,

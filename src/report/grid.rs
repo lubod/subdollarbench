@@ -66,6 +66,9 @@ pub struct CareerCell {
     /// per-workload ratios.
     pub perf: Option<crate::verifier::sql::perfscore::PerfScore>,
     pub cost: f64,
+    /// R67 F2: the provider bill summed over the career's phases; None on
+    /// careers that recorded no bill (the v2 grid ran unpinned).
+    pub billed: Option<f64>,
     pub over_budget: bool,
     pub cap_reached: bool,
     pub over_wall: bool,
@@ -518,6 +521,13 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
     let fingerprints = recorded_fingerprints(cells);
     let (wall_seconds, agent_seconds, turns) = career_effort(cells);
     let tokens = token_totals(cells);
+    let billed: Option<f64> = {
+        let vals: Vec<f64> = cells
+            .iter()
+            .filter_map(|c| c.rollup["billed_usd"].as_f64())
+            .collect();
+        (!vals.is_empty()).then(|| vals.iter().sum())
+    };
     let unique = unique_stage_records(&stage_records);
     let reached = unique.iter().filter(|r| r.passed).map(|r| r.id).max();
     let regression_free = unique
@@ -636,6 +646,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         fingerprints,
         perf,
         cost,
+        billed,
         over_budget: leaf.rollup["over_budget"].as_bool().unwrap_or(false),
         cap_reached: leaf.rollup["cap_reached"].as_bool().unwrap_or(false),
         over_wall: leaf.rollup["over_wall"].as_bool().unwrap_or(false),
@@ -2155,15 +2166,22 @@ fn render_results(cells: &[CareerCell]) -> String {
         let passed: usize = cs.iter().map(|c| c.tickets_passed()).sum();
         let regfree: u32 = cs.iter().map(|c| c.regression_free).sum();
         let rate = (passed > 0).then(|| regfree as f64 / passed as f64);
+        let list: f64 = cs.iter().map(|c| c.cost).sum();
+        let billed: Option<f64> = cs.iter().filter_map(|c| c.billed).reduce(|a, b| a + b);
+        let spend = match billed {
+            Some(b) => format!("${list:.2} / ${b:.2}"),
+            None => format!("${list:.2} / —"),
+        };
         metrics.push_str(&format!(
-            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td></tr>",
+            "<tr><td><b title=\"{}\">{}</b></td><td class=\"num\">${:.2} / ${:.2} / ${:.2}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
             esc(model),
             esc(short_model(model)),
             costs.first().copied().unwrap_or(0.0),
             median(&costs).unwrap_or(0.0),
             costs.last().copied().unwrap_or(0.0),
             rate.map(|r| format!("{:.1}%", r * 100.0))
-                .unwrap_or_else(|| "—".to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            spend
         ));
     }
 
@@ -2307,7 +2325,7 @@ fn render_results(cells: &[CareerCell]) -> String {
         ));
     }
     h.push_str(&format!("<section><h3>Per-ticket pass share</h3><div class=\"wrap\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div></section>"));
-    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
+    h.push_str(&format!("<section><h2>Cost and robustness</h2><div class=\"wrap\"><table><thead><tr><th>Model</th><th>$ / ticket (min / median / max)</th><th>Regression-free rate</th><th>Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"));
     let stability = rank_stability(cells, &groups);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let mut h2h_rows = String::new();
@@ -2794,6 +2812,22 @@ mod tests {
                 }
                 fs::write(path, v.to_string()).unwrap();
             }
+        }
+    }
+
+    /// R67 F2: record a phase's provider bill in both files.
+    fn set_billed(runs: &Path, prefix: &str, phase: u32, value: f64) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["billed_usd"] = serde_json::json!(value);
+            fs::write(path, v.to_string()).unwrap();
         }
     }
 
@@ -4195,6 +4229,26 @@ mod tests {
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["fingerprint_careers"]["fp-a"], 3, "{meta}");
         assert_eq!(meta["fingerprint_careers"]["fp-b"], 2, "{meta}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R67 F2: the results page shows list and billed spend per model,
+    /// with the cap note; a career with no recorded bill shows `—`.
+    #[test]
+    fn r67_f2_results_billed() {
+        let (base, runs, out) = fixture("r67billed");
+        career(&runs, "m", "m", [1.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("$0.04 / —"), "{html}");
+        assert!(html.contains("The cap counts list price."), "{html}");
+        for phase in 1..=4 {
+            set_billed(&runs, "m", phase, phase as f64 * 0.1);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("results.html"));
+        assert!(html.contains("$0.04 / $1.00"), "{html}");
+        assert!(html.contains("The cap counts list price."), "{html}");
         let _ = fs::remove_dir_all(&base);
     }
 

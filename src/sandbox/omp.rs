@@ -98,6 +98,9 @@ pub struct OmpSessionStats {
     /// Live-metered provider spend for this attempt (sum of every call).
     /// The campaign cap is enforced against this plus the compute floor.
     pub cost_usd: f64,
+    /// R67 F2: the provider-billed total from each session message's
+    /// `usage.cost.total`, kept beside the list-price `cost_usd`.
+    pub billed_usd: f64,
     /// The largest single provider call in this attempt (the campaign cap's
     /// reserve).
     pub max_call_usd: f64,
@@ -2117,6 +2120,7 @@ impl OmpRunner {
         let mut cache_write_tokens = 0u64;
         let mut steps = 0u32;
         let mut cost_usd = 0.0f64;
+        let mut billed_usd = 0.0f64;
         let mut max_call_usd = 0.0f64;
         // Last negotiated thinking level wins: the session records the
         // EFFECTIVE level (CLI downgrades included), which is what ran.
@@ -2185,6 +2189,7 @@ impl OmpRunner {
                         .and_then(|x| x.as_f64())
                     {
                         cost_usd += c;
+                        billed_usd += c;
                         max_call_usd = max_call_usd.max(c);
                     }
                 }
@@ -2199,6 +2204,7 @@ impl OmpRunner {
             total_tokens: prompt_tokens + cached_tokens + cache_write_tokens + completion_tokens,
             steps_taken: steps,
             cost_usd,
+            billed_usd,
             max_call_usd,
             effort_effective: thinking_effective,
             stop_reason: None,

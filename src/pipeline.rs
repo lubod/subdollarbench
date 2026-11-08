@@ -3021,6 +3021,7 @@ impl BenchmarkPipeline {
                             acc.total_tokens += stats.total_tokens;
                             acc.steps_taken += stats.steps_taken;
                             acc.cost_usd += stats.cost_usd;
+                            acc.billed_usd += stats.billed_usd;
                             acc.max_call_usd = acc.max_call_usd.max(stats.max_call_usd);
                             acc.effort_effective = stats.effort_effective.clone();
                             acc.stop_reason = stats.stop_reason.clone();
@@ -3042,6 +3043,7 @@ impl BenchmarkPipeline {
                             acc.total_tokens += end.partial.total_tokens;
                             acc.steps_taken += end.partial.steps_taken;
                             acc.cost_usd += end.partial.cost_usd;
+                            acc.billed_usd += end.partial.billed_usd;
                             acc.max_call_usd = acc.max_call_usd.max(end.partial.max_call_usd);
                             acc.stop_reason = end.partial.stop_reason.clone();
                             logger.log(&format!("[{htag} ERROR] Agent execution failed: {}", e));
@@ -3716,6 +3718,8 @@ impl BenchmarkPipeline {
             // prices it separately) makes `total = prompt + cached +
             // completion` hold. The cost and floor inputs above are
             // unchanged.
+            // R67 F2: the provider's own bill, beside the list-price cost.
+            billed_usd: (omp_stats.billed_usd > 0.0).then_some(omp_stats.billed_usd),
             tokens: RunTokenUsage {
                 prompt_tokens: prompt_tokens + omp_stats.cache_write_tokens,
                 cached_tokens,
