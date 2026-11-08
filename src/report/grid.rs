@@ -4990,13 +4990,22 @@ mod tests {
     #[test]
     fn r69_f2_summary_cards() {
         let (base, runs, out) = fixture("r69cards");
+        // The 15-career fixture: five models, three careers each.
         for (prefix, points) in [("a1", 50.0), ("a2", 60.0), ("a3", 70.0)] {
             career(&runs, prefix, "vendor/a", [points / 4.0; 4], [0.01; 4]);
         }
-        for (prefix, points) in [("b1", 30.0), ("b2", 20.0)] {
+        for (prefix, points) in [("b1", 30.0), ("b2", 20.0), ("b3", 10.0)] {
             career(&runs, prefix, "vendor/b", [points / 4.0; 4], [0.005; 4]);
         }
-        career(&runs, "c1", "vendor/c", [10.0 / 4.0; 4], [0.1; 4]);
+        for (prefix, points) in [("c1", 40.0), ("c2", 45.0), ("c3", 55.0)] {
+            career(&runs, prefix, "vendor/c", [points / 4.0; 4], [0.0125; 4]);
+        }
+        for (prefix, points) in [("d1", 25.0), ("d2", 35.0), ("d3", 65.0)] {
+            career(&runs, prefix, "vendor/d", [points / 4.0; 4], [0.025; 4]);
+        }
+        for (prefix, points) in [("e1", 5.0), ("e2", 15.0), ("e3", 75.0)] {
+            career(&runs, prefix, "vendor/e", [points / 4.0; 4], [0.05; 4]);
+        }
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("index.html"));
         let card = |name: &str| {
@@ -5024,8 +5033,8 @@ mod tests {
         );
         let careers = card("careers");
         assert!(
-            careers.contains("6 across 3 models") && careers.contains("$0.56 spent"),
-            "six careers across three models: {careers}"
+            careers.contains("15 across 5 models") && careers.contains("$1.23 spent"),
+            "fifteen careers across five models: {careers}"
         );
         let _ = fs::remove_dir_all(&base);
     }
