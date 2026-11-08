@@ -86,26 +86,25 @@ round file, never only in chat.
 
 ## The advisor (implementer)
 
-**Currently off** (operator, 2026-11-07, R66-2 "c"): `disabledForModels`
-lists `opencode-go/deepseek-v4.1-flash`. It runs on `claude-agent`, the
-same Claude plan as the reviewer, and failed every `review` call in rounds
-64-66 (empty responses, the plan's 5-hour limit). The rules below apply
-again if it is switched back on.
+**On** (operator, 2026-11-08): **Gemini 4 Argon, high, on OpenCode
+Go** (`opencode-go/gemini-4-argon#high`). It replaced the Opus advisor
+on `claude-agent`, which failed every `review` call in rounds 64-66 (the
+Claude plan's 5-hour limit, shared with the reviewer). It was chosen
+over Kimi K3.1 Pro on a blind review of round 69 (`docs/DECISIONS.md`
+#27). Its calls count against the same Go plan as the implementer.
 
 The implementer (opencode, `deepseek-v4.1-flash`) has an `advisor` tool:
 the `@pfoundation/ocadvisor` plugin, configured in the repo's
-`opencode.json` (Opus 5.5, high), plus `/advisor`
-(`.opencode/commands/advisor.md`). It sends the session transcript (the
-last 200k characters) and returns a second opinion. The reviewer runs
-Opus, so the tool is hidden there.
+`opencode.json`, plus `/advisor` (`.opencode/commands/advisor.md`). It
+sends the session transcript (the last 200k characters) and returns a
+second opinion.
 - **Only where the config is.** OpenCode reads `opencode.json` from the
   session's directory and its parents, and a worktree holds only its
   branch's files. A worktree branched before `ed29d7e` has no advisor;
   every `roundNN` from `round-64-open` on does. Config edits reload
   without a service restart.
 - **On/off switch:** `disabledForModels` in `opencode.json`. Set it to
-  `["opencode-go/deepseek-v4.1-flash"]` for off, or `[]` for on (the
-  default). It applies on save to sessions in the repo root; a worktree
+  `["opencode-go/deepseek-v4.1-flash"]` for off, or `[]` for on (now). It applies on save to sessions in the repo root; a worktree
   uses its branch's copy.
 
 - **When to consult:**

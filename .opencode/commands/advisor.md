@@ -1,5 +1,5 @@
 ---
-description: Consult the advisor (Opus 5.5, high) for a second opinion
+description: Consult the advisor (Gemini 4 Argon, high, on OpenCode Go) for a second opinion
 ---
 
 Call the `advisor` tool to consult the senior advisor. Pass:

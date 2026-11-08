@@ -68,4 +68,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [67](67.md) | The bill matches the snapshot (one pinned provider per model; billed recorded beside list); the GUI shows every run (R66-5, R66-4, R64-3, R66-3) (graded: `--ready`, then a bar) | merged `dc3cacb` |
 | [68](68.md) | The bar is required only when grading changes; plumbing changes need `--ready` and a $0 rehearsal (DECISIONS #26) | draft |
 | [69](69.md) | A facelift for the public pages: one palette, a plain header, the board leads with the answer, the results page reads as a report (display only) | merged `6e6c8ee` |
-| [70](70.md) | The facelift's follow-ups: one rehearsal footnote, phone card names (R69-2, R69-3; display only) | draft |
+| [70](70.md) | The facelift's follow-ups: the rehearsal footnote, the phone board, cards that match the board, restored tests, polish (R69-2 to R69-7; display only) | draft |

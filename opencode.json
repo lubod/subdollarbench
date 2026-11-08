@@ -4,12 +4,10 @@
     {
       "package": "@pfoundation/ocadvisor",
       "options": {
-        "model": "claude-agent/opus#high",
+        "model": "opencode-go/gemini-4-argon#high",
         "maxTranscriptChars": 200000,
         "timeoutMs": 600000,
-        "disabledForModels": [
-          "opencode-go/deepseek-v4.1-flash"
-        ]
+        "disabledForModels": []
       }
     }
   ]

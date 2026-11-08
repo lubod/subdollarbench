@@ -661,6 +661,26 @@ The benchmark answers "what does a dollar buy" (round 23):
   grader re-runs 7 h of proofs whose behaviour it can't affect (rounds 65
   and 67).
 
+## 27. The advisor is back, on Gemini 4 Argon via OpenCode Go (2026-11-08)
+
+- **Operator:** turn the advisor back on (it was off since R66-2 "c"),
+  on OpenCode Go, which has no Sonnet 5.5.
+- **The test:** a blind review of round 69. Each candidate got the spec
+  as opened, the code diff and the real exported board, with no hint of
+  the reviewer's findings. Both models found the repeated rehearsal
+  footnote (R69-2) and several real faults the reviewer's own review had
+  missed (`69.md`, "After the merge").
+  - **Gemini 4 Argon (high):** 11 findings in 343 s. It also found the
+    root cause of the phone name wrap (R69-3), the weakened `r65_f8`
+    test, the career table without headers, and "What it measured" not
+    in two columns. It over-rates severity: 7 of its 11 findings are
+    called blockers.
+  - **Kimi K3.1 Pro (high):** 12 findings in 597 s, terser and precise:
+    the sticky header that can't stick, the nav anchors under the sticky
+    bar, the split rank/share assertions. It missed R69-3.
+- **Chosen:** Gemini, for coverage and speed. Its severity labels are
+  advice; the round file decides.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
