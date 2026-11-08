@@ -142,6 +142,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .b.effort { color: var(--mut); border-color: var(--line); background: var(--card-2); }
 
 /* Board (R69 F2). */
+.board-table { table-layout: fixed; }
 .board-table th.col-rank, .board-table td.col-rank { width: 96px; }
 .board-table th.col-points, .board-table td.col-points { width: 250px; }
 .board-table th.col-perf, .board-table td.col-perf { width: 88px; }
