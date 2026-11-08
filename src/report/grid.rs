@@ -827,7 +827,7 @@ fn strip_html(ladder: &[LadderEntry]) -> String {
 }
 
 fn legend_html() -> &'static str {
-    "<div class=\"legend\"><span class=\"sq p\">·</span>pass<span class=\"sq l\">·</span>lite<span class=\"sq f\">·</span>fail<span class=\"sq x\">·</span>fault<span class=\"sq s\">·</span>skipped<span class=\"sq r\">·</span>running<span class=\"sq n\">·</span>not reached</div>"
+    "<div class=\"legend\"><span class=\"sq p\">p</span>pass<span class=\"sq l\">l</span>lite<span class=\"sq f\">f</span>fail<span class=\"sq x\">x</span>fault<span class=\"sq s\">s</span>skipped<span class=\"sq r\">r</span>running<span class=\"sq n\">n</span>not reached<span class=\"mut\">tN p = ticket N pass · tN k/m = k of m careers passed</span></div>"
 }
 
 /// R64 F1: points print with at most one decimal (`57.6`, never
@@ -2297,13 +2297,17 @@ fn chart_legend(
             ));
         } else {
             let dash = model_dash(idx);
+            let dash_attr = if dash.is_empty() {
+                String::new()
+            } else {
+                format!(" stroke-dasharray=\"{dash}\"")
+            };
             s.push_str(&format!(
-                "<span class=\"key\" data-model=\"{}\" data-dash=\"{}\" data-colour=\"{}\"><svg class=\"key-dash\" viewBox=\"0 0 24 8\" aria-hidden=\"true\"><line x1=\"0\" y1=\"4\" x2=\"24\" y2=\"4\" stroke=\"{}\" stroke-width=\"2\" stroke-dasharray=\"{}\"/></svg><span title=\"{}\">{}</span></span>",
+                "<span class=\"key\" data-model=\"{}\" data-dash=\"{}\" data-colour=\"{}\"><svg class=\"key-dash\" viewBox=\"0 0 24 8\" aria-hidden=\"true\"><line x1=\"0\" y1=\"4\" x2=\"24\" y2=\"4\" stroke=\"{}\" stroke-width=\"2\"{dash_attr}/></svg><span title=\"{}\">{}</span></span>",
                 esc(m),
                 esc(dash),
                 colour,
                 colour,
-                dash,
                 esc(m),
                 model_name_html(m)
             ));
@@ -5344,9 +5348,15 @@ mod tests {
         let start_tag = "<tr class=\"model-row\">";
         let at = pos(&html, start_tag);
         let rest = &html[at..];
+        let details_end =
+            rest.find("</details>").expect("the expanded careers") + "</details>".len();
         let cell_at = rest
             .find("<td class=\"col-agree\">")
             .expect("the row agreement cell");
+        assert!(
+            cell_at > details_end,
+            "the row agreement cell is outside the expanded careers: {rest}"
+        );
         let cell = &rest[cell_at..];
         let cell = &cell[..cell.find("</td>").unwrap()];
         assert!(
@@ -5566,6 +5576,14 @@ mod tests {
             3,
             "one agreement strip per model: {board}"
         );
+        let mut ids: Vec<&str> = board
+            .split("id=\"agree-")
+            .skip(1)
+            .map(|seg| seg.split('"').next().unwrap())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "the three details ids are unique: {ids:?}");
         for model in ["vendor/a", "vendor/b", "vendor/c"] {
             let row = model_row_html(&board, model);
             assert_eq!(
@@ -5711,13 +5729,25 @@ mod tests {
     #[test]
     fn r71_f1_page_size_30_careers() {
         let (base, runs, out) = fixture("r71size30");
-        for model in 0..10 {
+        let models = [
+            "openrouter/anthropic/claude-haiku-5.5",
+            "openrouter/deepseek/deepseek-v4.1-flash-1017",
+            "openrouter/openai/gpt-6-luna",
+            "openrouter/xiaomi/mimo-v2.6-flash",
+            "openrouter/qwen/qwen3.8-flash",
+            "openrouter/minimax/minimax-m3.1-flash",
+            "openrouter/openai/gpt-6-luna-pro",
+            "openrouter/xiaomi/mimo-v2.6-pro",
+            "openrouter/tencent/hy4",
+            "openrouter/meta/muse-spark-1.3-contributor",
+        ];
+        for (model, id) in models.iter().enumerate() {
             for c in 0..3 {
                 let prefix = format!("m{model}c{c}");
                 career(
                     &runs,
                     &prefix,
-                    &format!("vendor/model-{model}"),
+                    id,
                     [4.0 + model as f64, 5.0, 6.0, 7.0],
                     [0.01; 4],
                 );
