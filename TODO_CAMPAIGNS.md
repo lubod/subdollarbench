@@ -237,6 +237,26 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     checked live (served by Xiaomi, bill = snapshot exactly). The balance
     at start was $13.34; at up to $0.99 a phase the grid may pause on the
     balance preflight near the end until a top-up.
+  - **Mimo-pro stopped 2026-11-09 08:45 CET** (operator: "stop mimo"):
+    two of three phase 1 runs spent ticket 0's $0.09 writing probe
+    scripts against the reference server (`probe_ref*.py`) and never a
+    server, at 2-5 min per turn (up to 321 s); the third passed ticket 0
+    and failed ticket 1. A full grid would have taken 1-1.5 days. Its 5
+    paid runs carry `.portal_hidden`; the ledgers and logs stay. Not
+    ranked. Round 72 deployed at the stop (bundle
+    `portal/sdb-results-2026-11-09.zip`, rebuilt at 08:47 CET).
+  - **Hy4 blocked 2026-11-09** (operator: "start hy4"; not started): the
+    sandbox's omp (18.8.0, `subdollar-sandbox:latest`) resolves
+    `openrouter/tencent/hy4` to **`tencent/hy4-preview`**, a different
+    model at 2× the price ($0.834 / $2.501). With the `@tencent/fp4` pin
+    the call 404s (the preview has no such endpoint); unpinned, it would
+    run the wrong model. The host's omp 18.11.1 resolves it correctly
+    once its catalog refreshes (served `tencent/hy4-20261104` by
+    Tencent, bill = snapshot), and a `models.yml` entry doesn't change
+    18.8.0's choice. The other 8 grid models resolve exactly (checked
+    live through omp, 2026-11-09). Options: skip hy4; or a harness round
+    that upgrades the sandbox's omp (a new image fingerprint, and the
+    question of whether that changes what the candidate sees).
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
