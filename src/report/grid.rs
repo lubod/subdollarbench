@@ -5612,6 +5612,12 @@ mod tests {
                 "{model}'s career table and toggle are in the more row: {more}"
             );
         }
+        let css = include_str!("portal_board.css");
+        assert!(
+            css.contains(".more-row summary { padding: 4px 10px 4px 111px; }")
+                && css.contains(".more-row summary { padding-left: 33px; }"),
+            "the toggle sits under the model name at 1440 and 390 px"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -5678,6 +5684,22 @@ mod tests {
                 ".career-table td.col-tickets .strip { max-width: 190px; flex-wrap: wrap; }"
             ),
             "the phone ticket strip wraps in the card"
+        );
+        assert!(
+            media.contains(".career-table .col-tokens > span[data-short] { font-size: 0; }")
+                && media.contains("content: attr(data-short);"),
+            "the phone token cell shows only its short value"
+        );
+        let css = include_str!("portal_board.css");
+        assert!(
+            css.contains(".more-strips { display: flex; flex-wrap: wrap;"),
+            "the dot strips wrap instead of clipping"
+        );
+        assert!(
+            css.contains(
+                ".strip-metric { display: flex; align-items: center; gap: 5px; white-space: nowrap; }"
+            ),
+            "each dot-strip label and value stay on one line"
         );
     }
 

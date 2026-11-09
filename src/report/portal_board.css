@@ -175,7 +175,7 @@ details.more summary { cursor: pointer; color: var(--pri); font-weight: 600; }
 /* R72 F1: the careers span all six board columns in their own row. */
 .more-row > td { padding: 0; border-top: 0; background: rgba(255,255,255,0.015); }
 .more-row .more { width: 100%; }
-.more-row summary { padding: 4px 10px 4px 126px; }
+.more-row summary { padding: 4px 10px 4px 111px; }
 .more-row .agree, .more-row .more-strips, .more-row .table-scroll { margin: 6px 10px; }
 .more-row .table-scroll { overflow-x: visible; }
 .more-row .agree .strip { margin-top: 0; }
@@ -323,7 +323,7 @@ section[id] { scroll-margin-top: 72px; }
   .head-side { align-items: flex-start; text-align: left; }
   .section-nav { gap: var(--sp-3); padding: 8px 10px; font-size: var(--fs-xs); }
   /* R72 F3: each expanded career is a card, not a sideways-scrolling table. */
-  .more-row summary { padding-left: 62px; }
+  .more-row summary { padding-left: 33px; }
   .more-row .table-scroll { overflow: visible; }
   .more-row .agree, .more-row .more-strips, .more-row .table-scroll { margin: 6px; }
   .career-table { display: block; width: 100%; min-width: 0; }
