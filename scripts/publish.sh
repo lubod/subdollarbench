@@ -89,8 +89,11 @@ validate_export() {
     [[ -s "$dir/results.html" ]] || { echo "[publish] refusal: results.html missing" >&2; return 1; }
     [[ -s "$dir/grid.json" ]] || { echo "[publish] refusal: grid.json missing" >&2; return 1; }
     # R71 F1 (R70-2): the public pages stay under 150 KB each.
+    # R76 F2/F3: the archived .45 report is a page too.
     local page bytes
-    for page in index.html results.html; do
+    local pages=(index.html results.html)
+    [[ -f "$dir/results-45.html" ]] && pages+=(results-45.html)
+    for page in "${pages[@]}"; do
         bytes=$(wc -c < "$dir/$page")
         if (( bytes > 150 * 1024 )); then
             echo "[publish] refusal: $page is $bytes bytes, over the 150 KB cap" >&2
@@ -101,9 +104,10 @@ validate_export() {
         echo "[publish] refusal: export contains runs/ logs or workspaces" >&2
         return 1
     }
-    python3 - "$dir/grid.json" <<'PY' || return 1
-import json, sys
+    python3 - "$dir/grid.json" "$dir" <<'PY' || return 1
+import json, os, sys
 v = json.load(open(sys.argv[1]))
+export_dir = sys.argv[2]
 rules = v.get("ranked_rules") or []
 current = v.get("current_rules")
 if not rules:
@@ -125,9 +129,26 @@ if int(v.get("ranked_rehearsal") or 0) > 0:
 models = v.get("ranked_models")
 if models is None:
     models = v.get("models") or []
-if not isinstance(models, list) or len(models) < 3:
-    print("[publish] refusal: %d model(s) with all their careers finished under %s (need 3): %r"
+earlier = v.get("earlier_models") or []
+if not isinstance(models, list) or not models:
+    print("[publish] refusal: no model with all its careers finished under %s" % current,
+          file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(earlier, list):
+    print("[publish] refusal: earlier_models is not a list: %r" % (earlier,),
+          file=sys.stderr)
+    raise SystemExit(1)
+# R76 F3: with the earlier .45 section the page has the new results and
+# the earlier ones, clearly separated, so one complete .46 model is
+# enough. Without the section the 3-model rule stands.
+if len(models) < 3 and not earlier:
+    print("[publish] refusal: %d model(s) with all their careers finished under %s "
+          "(need 3, or 1 with the earlier section): %r"
           % (len(models), current, models), file=sys.stderr)
+    raise SystemExit(1)
+if earlier and not os.path.isfile(os.path.join(export_dir, "results-45.html")):
+    print("[publish] refusal: the earlier section is set but results-45.html is missing",
+          file=sys.stderr)
     raise SystemExit(1)
 PY
     [[ -f "$bar" ]] || { echo "[publish] refusal: flake record missing ($bar)" >&2; return 1; }
@@ -282,6 +303,74 @@ PY
         exit 1
     }
     echo '[self-test] 2 complete models refused, 3 pass'
+
+    # R76 F3: 0 complete .46 models refuse; 1 with the earlier section
+    # passes; 1 alone refuses; the section needs its archived page.
+    zero="$root/zero-models"
+    cp -a "$good" "$zero"
+    python3 - "$zero/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_models"]=[]
+json.dump(v,open(p,"w"))
+PY
+    if validate_export "$zero" "$bar" >/dev/null 2>&1; then
+        echo '[self-test] 0 complete models were accepted' >&2; exit 1
+    fi
+    echo '[self-test] 0 complete models refused'
+
+    one="$root/one-model"
+    cp -a "$good" "$one"
+    python3 - "$one/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_models"]=["m-one"]
+v["earlier_models"]=["old-one"]
+json.dump(v,open(p,"w"))
+PY
+    printf '<html>old results</html>\n' > "$one/results-45.html"
+    validate_export "$one" "$bar" || {
+        echo '[self-test] 1 complete model with the earlier section was refused' >&2
+        exit 1
+    }
+    echo '[self-test] 1 complete model with the earlier section accepted'
+
+    one_alone="$root/one-alone"
+    cp -a "$good" "$one_alone"
+    python3 - "$one_alone/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_models"]=["m-one"]
+json.dump(v,open(p,"w"))
+PY
+    if validate_export "$one_alone" "$bar" >/dev/null 2>&1; then
+        echo '[self-test] 1 complete model without the earlier section was accepted' >&2
+        exit 1
+    fi
+    echo '[self-test] 1 complete model without the earlier section refused'
+
+    missing_45="$root/missing-45"
+    cp -a "$one" "$missing_45"
+    rm -f "$missing_45/results-45.html"
+    if validate_export "$missing_45" "$bar" >/dev/null 2>&1; then
+        echo '[self-test] an earlier section without results-45.html was accepted' >&2
+        exit 1
+    fi
+    echo '[self-test] earlier section without results-45.html refused'
+
+    wide="$root/wide"
+    cp -a "$good" "$wide"
+    python3 - "$wide/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_models"]=["new-%d" % i for i in range(10)]
+v["earlier_models"]=["old-%d" % i for i in range(6)]
+json.dump(v,open(p,"w"))
+PY
+    printf '<html>old results</html>\n' > "$wide/results-45.html"
+    validate_export "$wide" "$bar" || {
+        echo '[self-test] the 10+6 export was refused' >&2; exit 1; }
+    echo '[self-test] 10 complete models with 6 earlier models accepted'
 
     rehearsal="$root/rehearsal"
     cp -a "$good" "$rehearsal"

@@ -4387,6 +4387,69 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// R76 F3: the pages stay under 150 KB with 10 .46 and 6 .45 models,
+    /// the earlier section and the archived report.
+    #[test]
+    fn r76_f3_page_size() {
+        let (base, runs, out) = fixture("r76size");
+        for model in 0..10 {
+            for c in 0..3 {
+                let prefix = format!("new{model}c{c}");
+                career(
+                    &runs,
+                    &prefix,
+                    &format!("new-model-{model}"),
+                    [4.0 + model as f64, 5.0, 6.0, 7.0],
+                    [0.01; 4],
+                );
+                set_tokens(&runs, &prefix, 1, 0, 10_000, 8_000, 500, 10_500);
+                set_career_perf(
+                    &runs,
+                    &prefix,
+                    1.1,
+                    serde_json::json!([
+                        {"id": "W1", "metric": "latency", "reference": 1.0, "candidate": 0.9, "ratio": 1.11, "correct": true},
+                        {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 90.0, "ratio": 0.9, "correct": false, "note": "not durable"}
+                    ]),
+                );
+            }
+        }
+        for model in 0..6 {
+            for c in 0..3 {
+                let prefix = format!("old{model}c{c}");
+                career(
+                    &runs,
+                    &prefix,
+                    &format!("old-model-{model}"),
+                    [3.0 + model as f64, 4.0, 5.0, 6.0],
+                    [0.01; 4],
+                );
+                for phase in 1..=4 {
+                    set_phase_rules(&runs, &prefix, phase, "2026-10-19.45");
+                }
+                set_tokens(&runs, &prefix, 1, 0, 10_000, 8_000, 500, 10_500);
+                set_career_perf(
+                    &runs,
+                    &prefix,
+                    1.1,
+                    serde_json::json!([
+                        {"id": "W1", "metric": "latency", "reference": 1.0, "candidate": 0.9, "ratio": 1.11, "correct": true},
+                        {"id": "W4", "metric": "throughput", "reference": 100.0, "candidate": 90.0, "ratio": 0.9, "correct": false, "note": "not durable"}
+                    ]),
+                );
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        for page in ["index.html", "results.html", "results-45.html"] {
+            let bytes = fs::metadata(out.join(page)).unwrap().len();
+            assert!(
+                bytes <= 150 * 1024,
+                "{page} is {bytes} bytes with 10 .46 + 6 .45 models, over 150 KB"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// R64 F1 (B1, B2, B3): the header counts ranked careers only, points
     /// print with at most one decimal, and an older rule set sits under
     /// "older rule sets", never under "unfinished".
