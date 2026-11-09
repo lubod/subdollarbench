@@ -40,6 +40,8 @@ grader src/scoring.rs
 plumbing src/cost
 plumbing src/campaign.rs
 plumbing src/campaign
+grader src/config.rs
+grader Dockerfile.sandbox
 grader src/prompts
 grader src/bench
 grader src/report/rules.rs

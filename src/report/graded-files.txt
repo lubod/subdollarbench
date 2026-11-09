@@ -8,6 +8,8 @@
 # them when it computes the fingerprint, so a deployment with different
 # stage prompts gets a different stamp without rebuilding.
 file Cargo.lock
+file src/config.rs
+file Dockerfile.sandbox
 file rust-toolchain.toml
 file src/pipeline.rs
 file src/campaign.rs

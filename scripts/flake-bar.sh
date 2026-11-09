@@ -533,6 +533,7 @@ if [[ "$self_test" -eq 1 ]]; then
     # a grader edit moves both.
     repo="$dir/repo"
     mkdir -p "$repo/src/cost" "$repo/src/verifier" "$repo/docs" "$repo/scripts"
+    echo "pub fn prompt() {}" > "$repo/src/config.rs"
     cp scripts/graded-paths.txt "$repo/scripts/graded-paths.txt"
     git -C "$repo" init -q
     git -C "$repo" config user.email flake@example.com
@@ -607,6 +608,13 @@ if [[ "$self_test" -eq 1 ]]; then
     gkey7=$(grader_key "$repo" HEAD)
     [[ "$key6" != "$key7" ]] || { echo "production edit kept the key"; exit 1; }
     [[ "$gkey6" != "$gkey7" ]] || { echo "production edit kept the grader key"; exit 1; }
+    echo "pub fn prompt() { let _ = 2; }" > "$repo/src/config.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm config-edit
+    key8=$(flake_key "$repo" HEAD)
+    gkey8=$(grader_key "$repo" HEAD)
+    [[ "$key7" != "$key8" ]] || { echo "src/config.rs edit kept the key"; exit 1; }
+    [[ "$gkey7" != "$gkey8" ]] || { echo "src/config.rs edit kept the grader key"; exit 1; }
     # R48-5: the bar's lock holder blocks the probe, and releases on exit.
     lock="$dir/long-test.lock"
     (
