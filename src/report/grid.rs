@@ -5603,6 +5603,11 @@ mod tests {
             349.0 - sum
         );
         assert!(
+            media
+                .contains(".board-table th.col-model, .board-table td.col-model { width: 111px; }"),
+            "the model column takes the rest explicitly; colspan=6 cannot leave a phantom column"
+        );
+        assert!(
             media.contains(".hero { font-size: 1.05rem; }"),
             "the points hero shrinks to fit its 88 px cell"
         );

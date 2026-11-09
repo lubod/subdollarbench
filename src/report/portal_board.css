@@ -314,6 +314,9 @@ section[id] { scroll-margin-top: 72px; }
   .board-table th.col-points, .board-table td.col-points { width: 88px; }
   .board-table th.col-perf, .board-table td.col-perf { width: 50px; }
   .board-table th.col-spend, .board-table td.col-spend { width: 60px; }
+  /* R72 R1: give the model the rest explicitly; the colspan=6 more row
+     would otherwise create a phantom 6th auto column beside Spend. */
+  .board-table th.col-model, .board-table td.col-model { width: 111px; }
   .hero { font-size: 1.05rem; }
   .points-bar { width: 100%; }
   /* The secondary numbers are in the expanded career table on a phone. */
