@@ -89,10 +89,13 @@ cell_gate() {
         echo "[cell] FATAL: the rehearsal record for full key $full is not a PASS ($rehearsal_record)" >&2
         return 1
     fi
-    commit="$(awk '$1 == "commit:" { print $2; exit }' "$rehearsal_record")"
-    head="$(cd "$root" && git rev-parse HEAD)"
-    if [[ "$commit" != "$head" ]]; then
-        echo "[cell] FATAL: the rehearsal record is for commit ${commit:-?}, not $head; rerun scripts/grid.sh --rehearsal" >&2
+    # Reviewer fix (2026-11-09): the record is valid for the graded content
+    # it ran on (the full key), not for one commit hash. A docs-only commit
+    # during a grid keeps the key, so it must not stop the next phase
+    # (AGENTS.md allows docs commits while cells run). `commit:` is the
+    # provenance; `key:` must name this key.
+    if ! grep -q "^key: *rehearsal-$full\$" "$rehearsal_record"; then
+        echo "[cell] FATAL: the rehearsal record does not name full key $full ($rehearsal_record); rerun scripts/grid.sh --rehearsal" >&2
         return 1
     fi
     CELL_FLAKE_KEY="$key"

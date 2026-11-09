@@ -289,10 +289,10 @@ rehearsal_gate() {
         log "preflight: the rehearsal record for full key $full is not a PASS ($record)"
         return 1
     fi
-    commit="$(awk '$1 == "commit:" { print $2; exit }' "$record")"
-    head="$(cd "$ROOT" && git rev-parse HEAD)"
-    if [[ "$commit" != "$head" ]]; then
-        log "preflight: the rehearsal record is for commit ${commit:-?}, not $head; rerun scripts/grid.sh --rehearsal"
+    # Reviewer fix (2026-11-09): valid for the graded content (the full
+    # key), not one commit hash; a docs-only commit keeps the key.
+    if ! grep -q "^key: *rehearsal-$full\$" "$record"; then
+        log "preflight: the rehearsal record does not name full key $full ($record); rerun scripts/grid.sh --rehearsal"
         return 1
     fi
     return 0
@@ -1544,9 +1544,14 @@ EOF
         echo "the rehearsal record is not a PASS"; exit 1; }
     rehearsal_gate || { echo "the rehearsal gate refused a fresh record"; exit 1; }
     cp "$record" "$record.good"
+    # A docs-only commit keeps the full key: the record still holds.
     sed -i 's/^commit:  .*/commit:  deadbeef/' "$record"
+    rehearsal_gate 2>/dev/null || {
+        echo "a rehearsal record for the same key but another commit was refused"; exit 1; }
+    # A record whose key line names other content is refused.
+    sed -i 's/^key: .*/key:     rehearsal-0000deadbeef/' "$record"
     if rehearsal_gate 2>/dev/null; then
-        echo "a rehearsal record for another commit was accepted"; exit 1
+        echo "a rehearsal record naming another key was accepted"; exit 1
     fi
     mv "$record.good" "$record"
     rm -f "$record"
