@@ -71,5 +71,6 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [70](70.md) | The facelift's follow-ups: the rehearsal footnote, the phone board, cards that match the board, restored tests, polish (R69-2 to R69-7; display only) | merged `5356bd7`, follow-up `2fef700` |
 | [71](71.md) | The board stays small and distinct as the grid grows: one agreement strip, a 30-career size budget enforced at publish, 10+ colours with a second channel (R70-2 to R70-4; display only) | merged `aa36801` |
 | [72](72.md) | The expanded careers use the board's width: a full-width row, a compact one-line career label, phone cards, equal markers (R71-3; display only) | merged `6459c68` |
-| [73](73.md) | Price rows for glm-5.3-flash and ling-3.1-flash (opens after round 68) | draft |
+| [73](73.md) | Price rows for glm-5.3-flash and ling-3.1-flash (opens after round 68) | superseded by 75 |
 | [74](74.md) | Run health: per-phase health numbers, a live check that stops a bad phase, a canary lane, an audit that gates publishing, the `ref-sql` dropouts fixed, health on the GUI | merged `2fa7f5b` |
+| [75](75.md) | A new rules version: the reference port fixed in the prompt, omp pinned for real, what the candidate sees graded, pins for 10 models, every model reruns | draft |

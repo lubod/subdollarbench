@@ -270,7 +270,14 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   broke its tool calls. Board: 6 models; new bundle
   `portal/sdb-results-2026-11-09.zip` (replace the public one). Reruns
   on `minimax` after rounds 68 and 73.
-- **Investigate: `ref-sql` drops out during agent sessions** (all
+- **Rules bump decided 2026-11-09** (operator, R74-1 → "1"): round 74
+  found the prompt gave every model the wrong `ref-sql` port; round 75
+  bumps the rules version, pins a current omp, grades what the candidate
+  sees, and pins 10 models; then **every model reruns** on the new board
+  (about $60-75). **No paid cell on master until round 75 merges.**
+- ~~Investigate: `ref-sql` drops out~~ (solved by round 74: a prompt
+  renderer bug, not an outage).
+- (old note) **Investigate: `ref-sql` drops out during agent sessions** (all
   models; 19-27 % of the OpenAI models' reference queries refused, a
   minute later it answers again). Log the reference's health every few
   seconds during a session, find the cause (a crash on some input and a
