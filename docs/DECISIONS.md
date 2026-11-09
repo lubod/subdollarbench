@@ -708,6 +708,34 @@ The benchmark answers "what does a dollar buy" (round 23):
   the sandbox's omp (not the host's) and confirm OpenRouter served the
   exact model id and pinned provider.
 
+## 29. Minimax's result withdrawn: a provider fault (2026-11-09)
+
+- **Found** (operator: "check minimax result, it seems very weak"):
+  minimax's rerun, pinned to `gmicloud/fp8` in round 67, lost 8-76 % of
+  its turns to malformed tool calls from GMICloud ("Upstream tool call
+  has missing required arguments"), about 1,100 dropped commands. Its
+  first, unpinned attempt had 0 %; every other model 0-0.1 %. Its
+  11.4 / 76 measured the provider, not the model.
+- **The reviewer's miss:** round 67's pin check proved price and routing
+  ("reply ok"), never a tool call, which is what the agent depends on.
+- **Decided (operator, "yes to all"):**
+  1. minimax's 12 rerun phases are hidden; the board shows 6 models and
+     a new bundle replaces the public one;
+  2. minimax reruns on its maker's endpoint `minimax`; glm-5.3-flash is
+     pinned to `z-ai/fp8`, not GMICloud (round 73);
+  3. round 68: the pre-grid model check makes a tool-call round trip
+     (F3), and a phase with provider tool-call errors over 2 % of turns
+     is a provider fault, hidden and holding the grid (F5).
+- **Review of every other published run** (operator: "review all other
+  runs"): no other model had provider tool-call errors, rate limits or
+  server errors (the "429"/"5xx" hits were line numbers in tool output).
+  One harness issue affects all models: the reference server
+  (`ref-sql`) refuses connections for short spells during agent
+  sessions: 19-27 % of the OpenAI models' reference queries, 1-4 % of
+  the others'. Grading uses its own reference, so scores aren't
+  directly affected, but the agents lose their ground truth for a while.
+  To be investigated (see `TODO_CAMPAIGNS.md`).
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
