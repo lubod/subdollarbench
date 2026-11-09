@@ -261,6 +261,11 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     ends at 7 ranked models (21 careers). The next grid upgrades the
     sandbox's omp under a new rules version and reruns every model
     (`docs/DECISIONS.md` #28).
+- **Next models (operator, 2026-11-09):** `z-ai/glm-5.3-flash`, and
+  maybe `inclusionai/ling-3.1-flash`, on the current harness (same rules
+  as the 7 ranked). Order: round 68 (the bar only for grader changes, the
+  pre-grid model check), then round 73 (their pinned rows), then one
+  model at a time with a $0 rehearsal.
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
