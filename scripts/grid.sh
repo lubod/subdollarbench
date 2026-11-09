@@ -532,7 +532,7 @@ run_lane() {
     local lane="$1"
     local worker=$((WORKER_BASE + lane))
     local idx model phase chain result id rc token last_phase last_id last_stop start_phase
-    local failed=0 provider_turns=0 provider_errors=0
+    local failed=0 provider_turns=0 provider_errors=0 faults=0 first_fault=""
     for idx in "${!CAREERS[@]}"; do
         model="${CAREERS[$idx]}"
         if (( idx % LANES != lane )); then
@@ -641,7 +641,19 @@ run_lane() {
                     "$provider_errors" "$provider_turns" > "$HOLD"
                 log "lane $lane: career $idx $model phase $phase provider fault: $provider_errors errors in $provider_turns turns; hidden; hold at $HOLD"
                 wait_hold
-                break
+                faults=$((faults + 1))
+                if [[ "$faults" -ge 2 ]]; then
+                    {
+                        echo "STOP: career $idx $model phase $phase provider fault twice"
+                        echo "fault 1: $first_fault"
+                        echo "fault 2: $provider_errors errors in $provider_turns turns"
+                    } > "$STOP"
+                    log "lane $lane: career $idx $model phase $phase faulted twice; STOP"
+                    return 1
+                fi
+                first_fault="$provider_errors errors in $provider_turns turns"
+                phase=$((phase - 1))
+                continue
             fi
             # R67 F2: a bill above 1.25x list means the pin did not hold.
             if [[ "$stop" == "ok" && -n "$billed" && "$cost" != "0" ]] \
@@ -656,6 +668,8 @@ run_lane() {
                 return "$failed"
             fi
             chain="$id"
+            faults=0
+            first_fault=""
             [[ -z "$chain" ]] && {
                 log "lane $lane: career $idx $model phase $phase has no campaign id"
                 touch "$STOP"
@@ -754,6 +768,24 @@ if [[ "$phase" -gt 1 && "$chain" != "$prefix-c$career-$model-p$((phase - 1))" ]]
     exit 1
 fi
 printf '%s\t%s\t%s\t%s\n' "$career" "$model" "$phase" "$chain" >> "${SDB_GRID_TRACE:?}"
+# R74 F6: a per-phase fault scenario. The first N attempts of the named
+# phase write a provider-fault live.log; later attempts are clean.
+fault_phase="${SDB_FAKE_FAULT_PHASE:-0}"
+fault_attempts="${SDB_FAKE_FAULT_ATTEMPTS:-0}"
+if [[ "$fault_attempts" -gt 0 && "$phase" == "$fault_phase" ]]; then
+    count_file="${SDB_FAKE_FAULT_COUNT:-$SDB_RUNS_DIR/.faultcount}"
+    n=0
+    [[ -f "$count_file" ]] && n="$(cat "$count_file")"
+    n=$((n + 1))
+    echo "$n" > "$count_file"
+    if [[ "$n" -le "$fault_attempts" ]]; then
+        SDB_FAKE_TURNS=33
+        SDB_FAKE_ERRORS=5
+    else
+        SDB_FAKE_TURNS=10
+        SDB_FAKE_ERRORS=0
+    fi
+fi
 if [[ -n "${SDB_FAKE_TURNS:-}" ]]; then
     log="${SDB_RUNS_DIR:?}/$id/live.log"
     mkdir -p "$(dirname "$log")"
@@ -1444,6 +1476,10 @@ EOF
     export SDB_FAKE_PREFIX=f5
     export SDB_FAKE_TURNS=33
     export SDB_FAKE_ERRORS=5
+    export SDB_FAKE_FAULT_PHASE=1
+    export SDB_FAKE_FAULT_ATTEMPTS=1
+    export SDB_FAKE_FAULT_COUNT="$scenario/faultcount"
+    rm -f "$SDB_FAKE_FAULT_COUNT"
     load_careers "$CAREERS_FILE"
     ( run_grid ) &
     pid=$!
@@ -1476,6 +1512,10 @@ EOF
     rm -f "$HOLD"
     wait "$pid" || { echo "the held grid failed"; exit 1; }
     [[ ! -f "$STOP" ]] || { echo "a provider fault touched STOP"; exit 1; }
+    got="$(awk -F'\t' 'NR > 1 { printf "%s:%s ", $3, $8 }' "$LEDGER")"
+    [[ "$got" == "1:provider_fault 1:ok " ]] || {
+        echo "the faulted phase did not rerun cleanly: $got"; exit 1; }
+    unset SDB_FAKE_FAULT_PHASE SDB_FAKE_FAULT_ATTEMPTS SDB_FAKE_FAULT_COUNT
     echo "[self-test] a 15% provider fault holds and hides the run"
 
     # 20) 1 error in 1000 turns (0.1%) is not a provider fault.
@@ -1525,6 +1565,104 @@ EOF
     [[ ! -f "$runs/f5c-c0-c1-p1/.portal_hidden" ]] || {
         echo "a 3-error phase was hidden"; exit 1; }
     echo "[self-test] 3 errors in 20 turns pass (under the 5-error floor)"
+    unset SDB_FAKE_TURNS SDB_FAKE_ERRORS SDB_FAKE_PREFIX SDB_RUNS_DIR
+
+    # 22) R74 F6: a faulted phase 2 is hidden, the hold is released, and
+    # the same phase reruns from phase 1's end; the ledger keeps both rows.
+    scenario="$dir/twentytwo"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0
+    MAX_PHASE=3
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f6
+    export SDB_FAKE_FAULT_PHASE=2
+    export SDB_FAKE_FAULT_ATTEMPTS=1
+    export SDB_FAKE_FAULT_COUNT="$scenario/faultcount"
+    rm -f "$SDB_FAKE_FAULT_COUNT"
+    load_careers "$CAREERS_FILE"
+    ( run_grid ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "a faulted phase did not hold the grid"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    fi
+    rm -f "$HOLD"
+    wait "$pid" || { echo "the rerun grid failed"; exit 1; }
+    [[ ! -f "$STOP" ]] || { echo "a single fault touched STOP"; exit 1; }
+    got="$(awk -F'\t' 'NR > 1 { printf "%s:%s ", $3, $8 }' "$LEDGER")"
+    [[ "$got" == "1:ok 2:provider_fault 2:ok 3:ok " ]] || {
+        echo "F6 ledger: $got"; exit 1; }
+    chains="$(awk -F'\t' '$3 == 2 { printf "%s ", $4 }' "$SDB_GRID_TRACE")"
+    [[ "$chains" == "f6-c0-c1-p1 f6-c0-c1-p1 " ]] || {
+        echo "F6 rerun chain: $chains"; exit 1; }
+    [[ -f "$runs/f6-c0-c1-p2/.portal_hidden" ]] || {
+        echo "the faulted run is not hidden"; exit 1; }
+    total="$(ledger_total)"
+    awk -v t="$total" 'BEGIN { exit !(t > 0.39 && t < 0.41) }' || {
+        echo "F6 spend: $total"; exit 1; }
+    echo "[self-test] a faulted phase reruns from the same chain and the spend adds up"
+
+    # 23) A phase that faults twice stops the career and names both faults.
+    scenario="$dir/twentythree"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f6b
+    export SDB_FAKE_FAULT_PHASE=2
+    export SDB_FAKE_FAULT_ATTEMPTS=2
+    export SDB_FAKE_FAULT_COUNT="$scenario/faultcount"
+    rm -f "$SDB_FAKE_FAULT_COUNT"
+    load_careers "$CAREERS_FILE"
+    ( run_grid ) &
+    pid=$!
+    for round in 1 2; do
+        for _ in $(seq 1 100); do
+            [[ -f "$HOLD" ]] && break
+            sleep 0.1
+        done
+        if [[ ! -f "$HOLD" ]]; then
+            echo "fault hold $round never appeared"
+            kill "$pid" 2>/dev/null || true
+            exit 1
+        fi
+        rm -f "$HOLD"
+    done
+    rc=0
+    wait "$pid" || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "a double fault did not fail the grid (rc=$rc)"; exit 1; }
+    got="$(awk -F'\t' 'NR > 1 { printf "%s:%s ", $3, $8 }' "$LEDGER")"
+    [[ "$got" == "1:ok 2:provider_fault 2:provider_fault " ]] || {
+        echo "double-fault ledger: $got"; exit 1; }
+    grep -q 'provider fault twice' "$STOP" || {
+        echo "the STOP line does not name the double fault"; exit 1; }
+    grep -q 'fault 1:' "$STOP" && grep -q 'fault 2:' "$STOP" || {
+        echo "the STOP line misses a fault"; exit 1; }
+    echo "[self-test] a second fault stops the career and names both faults"
+    unset SDB_FAKE_FAULT_PHASE SDB_FAKE_FAULT_ATTEMPTS SDB_FAKE_FAULT_COUNT
     unset SDB_FAKE_TURNS SDB_FAKE_ERRORS SDB_FAKE_PREFIX SDB_RUNS_DIR
 
     echo "RESULT: PASS (grid self-test)"
