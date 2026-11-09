@@ -496,6 +496,26 @@ career_state() {
     ) 200>>"$LEDGER.lock"
 }
 
+# R68 F5: provider tool-call errors against agent turns in a finished
+# phase's live.log. The minimax phases (#29) carried 8-76% errors; the
+# published models at most 0.1%. A fault needs both >2% and at least 5
+# errors, so a single bad turn in a short phase is not a provider fault.
+provider_fault_counts() {
+    local log="$1" turns errors
+    turns="$(grep -c '\[BENCH-POLICY\] turn=' "$log" 2>/dev/null || true)"
+    errors="$(grep -cE 'provider stream ended with an error|Upstream error from' "$log" 2>/dev/null || true)"
+    printf '%s\t%s\n' "${turns:-0}" "${errors:-0}"
+}
+
+provider_fault() {
+    local id="$1" log turns errors
+    log="$RUNS/$id/live.log"
+    [[ -f "$log" ]] || return 1
+    read -r turns errors < <(provider_fault_counts "$log")
+    [[ "$turns" -gt 0 && "$errors" -ge 5 ]] || return 1
+    awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'
+}
+
 run_cell() {
     local career="$1" model="$2" phase="$3" chain="$4" worker="$5" result="$6"
     SDB_CELL_CAREER="$career" \
@@ -512,7 +532,7 @@ run_lane() {
     local lane="$1"
     local worker=$((WORKER_BASE + lane))
     local idx model phase chain result id rc token last_phase last_id last_stop start_phase
-    local failed=0
+    local failed=0 provider_turns=0 provider_errors=0
     for idx in "${!CAREERS[@]}"; do
         model="${CAREERS[$idx]}"
         if (( idx % LANES != lane )); then
@@ -599,9 +619,31 @@ run_lane() {
             elif awk -v c="$cost" 'BEGIN { exit !(c > 0.99) }'; then
                 stop="cost > 0.99"
             fi
+            # R68 F5: a finished phase whose live.log carries provider
+            # tool-call errors above 2% of its turns is a provider fault,
+            # not a model result. The ledger row says so and the run is
+            # hidden before anything can publish it.
+            if [[ "$stop" == "ok" && -n "$id" && "$id" != "—" ]] \
+                && provider_fault "$id"; then
+                read -r provider_turns provider_errors < <(provider_fault_counts "$RUNS/$id/live.log")
+                stop="provider_fault"
+            fi
             billed="$(result_get "$result" billed_usd)"
             ledger_add "$idx" "$model" "$phase" "$worker" "${id:-—}" "${points:-0}" "${cost:-0}" "$stop" "$token"
             rm -f "$result"
+            if [[ "$stop" == "provider_fault" ]]; then
+                mkdir -p "$RUNS/$id"
+                printf 'provider fault: %s errors in %s turns (%.2f%%)\n' \
+                    "$provider_errors" "$provider_turns" \
+                    "$(awk -v e="$provider_errors" -v t="$provider_turns" \
+                        'BEGIN { printf "%.2f", 100 * e / t }')" \
+                    > "$RUNS/$id/.portal_hidden"
+                printf 'hold: provider fault: %s errors in %s turns\n' \
+                    "$provider_errors" "$provider_turns" > "$HOLD"
+                log "lane $lane: career $idx $model phase $phase provider fault: $provider_errors errors in $provider_turns turns; hidden; hold at $HOLD"
+                wait_hold
+                return "$failed"
+            fi
             # R67 F2: a bill above 1.25x list means the pin did not hold.
             if [[ "$stop" == "ok" && -n "$billed" && "$cost" != "0" ]] \
                 && awk -v b="$billed" -v l="$cost" 'BEGIN { exit !(b > 1.25 * l) }'; then
@@ -713,6 +755,17 @@ if [[ "$phase" -gt 1 && "$chain" != "$prefix-c$career-$model-p$((phase - 1))" ]]
     exit 1
 fi
 printf '%s\t%s\t%s\t%s\n' "$career" "$model" "$phase" "$chain" >> "${SDB_GRID_TRACE:?}"
+if [[ -n "${SDB_FAKE_TURNS:-}" ]]; then
+    log="${SDB_RUNS_DIR:?}/$id/live.log"
+    mkdir -p "$(dirname "$log")"
+    : > "$log"
+    for i in $(seq 1 "$SDB_FAKE_TURNS"); do
+        printf '[BENCH-POLICY] turn=%s/100 idle=false\n' "$i" >> "$log"
+    done
+    for i in $(seq 1 "${SDB_FAKE_ERRORS:-0}"); do
+        printf 'provider stream ended with an error\n' >> "$log"
+    done
+fi
 if [[ "${SDB_FAKE_SLEEP_ALL:-0}" == "1" || "${SDB_FAKE_SLEEP_ID:-}" == "$id" ]]; then
     sleep "${SDB_FAKE_SLEEP:-0.3}"
 fi
@@ -1369,6 +1422,111 @@ EOF
     MAX_PHASE=4
     unset SDB_REHEARSAL_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
     echo "[self-test] the rehearsal record is full, commit-keyed and \$0"
+
+    # 19) R68 F5: 5 provider errors in 33 turns (15.15%) is a provider
+    # fault: the ledger row says provider_fault, the run is hidden with
+    # the counts, and the grid holds until the hold is released.
+    scenario="$dir/nineteen"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0
+    MAX_PHASE=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f5
+    export SDB_FAKE_TURNS=33
+    export SDB_FAKE_ERRORS=5
+    load_careers "$CAREERS_FILE"
+    ( run_grid ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "a 15% provider fault did not hold the grid"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    fi
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "provider_fault" ]] || {
+        echo "a 15% provider fault wrote stop '$stop'"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    }
+    hidden="$runs/f5-c0-c1-p1/.portal_hidden"
+    [[ -f "$hidden" ]] || {
+        echo "a provider fault did not hide the run"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    }
+    grep -q '5 errors in 33 turns' "$hidden" || {
+        echo "the hidden reason does not name the counts: $(cat "$hidden")"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    }
+    rm -f "$HOLD"
+    wait "$pid" || { echo "the held grid failed"; exit 1; }
+    [[ ! -f "$STOP" ]] || { echo "a provider fault touched STOP"; exit 1; }
+    echo "[self-test] a 15% provider fault holds and hides the run"
+
+    # 20) 1 error in 1000 turns (0.1%) is not a provider fault.
+    scenario="$dir/twenty"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f5b
+    export SDB_FAKE_TURNS=1000
+    export SDB_FAKE_ERRORS=1
+    load_careers "$CAREERS_FILE"
+    run_grid || { echo "a 0.1% phase failed the grid"; exit 1; }
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "ok" ]] || { echo "a 0.1% phase wrote stop '$stop'"; exit 1; }
+    [[ ! -f "$runs/f5b-c0-c1-p1/.portal_hidden" ]] || {
+        echo "a 0.1% phase was hidden"; exit 1; }
+    echo "[self-test] a 0.1% phase passes"
+
+    # 21) 3 errors in 20 turns is 15%, but under the 5-error floor.
+    scenario="$dir/twentyone"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f5c
+    export SDB_FAKE_TURNS=20
+    export SDB_FAKE_ERRORS=3
+    load_careers "$CAREERS_FILE"
+    run_grid || { echo "a 3-error phase failed the grid"; exit 1; }
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "ok" ]] || { echo "a 3-error phase wrote stop '$stop'"; exit 1; }
+    [[ ! -f "$runs/f5c-c0-c1-p1/.portal_hidden" ]] || {
+        echo "a 3-error phase was hidden"; exit 1; }
+    echo "[self-test] 3 errors in 20 turns pass (under the 5-error floor)"
+    unset SDB_FAKE_TURNS SDB_FAKE_ERRORS SDB_FAKE_PREFIX SDB_RUNS_DIR
 
     echo "RESULT: PASS (grid self-test)"
 }
