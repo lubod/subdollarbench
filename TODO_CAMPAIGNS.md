@@ -266,6 +266,15 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   as the 7 ranked). Order: round 68 (the bar only for grader changes, the
   pre-grid model check), then round 73 (their pinned rows), then one
   model at a time with a $0 rehearsal.
+- **Minimax withdrawn 2026-11-09** (`docs/DECISIONS.md` #29): GMICloud
+  broke its tool calls. Board: 6 models; new bundle
+  `portal/sdb-results-2026-11-09.zip` (replace the public one). Reruns
+  on `minimax` after rounds 68 and 73.
+- **Investigate: `ref-sql` drops out during agent sessions** (all
+  models; 19-27 % of the OpenAI models' reference queries refused, a
+  minute later it answers again). Log the reference's health every few
+  seconds during a session, find the cause (a crash on some input and a
+  restart? a container limit?), and fix it. A round after 68 and 73.
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
