@@ -465,9 +465,11 @@ pub const PRICE_OVERRIDES: &[(&str, &str)] = &[
     ),
     ("xiaomi/mimo-v2.6-flash", ""),
     ("qwen/qwen3.8-flash", ""),
-    // R66 F1: the next grid's four models. R67 F1 pins minimax to
-    // GMICloud, which has no time-of-day override.
-    ("minimax/minimax-m3.1-flash", ""),
+    // R66 F1: the next grid's four models. R75 F4 pins minimax to its
+    // maker; that endpoint doubles its price 01:00-15:00 UTC.
+    ("minimax/minimax-m3.1-flash", "2× 01:00-15:00 UTC"),
+    ("z-ai/glm-5.3-flash", ""),
+    ("inclusionai/ling-3.1-flash", ""),
     ("openai/gpt-6-luna-pro", "2× above 272k prompt tokens"),
     ("tencent/hy4", ""),
     ("xiaomi/mimo-v2.6-pro", ""),

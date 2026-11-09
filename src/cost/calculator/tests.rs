@@ -14,6 +14,8 @@ fn r51_f5_every_grid_model_has_an_entry() {
         "minimax/minimax-m3.1-flash",
         "openai/gpt-6-luna-pro",
         "xiaomi/mimo-v2.6-pro",
+        "z-ai/glm-5.3-flash",
+        "inclusionai/ling-3.1-flash",
     ] {
         assert!(price_override_for(m).is_some(), "{m} has no entry");
     }
@@ -24,7 +26,7 @@ fn r51_f5_every_grid_model_has_an_entry() {
         Some("2× above 272k prompt tokens")
     );
     assert_eq!(price_override_for("unknown/model"), None);
-    assert_eq!(price_snapshot_as_of(), "2026-11-08");
+    assert_eq!(price_snapshot_as_of(), "2026-11-09");
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -191,7 +193,7 @@ fn r46_f1_grid_models_are_priced() {
 fn r66_f1_new_models_priced() {
     let cases = [
         ("tencent/hy4", 0.417, 1.2505, 0.021, 0.417),
-        ("minimax/minimax-m3.1-flash", 0.1125, 0.45, 0.01125, 0.1125),
+        ("minimax/minimax-m3.1-flash", 0.075, 0.3, 0.0075, 0.075),
         ("openai/gpt-6-luna-pro", 0.1, 0.5, 0.01, 0.125),
         ("xiaomi/mimo-v2.6-pro", 0.435, 0.87, 0.0036, 0.435),
     ];
@@ -216,8 +218,11 @@ fn r66_f1_new_models_priced() {
             "{id} must match with the openrouter/ prefix"
         );
     }
-    // R67 F1: the pinned GMICloud endpoint has no time-of-day override.
-    assert_eq!(price_override_for("minimax/minimax-m3.1-flash"), Some(""));
+    // R75 F4: the pinned minimax endpoint doubles 01:00-15:00 UTC.
+    assert_eq!(
+        price_override_for("minimax/minimax-m3.1-flash"),
+        Some("2× 01:00-15:00 UTC")
+    );
     assert_eq!(
         price_override_for("openai/gpt-6-luna-pro"),
         Some("2× above 272k prompt tokens")
@@ -232,7 +237,7 @@ fn r66_f1_new_models_priced() {
 /// a missing cache-write is the prompt rate, the snapshot's rule).
 #[test]
 fn r67_f1_rows_match_pinned_provider() {
-    let endpoints: [(&str, &str, f64, f64, f64, f64); 9] = [
+    let endpoints: [(&str, &str, f64, f64, f64, f64); 11] = [
         (
             "anthropic/claude-haiku-5.5",
             "anthropic",
@@ -269,11 +274,20 @@ fn r67_f1_rows_match_pinned_provider() {
         ("tencent/hy4", "tencent/fp4", 0.417, 1.2505, 0.021, 0.417),
         (
             "minimax/minimax-m3.1-flash",
-            "gmicloud/fp8",
-            0.1125,
-            0.45,
-            0.01125,
-            0.1125,
+            "minimax",
+            0.075,
+            0.3,
+            0.0075,
+            0.075,
+        ),
+        ("z-ai/glm-5.3-flash", "z-ai/fp8", 0.15, 0.5, 0.03, 0.15),
+        (
+            "inclusionai/ling-3.1-flash",
+            "novita",
+            0.045,
+            0.135,
+            0.009,
+            0.045,
         ),
         ("openai/gpt-6-luna-pro", "openai", 0.10, 0.50, 0.01, 0.125),
         (
