@@ -2615,8 +2615,11 @@ fn render_results(cells: &[CareerCell]) -> String {
     // R75 F5: the .45 board's known issue, from round 74's health records.
     // The line shows on the .45 page and on any page that still carries a
     // .45 career, so the old board says what it was.
+    // The fallback (an export with only .45 careers, rendered by a newer
+    // binary) needs current to be empty; a .46 board with .45 history in
+    // the same runs dir must not carry the old board's known issue.
     let known_issue = if rules == "2026-10-19.45"
-        || cells.iter().any(|c| c.rules == "2026-10-19.45")
+        || (current.is_empty() && cells.iter().any(|c| c.rules == "2026-10-19.45"))
     {
         "<div class=\"mut note\"><b>Known issue (rules 2026-10-19.45):</b> the stage prompt gave the reference server's port as the lane's port (5580, 5680 or 5780 instead of 5480), so a reference query could be refused. Reference queries refused, from the health records: anthropic/claude-haiku-5.5 3/120 (2.5%), deepseek/deepseek-v4.1-flash-1017 10/283 (3.5%), openai/gpt-6-luna 16/89 (18.0%), openai/gpt-6-luna-pro 23/98 (23.5%), qwen/qwen3.8-flash 6/270 (2.2%), xiaomi/mimo-v2.6-flash 11/424 (2.6%). Fixed in 2026-11-09.46.</div>".to_string()
     } else {
@@ -4125,6 +4128,12 @@ mod tests {
         );
         let (base2, runs2, _) = fixture("r75known-current");
         career(&runs2, "new", "m-new", [1.0; 4], [0.01; 4]);
+        // A .46 board whose runs dir still holds .45 history: the .45 line
+        // must not follow it.
+        career(&runs2, "old2", "m-old2", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            set_phase_rules(&runs2, "old2", phase, "2026-10-19.45");
+        }
         let fresh = render_results(&careers(runs2.to_str().unwrap()));
         assert!(
             !fresh.contains("Known issue (rules 2026-10-19.45)"),
