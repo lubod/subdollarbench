@@ -133,6 +133,15 @@ with open(generation, "w") as f:
 PY
         }
 
+        printf 'tool result: probe-forty-two\n' > "$dir/tool-1.jsonl"
+        printf 'tool result: probe-forty-two\n' > "$dir/tool-2.jsonl"
+        export SDB_MODEL_CHECK_TOOL_SESSION_JSON_1="$dir/tool-1.jsonl"
+        export SDB_MODEL_CHECK_TOOL_SESSION_JSON_2="$dir/tool-2.jsonl"
+        tool_set() {
+            printf '%s\n' "$1" > "$dir/tool-1.jsonl"
+            printf '%s\n' "$2" > "$dir/tool-2.jsonl"
+        }
+
         expect_fail() {
             local want="$1" name="$2"
             rc=0
@@ -158,6 +167,9 @@ PY
                 echo "[self-test] $name was refused: $out" >&2; exit 1; }
             grep -q '^RESULT: PASS$' "$(record_path "$name")" || {
                 echo "[self-test] $name wrote no PASS record" >&2
+                cat "$(record_path "$name")" >&2; exit 1; }
+            grep -q 'tool-calls: 2/2 output, 0/2 errors' "$(record_path "$name")" || {
+                echo "[self-test] $name did not record both passing tool tries" >&2
                 cat "$(record_path "$name")" >&2; exit 1; }
         }
 
@@ -198,6 +210,24 @@ PY
                 'BEGIN { printf "%.10f", 100 * p / 1000000 + 10 * c / 1000000 }')" 0
         expect_pass "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an exact match passes"
+
+        case_name=gmicloud-tool-error
+        tool_set "provider stream ended with an error" \
+            "provider stream ended with an error"
+        expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a provider tool-call error fails"
+
+        case_name=tool-missing-output
+        tool_set "" ""
+        expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a tool round trip with no command output fails"
+
+        case_name=tool-missing-arguments
+        tool_set "missing required arguments" "missing required arguments"
+        expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] missing tool arguments fail"
+
+        tool_set "tool result: probe-forty-two" "tool result: probe-forty-two"
 
         case_name=unpinned
         fixture "openrouter/z-ai/glm-5.3" "z-ai/glm-5.3-20260101" \
@@ -281,37 +311,61 @@ if [[ -z "$image" ]]; then
 fi
 
 work="$(mktemp -d /tmp/sdb-model-check.XXXXXX)"
-log="$(mktemp)"
 cleanup() {
     rm -rf "$work"
-    rm -f "$log"
 }
 trap cleanup EXIT
 
 session_file="${SDB_MODEL_CHECK_SESSION_JSON:-}"
 generation_file="${SDB_MODEL_CHECK_GENERATION_JSON:-}"
+tool_canned_1="${SDB_MODEL_CHECK_TOOL_SESSION_JSON_1:-}"
+tool_canned_2="${SDB_MODEL_CHECK_TOOL_SESSION_JSON_2:-}"
 key="${OPENROUTER_API_KEY:-}"
 
 if [[ -z "$session_file" ]]; then
-    if [[ -z "$key" ]]; then
-        env_file="${SDB_ENV_FILE:-$ROOT/.env}"
-        if [[ -f "$env_file" ]]; then
-            key="$(grep -m1 '^OPENROUTER_API_KEY=' "$env_file" \
-                | cut -d= -f2- | tr -d '\r' | tr -d '"' | tr -d "'")"
+    # The repo .env is the source of truth for the cell key. A stale shell
+    # key can be inference-only: live 2026-11-09, the generation API
+    # answered 401 to the shell's key while .env's key worked. Prefer
+    # .env; fall back to the environment.
+    env_file="${SDB_ENV_FILE:-$ROOT/.env}"
+    if [[ -f "$env_file" ]]; then
+        env_key="$(grep -m1 '^OPENROUTER_API_KEY=' "$env_file" \
+            | cut -d= -f2- | tr -d '\r' | tr -d '"' | tr -d "'")"
+        if [[ -n "$env_key" ]]; then
+            if [[ -n "$key" && "$key" != "$env_key" ]]; then
+                echo "[model-check] note: the shell's OPENROUTER_API_KEY differs from $env_file; using $env_file" >&2
+            fi
+            key="$env_key"
         fi
     fi
     if [[ -z "$key" ]]; then
-        echo "[model-check] FATAL: OPENROUTER_API_KEY is unset and $ROOT/.env has none" >&2
+        echo "[model-check] FATAL: OPENROUTER_API_KEY is unset and $env_file has none" >&2
         exit 1
     fi
     export OPENROUTER_API_KEY="$key"
+fi
 
-    session_name="model-check-$(model_slug "$model")-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# R68 F3: one omp invocation in the sandbox. SESSION_FILE is the session
+# file to inspect; RUN_ERROR says why a failed run produced none.
+SESSION_FILE=""
+RUN_ERROR=""
+run_omp() {
+    local label="$1" prompt="$2" tools="$3" canned="$4"
+    local stamp session_name host_sessions session_host session_dir container rc log
+    SESSION_FILE=""
+    RUN_ERROR=""
+    if [[ -n "$canned" ]]; then
+        SESSION_FILE="$canned"
+        return 0
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    session_name="model-check-$(model_slug "$model")-$label-$stamp"
     host_sessions="$HOME/.omp/agent/sessions"
     session_host="$host_sessions/$session_name"
     session_dir="/home/ubuntu/.omp/agent/sessions/$session_name"
     mkdir -p "$session_host"
-    container="sdb-model-check-$(model_slug "$model")-$$"
+    container="sdb-model-check-$(model_slug "$model")-$label-$$"
+    log="$work/$label.log"
     set +e
     timeout 240 docker run --rm --name "$container" \
         -v "$work:/workspace" \
@@ -321,44 +375,41 @@ if [[ -z "$session_file" ]]; then
         -e HOME=/home/ubuntu \
         -e OPENROUTER_API_KEY \
         subdollar-sandbox omp \
-        --approval-mode=yolo --tools=read \
+        --approval-mode=yolo "--tools=$tools" \
         "--model=$wire" --cwd=/workspace \
         "--session-dir=$session_dir" --max-time=120s \
-        --thinking=low --print-thoughts -p -- "Reply with exactly: ok" \
+        --thinking=low --print-thoughts -p -- "$prompt" \
         >"$log" 2>&1
     rc=$?
     set -e
     if [[ "$rc" -ne 0 ]]; then
-        {
-            echo "model:    $id"
-            echo "sent:     (omp failed)"
-            echo "served:   (not queried)"
-            echo "provider: (not queried)"
-            echo "bill:     (not queried)"
-            echo "time:     $time_utc"
-            echo "image:    $image"
-            echo "RESULT: FAIL (omp exit $rc)"
-        } > "$record"
-        echo "[model-check] FATAL: omp exit $rc ($record); output tail:" >&2
-        tail -n 20 "$log" >&2 || true
-        exit 1
+        RUN_ERROR="omp exit $rc"
+        return 1
     fi
-    session_file="$(find "$session_host" -type f -name '*.jsonl' -print -quit 2>/dev/null || true)"
-    if [[ -z "$session_file" ]]; then
-        {
-            echo "model:    $id"
-            echo "sent:     (no session)"
-            echo "served:   (not queried)"
-            echo "provider: (not queried)"
-            echo "bill:     (not queried)"
-            echo "time:     $time_utc"
-            echo "image:    $image"
-            echo "RESULT: FAIL (omp wrote no session file)"
-        } > "$record"
-        echo "[model-check] FATAL: omp wrote no session file ($record)" >&2
-        exit 1
+    SESSION_FILE="$(find "$session_host" -type f -name '*.jsonl' -print -quit 2>/dev/null || true)"
+    if [[ -z "$SESSION_FILE" ]]; then
+        RUN_ERROR="omp wrote no session file"
+        return 1
     fi
+    return 0
+}
+
+if ! run_omp reply "Reply with exactly: ok" "read" "$session_file"; then
+    {
+        echo "model:    $id"
+        echo "sent:     (omp failed)"
+        echo "served:   (not queried)"
+        echo "provider: (not queried)"
+        echo "bill:     (not queried)"
+        echo "time:     $time_utc"
+        echo "image:    $image"
+        echo "RESULT: FAIL ($RUN_ERROR)"
+    } > "$record"
+    echo "[model-check] FATAL: $RUN_ERROR ($record); output tail:" >&2
+    tail -n 20 "$work/reply.log" >&2 || true
+    exit 1
 fi
+session_file="$SESSION_FILE"
 
 parsed="$(
     python3 - "$session_file" <<'PY'
@@ -405,26 +456,50 @@ fi
 
 if [[ -z "$generation_file" ]]; then
     generation_file="$(mktemp)"
-    set +e
-    printf 'header = "Authorization: Bearer %s"\n' "$key" \
-        | curl -sS -K - -G https://openrouter.ai/api/v1/generation \
-            --data-urlencode "id=$response_id" -o "$generation_file"
-    rc=$?
-    set -e
-    if [[ "$rc" -ne 0 ]]; then
-        {
-            echo "model:    $id"
-            echo "sent:     $(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$parsed")"
-            echo "served:   (generation query failed)"
-            echo "provider: (not queried)"
-            echo "bill:     (not queried)"
-            echo "time:     $time_utc"
-            echo "image:    $image"
-            echo "RESULT: FAIL (generation API exit $rc)"
-        } > "$record"
-        echo "[model-check] FATAL: generation API exit $rc ($record)" >&2
-        exit 1
-    fi
+    # The generation record is eventually consistent: a query right after
+    # the call can answer 404 "not found" (live 2026-11-09). Retry briefly.
+    attempt=0
+    while :; do
+        attempt=$((attempt + 1))
+        set +e
+        printf 'header = "Authorization: Bearer %s"\n' "$key" \
+            | curl -sS -K - -G https://openrouter.ai/api/v1/generation \
+                --data-urlencode "id=$response_id" -o "$generation_file"
+        rc=$?
+        set -e
+        if [[ "${SDB_MODEL_CHECK_DEBUG:-0}" == "1" ]]; then
+            echo "[model-check] generation attempt $attempt bytes: $(wc -c < "$generation_file")" >&2
+            head -c 240 "$generation_file" >&2 || true
+            echo >&2
+        fi
+        if [[ "$rc" -eq 0 ]] && python3 - "$generation_file" <<'PY'
+import json, sys
+try:
+    v = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+data = v.get("data") or {}
+raise SystemExit(0 if data.get("id") else 1)
+PY
+        then
+            break
+        fi
+        if [[ "$attempt" -ge 20 ]]; then
+            {
+                echo "model:    $id"
+                echo "sent:     $(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$parsed")"
+                echo "served:   (generation query failed)"
+                echo "provider: (not queried)"
+                echo "bill:     (not queried)"
+                echo "time:     $time_utc"
+                echo "image:    $image"
+                echo "RESULT: FAIL (generation API exit $rc)"
+            } > "$record"
+            echo "[model-check] FATAL: generation API exit $rc after $attempt attempts ($record)" >&2
+            exit 1
+        fi
+        sleep 1
+    done
 fi
 
 verdict="$(
@@ -508,6 +583,49 @@ pinned="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["pin
 priced="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["priced"] else "0")' "$verdict")"
 reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])["reasons"]))' "$verdict")"
 
+# R68 F3: the tool-call round trip, twice. The prompt needs two bash calls
+# with arguments; the first command's output must appear and no provider
+# tool-call error may. This is the minimax shape (#29): a provider that
+# returns malformed tool calls still answers the reply-ok prompt.
+tool_prompt='Use the bash tool twice: first run `echo probe-forty-two`, then run `ls -1 /etc | head -3`. Then reply with the output of the first command.'
+tool_lines=()
+tool_outputs=0
+tool_errors=0
+tool_ok=1
+for i in 1 2; do
+    canned_var="tool_canned_$i"
+    canned="${!canned_var:-}"
+    if ! run_omp "tool-$i" "$tool_prompt" "read,bash" "$canned"; then
+        tool_lines+=("tool-call $i: output=no error=yes ($RUN_ERROR)")
+        tool_errors=$((tool_errors + 1))
+        tool_ok=0
+        continue
+    fi
+    tool_session="$SESSION_FILE"
+    tool_log="$work/tool-$i.log"
+    output=no
+    error=no
+    if grep -q 'probe-forty-two' "$tool_session" "$tool_log" 2>/dev/null; then
+        output=yes
+    fi
+    if grep -qE 'provider stream ended with an error|missing required arguments' \
+        "$tool_session" "$tool_log" 2>/dev/null; then
+        error=yes
+    fi
+    tool_lines+=("tool-call $i: output=$output error=$error")
+    [[ "$output" == "yes" ]] && tool_outputs=$((tool_outputs + 1))
+    [[ "$error" == "yes" ]] && tool_errors=$((tool_errors + 1))
+    [[ "$output" == "yes" && "$error" == "no" ]] || tool_ok=0
+done
+if [[ "$tool_ok" != "1" ]]; then
+    ok=0
+    if [[ -n "$reasons" ]]; then
+        reasons="$reasons; tool-call round trip failed"
+    else
+        reasons="tool-call round trip failed"
+    fi
+fi
+
 {
     echo "model:    $id"
     echo "sent:     $sent"
@@ -522,6 +640,10 @@ reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])[
     else
         echo "bill:     \$$bill (no snapshot row; bill check skipped)"
     fi
+    for line in "${tool_lines[@]}"; do
+        echo "$line"
+    done
+    echo "tool-calls: $tool_outputs/2 output, $tool_errors/2 errors"
     echo "time:     $time_utc"
     echo "image:    $image"
     if [[ "$ok" == "1" ]]; then
