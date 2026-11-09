@@ -738,6 +738,23 @@ The benchmark answers "what does a dollar buy" (round 23):
   directly affected, but the agents lose their ground truth for a while.
   To be investigated (see `TODO_CAMPAIGNS.md`).
 
+## 30. Rules `2026-11-09.46`: every model reruns (2026-11-09)
+
+- **Why** (round 74, R74-1 → operator "1"): every `.45` phase was told
+  the reference server's port as its lane's port; the OpenAI models lost
+  the reference on 19-27 % of their queries, the others on 1-4 %. The
+  fix changes what the candidate sees, so the rules version moved
+  (round 75, merged `0404736`), together with omp pinned at 18.18.3 (it
+  resolves hy4; DECISIONS #28), the prompt renderer and the sandbox
+  graded, and the stage-18 connection-cap race fixed.
+- **The boards:** `.45` stays published with a known-issue line; `.46`
+  starts empty and is published only with at least 3 complete models.
+  Every model reruns on `.46`: the 6 ranked, minimax on its maker's
+  endpoint, glm-5.3-flash, ling-3.1-flash, hy4.
+- **Peak prices** (R75-1 → "1"): the cap is computed from each model's
+  snapshot row, which can't express a time-of-day price; minimax and
+  deepseek run only off-peak.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
