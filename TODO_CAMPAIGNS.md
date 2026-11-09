@@ -257,6 +257,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     live through omp, 2026-11-09). Options: skip hy4; or a harness round
     that upgrades the sandbox's omp (a new image fingerprint, and the
     question of whether that changes what the candidate sees).
+  - **Decided 2026-11-09 (operator: "1"): hy4 is skipped.** This grid
+    ends at 7 ranked models (21 careers). The next grid upgrades the
+    sandbox's omp under a new rules version and reruns every model
+    (`docs/DECISIONS.md` #28).
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).

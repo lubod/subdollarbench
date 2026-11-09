@@ -691,6 +691,23 @@ The benchmark answers "what does a dollar buy" (round 23):
   auth export | ... | opencode auth import` on stdin (never printed). Go
   calls (deepseek, gemini) and an advisor call succeed with it.
 
+## 28. The grid ends at 7 models; hy4 waits for an omp upgrade (2026-11-09)
+
+- **Mimo-pro was stopped** (operator, "stop mimo"): 2-5 min a turn and
+  two of three phase 1 runs spent ticket 0's budget probing the
+  reference server; a full grid would take 1-1.5 days. Its runs are
+  hidden, not ranked.
+- **Hy4 can't run on this harness:** the sandbox's omp 18.8.0 resolves
+  `tencent/hy4` to `tencent/hy4-preview` (another model, 2× the price).
+  The host's omp 18.11.1 resolves it correctly.
+- **Decision (operator: "1"):** skip hy4. Upgrading the sandbox's omp
+  changes the agent the candidate runs, so hy4 alone would not be
+  comparable with the 7 ranked models. The next grid upgrades omp under
+  a new rules version and reruns every model.
+- **Check for every new model:** before a grid, send one call through
+  the sandbox's omp (not the host's) and confirm OpenRouter served the
+  exact model id and pinned provider.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
