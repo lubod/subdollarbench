@@ -411,6 +411,7 @@ fn backfill_reads_rounds_from_the_console_and_classifies_the_failure() {
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
         billed_usd: 0.0,
+        health: None,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -941,6 +942,7 @@ fn ladder_derives_every_ticket() {
         regression_free_tickets: 1,
         total_cost_usd: 0.01,
         billed_usd: 0.0,
+        health: None,
         over_budget: true,
         cap_reached: false,
         over_wall: false,
@@ -2647,6 +2649,7 @@ fn chain_rollup(phase: u32, finished: bool) -> CampaignRollup {
         regression_free_tickets: 0,
         total_cost_usd: 0.5,
         billed_usd: 0.0,
+        health: None,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -4509,4 +4512,44 @@ fn r68_f4_validate_spec_lite_and_needs_errors() {
     std::fs::write(lc.root.join("stages/1-lite.md"), "# lite").unwrap();
     lc.spec.stages[1].lite = Some(lite(0.1, 10, 0.4, "stages/1-lite.md"));
     assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+}
+
+/// R74 F1: the health counter on saved excerpts of the real 2026-11-08
+/// logs. The minimax phase is the 25-errors-in-73-turns provider fault;
+/// the luna-pro phase carries ref-sql refusals; the deepseek excerpt is
+/// clean.
+#[test]
+fn r74_f1_health_from_logs() {
+    let minimax = health_from_live_log(include_str!("fixtures/health/minimax-20261108-w1.log"));
+    assert_eq!(minimax.turns, 73, "minimax turns");
+    assert_eq!(minimax.tool_errors, 25, "minimax provider tool errors");
+    assert_eq!(minimax.ref_queries, 11, "minimax ref-sql queries");
+    assert_eq!(minimax.ref_refused, 0, "minimax ref-sql refusals");
+    assert!(
+        minimax.turn_secs_p50 > 0.0 && minimax.turn_secs_max >= minimax.turn_secs_p50,
+        "turn seconds: {:?}",
+        minimax
+    );
+
+    let luna = health_from_live_log(include_str!("fixtures/health/luna-pro-20261108-w3.log"));
+    assert_eq!(luna.turns, 264, "luna turns");
+    assert_eq!(luna.tool_errors, 0, "luna has no provider tool errors");
+    assert!(luna.ref_queries > 0, "luna queried ref-sql");
+    assert!(luna.ref_refused > 0, "luna saw ref-sql refusals");
+    assert!(
+        luna.ref_refused < luna.ref_queries,
+        "the refusals are a minority: {:?}",
+        luna
+    );
+
+    let deep = health_from_live_log(include_str!("fixtures/health/deepseek-20261031.log"));
+    assert_eq!(deep.turns, 60, "deepseek turns");
+    assert_eq!(deep.tool_errors, 0, "deepseek has no provider tool errors");
+    assert_eq!(deep.ref_refused, 0, "deepseek has no ref-sql refusals");
+    assert_eq!(deep.empty_responses, 0, "deepseek has no empty responses");
+
+    // The billed/list ratio is set by the rollup writer, not the log.
+    let mut billed = minimax.clone();
+    billed.billed_ratio = Some(1.1);
+    assert_eq!(billed.billed_ratio, Some(1.1));
 }
