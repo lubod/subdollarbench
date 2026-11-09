@@ -1783,7 +1783,14 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "stop:   $STOP"
     exit 0
 fi
+mkdir -p "$RUNS"
+: > "$RUNS/.grid-audit-marker"
 run_grid
 if [[ "$REHEARSAL" == "1" ]]; then
     write_rehearsal_record
 fi
+# R74 F3: audit the runs this grid produced and put the summary in the
+# grid log. The audit's published set is the new, non-hidden campaigns;
+# the worse-rerun comparison still sees every earlier attempt.
+scripts/run-audit.sh --summary --runs-dir "$RUNS" --newer "$RUNS/.grid-audit-marker" 2>&1 \
+    | while IFS= read -r line; do log "$line"; done || true

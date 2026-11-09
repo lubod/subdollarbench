@@ -124,6 +124,15 @@ PY
         echo "[publish] refusal: flake record has no RESULT: PASS" >&2
         return 1
     }
+    # R74 F3: the run audit gates the export; a waiver line closes a
+    # finding and is printed.
+    local audit_out audit_rc=0
+    audit_out="$(scripts/run-audit.sh --check --export "$dir" 2>&1)" || audit_rc=$?
+    printf '%s\n' "$audit_out"
+    if [[ "$audit_rc" -ne 0 ]]; then
+        echo "[publish] refusal: the run audit has open findings" >&2
+        return 1
+    fi
     local scanner out
     scanner="$(secret_scan_bin)" || {
         echo "[publish] refusal: no binary for the secret scan" >&2
@@ -263,6 +272,45 @@ PY
     fi
     echo '[self-test] missing bar refused'
 
+    # R74 F3: an open audit finding refuses; a waiver closes it and the
+    # waiver line is printed.
+    audit_runs="$root/audit-runs"
+    audit_career="campaign_audit_bad_20261109_000000_w1"
+    mkdir -p "$audit_runs/$audit_career"
+    python3 - "$audit_runs/$audit_career/campaign.json" "$audit_career" <<'PY'
+import json, sys
+path, cid = sys.argv[1:3]
+json.dump({
+    "campaign_id": cid, "model": "audit", "phase": 1, "points": 8.0,
+    "total_cost_usd": 1.0, "billed_usd": 1.0,
+    "health": {"turns": 73, "tool_errors": 25, "ref_queries": 0,
+               "ref_refused": 0, "empty_responses": 0, "billed_ratio": 1.0},
+    "career": {"cells": [cid], "points": 8.0},
+}, open(path, "w"))
+PY
+    audit_export="$root/audit-export"
+    cp -a "$good" "$audit_export"
+    printf '<html><a href="results.html#%s">x</a></html>\n' "$audit_career" \
+        > "$audit_export/index.html"
+    if ( export SDB_AUDIT_RUNS_DIR="$audit_runs" SDB_AUDIT_WAIVERS="$root/no-waiver"; \
+        validate_export "$audit_export" "$bar" >/dev/null 2>&1 ); then
+        echo '[self-test] an open audit finding was accepted' >&2; exit 1
+    fi
+    echo '[self-test] open audit finding refused'
+    printf 'audit | tool-errors | operator | test\n' > "$root/audit-waivers.txt"
+    out="$(export SDB_AUDIT_RUNS_DIR="$audit_runs" SDB_AUDIT_WAIVERS="$root/audit-waivers.txt"; \
+        validate_export "$audit_export" "$bar" 2>&1)" || {
+        echo '[self-test] a waived audit finding was refused' >&2
+        printf '%s\n' "$out" >&2
+        exit 1
+    }
+    grep -q '\[audit\] waiver:' <<<"$out" || {
+        echo '[self-test] the audit waiver line was not printed' >&2
+        printf '%s\n' "$out" >&2
+        exit 1
+    }
+    echo '[self-test] waived audit finding passes and prints the waiver'
+
     while IFS='|' read -r planted value; do
         secret="$root/secret"
         rm -rf "$secret"
@@ -322,7 +370,7 @@ EOF
         "$fixture/src/sandbox" "$fixture/scripts"
     cp scripts/publish.sh scripts/flake-bar.sh scripts/graded-paths.txt \
         scripts/graded-filter.sh scripts/bar-proofs.sh scripts/long-test-lock.sh \
-        "$fixture/scripts/"
+        scripts/run-audit.sh "$fixture/scripts/"
     git -C "$fixture" init -q
     git -C "$fixture" config user.email publish@example.com
     git -C "$fixture" config user.name publish
