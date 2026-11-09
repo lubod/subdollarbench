@@ -166,7 +166,29 @@ pub async fn run_cost_annotate(
     runs_dir: &Path,
     apply: bool,
 ) -> Result<CostAnnotateReport> {
-    let root = get_repo_root();
+    run_cost_annotate_at(
+        &get_repo_root(),
+        results_dir,
+        runs_dir,
+        apply,
+        LeaderboardManager::open_store_if_exists(),
+        None,
+    )
+    .await
+}
+
+/// R68 F4: the testable form. The public entry point passes the real repo
+/// root, store and the catalog price cache; the test passes a temp root,
+/// a temp store and a canned pricing map, so the whole annotation pass
+/// runs without the network or the canonical dirs.
+async fn run_cost_annotate_at(
+    root: &Path,
+    results_dir: &Path,
+    runs_dir: &Path,
+    apply: bool,
+    store: Option<crate::report::Store>,
+    pricing: Option<HashMap<String, Option<ModelPricing>>>,
+) -> Result<CostAnnotateReport> {
     let canon_runs = root.join("runs");
     let canon_results = root.join("results");
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -183,7 +205,6 @@ pub async fn run_cost_annotate(
     // ---- Read every store up front. Models are collected UNCONDITIONALLY:
     // a price cache built only from still-unannotated rows goes empty on the
     // second run, and every later pass silently no-ops.
-    let store = LeaderboardManager::open_store_if_exists();
     let db_runs: Vec<crate::report::RunManifest> = store
         .as_ref()
         .map(|s| s.load_run_manifests())
@@ -276,7 +297,10 @@ pub async fn run_cost_annotate(
         }
     }
 
-    let cache = pricing_cache(&models).await;
+    let cache = match pricing {
+        Some(cache) => cache,
+        None => pricing_cache(&models).await,
+    };
 
     // ---- Annotate each store where a zero cost prices positive.
     let mut annotated = Vec::new();
@@ -909,6 +933,138 @@ mod tests {
     #[tokio::test]
     async fn test_pricing_cache_with_no_models_is_empty() {
         assert!(pricing_cache(&[]).await.is_empty());
+    }
+
+    /// R68 F4: the whole annotation pass on a temp root: manifests,
+    /// result objects and arrays, embedded subruns, the DB rows, the
+    /// free/unknown split, and idempotence. The pricing map is canned, so
+    /// the test never touches the catalog.
+    #[tokio::test]
+    async fn test_run_cost_annotate_scans_manifests_results_and_db() {
+        let root = unique_temp("run");
+        let runs = root.join("runs");
+        let results = root.join("results");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::create_dir_all(&results).unwrap();
+        let write = |path: &std::path::Path, v: &Value| {
+            std::fs::write(path, serde_json::to_string_pretty(v).unwrap()).unwrap();
+        };
+        std::fs::create_dir_all(runs.join("run-paid")).unwrap();
+        write(
+            &runs.join("run-paid").join("manifest.json"),
+            &json!({
+                "run_id": "run-paid", "model": "paid/model", "cost_usd": 0.0,
+                "tokens": {"prompt_tokens": 1_000_000, "cached_tokens": 0, "completion_tokens": 500_000}
+            }),
+        );
+        std::fs::create_dir_all(runs.join("run-free")).unwrap();
+        write(
+            &runs.join("run-free").join("manifest.json"),
+            &json!({
+                "run_id": "run-free", "model": "free/model", "cost_usd": 0.0,
+                "tokens": {"prompt_tokens": 1_000_000, "cached_tokens": 0, "completion_tokens": 0}
+            }),
+        );
+        std::fs::create_dir_all(runs.join("run-unknown")).unwrap();
+        write(
+            &runs.join("run-unknown").join("manifest.json"),
+            &json!({
+                "run_id": "run-unknown", "model": "unknown/model", "cost_usd": 0.0,
+                "tokens": {"prompt_tokens": 1_000_000, "cached_tokens": 0, "completion_tokens": 0}
+            }),
+        );
+        write(
+            &results.join("run-paid.json"),
+            &json!({
+                "id": "run-paid", "model": "paid/model", "total_cost_usd": 0.0,
+                "prompt_tokens": 1_000_000, "cached_tokens": 0, "completion_tokens": 500_000
+            }),
+        );
+        write(
+            &results.join("run-array.json"),
+            &json!([
+                {"id": "flat", "model": "paid/model", "total_cost_usd": 0.0,
+                 "prompt_tokens": 1_000, "cached_tokens": 0, "completion_tokens": 1_000},
+                {"id": "parent", "model": "paid/model", "total_cost_usd": 0.0,
+                 "prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0,
+                 "subruns": [{"id": "sub", "model": "paid/model", "total_cost_usd": 0.0,
+                              "prompt_tokens": 1_000_000, "cached_tokens": 0, "completion_tokens": 0}]}
+            ]),
+        );
+        let pricing = HashMap::from([
+            (
+                "paid/model".to_string(),
+                Some(ModelPricing::new(2.0, 4.0, 0.5)),
+            ),
+            (
+                "free/model".to_string(),
+                Some(ModelPricing::new(0.0, 0.0, 0.0)),
+            ),
+        ]);
+
+        let store = crate::report::Store::open(&root.join("bench.db")).unwrap();
+        let mut db_run = typed_manifest(0.0, None);
+        db_run.model = "paid/model".to_string();
+        store.upsert_run_manifest(&db_run).unwrap();
+        let mut db_parent = typed_row(0.0, None);
+        db_parent.model = "paid/model".to_string();
+        store.upsert_parent(&db_parent).unwrap();
+
+        let report = run_cost_annotate_at(
+            &root,
+            &results,
+            &runs,
+            false,
+            Some(store),
+            Some(pricing.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.manifests_scanned, 3);
+        assert_eq!(
+            report.annotated,
+            vec!["run-paid: $0.00 -> formula $4.000000"]
+        );
+        assert_eq!(report.results_annotated, 3);
+        assert_eq!(report.already_free, 1);
+        assert_eq!(report.db_annotated, 1);
+        assert_eq!(report.db_parents_annotated, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("unknown/model"));
+        let before: Value = serde_json::from_str(
+            &std::fs::read_to_string(runs.join("run-paid/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            before.get("cost_formula_usd").is_none(),
+            "dry run writes nothing"
+        );
+
+        let store = crate::report::Store::open(&root.join("bench.db")).unwrap();
+        let report = run_cost_annotate_at(&root, &results, &runs, true, Some(store), Some(pricing))
+            .await
+            .unwrap();
+        assert_eq!(report.annotated.len(), 1);
+        let after: Value = serde_json::from_str(
+            &std::fs::read_to_string(runs.join("run-paid/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after["cost_source"], "legacy_zero_delta");
+        assert_eq!(after["cost_formula_usd"], 4.0);
+        let result_after: Value =
+            serde_json::from_str(&std::fs::read_to_string(results.join("run-array.json")).unwrap())
+                .unwrap();
+        assert_eq!(result_after[0]["cost_formula_usd"], 0.006);
+        assert_eq!(result_after[1]["subruns"][0]["cost_formula_usd"], 2.0);
+        let stored = crate::report::Store::open(&root.join("bench.db"))
+            .unwrap()
+            .load_run_manifests();
+        assert_eq!(stored[0].cost_formula_usd, Some(0.0004));
+        let again = run_cost_annotate_at(&root, &results, &runs, false, None, Some(HashMap::new()))
+            .await
+            .unwrap();
+        assert!(again.annotated.is_empty(), "re-runs are idempotent");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The pass only ever touches the canonical repo dirs; a temp dir must be
