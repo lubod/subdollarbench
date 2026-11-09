@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub mod health;
+pub use health::{health_for_run_dir, health_from_live_log, PhaseHealth};
+
 pub use crate::scoring::{
     cap_allows, cap_headroom, cap_reserve, default_feedback_rounds, default_lite_weight,
     default_tier, max_points, pool_budget, repair_round_spend, runnable_weight_sum, score_ladder,
@@ -2145,6 +2148,7 @@ fn live_rollup_stub_at_with(
         regression_free_tickets: 0,
         total_cost_usd: live["campaign_spent"].as_f64().unwrap_or(0.0),
         billed_usd: 0.0,
+        health: None,
         over_budget: false,
         cap_reached: false,
         over_wall: false,
@@ -2647,6 +2651,9 @@ pub struct CampaignRollup {
     /// R67 F2: the phase's provider bill summed over its tickets.
     #[serde(default)]
     pub billed_usd: f64,
+    /// R74 F1: the phase's health numbers, computed from its live.log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<PhaseHealth>,
     /// Spent *at or above* the campaign cap (round-11 finding 2: this stays
     /// strictly "over budget"; the floor stop is `cap_reached`).
     pub over_budget: bool,
@@ -3112,6 +3119,7 @@ where
         regression_free_tickets: 0,
         total_cost_usd: 0.0,
         billed_usd: 0.0,
+        health: None,
         over_budget: false,
         cap_reached: false,
         over_wall: false,

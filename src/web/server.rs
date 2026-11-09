@@ -1719,6 +1719,17 @@ fn campaign_board_view(
     ))
 }
 
+/// R74 F5: the console's compact health cell. The rollup carries the F1
+/// numbers; the class is F2's red/amber/green decision.
+fn add_health_fields(v: &mut serde_json::Value) {
+    if let Some(h) = v.get("rollup").and_then(|r| r.get("health")).cloned() {
+        if let Ok(h) = serde_json::from_value::<crate::campaign::PhaseHealth>(h) {
+            v["health_class"] = serde_json::json!(h.severity());
+            v["health_title"] = serde_json::json!(h.title());
+        }
+    }
+}
+
 pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
     let runs_dir = RunArchiver::resolve_runs_dir();
     let mut specs: std::collections::HashMap<String, Option<crate::campaign::CampaignSpec>> =
@@ -1783,6 +1794,7 @@ pub(crate) async fn get_campaigns() -> Json<Vec<serde_json::Value>> {
             };
             v["ladder"] = serde_json::to_value(ladder).unwrap_or(serde_json::Value::Null);
             v["phases"] = phases;
+            add_health_fields(&mut v);
             v["stop_reason"] = serde_json::json!(stop);
             v["board_key"] = serde_json::to_value(key).unwrap_or_default();
             if let Some(rollup) = rollup_out {
@@ -2229,6 +2241,7 @@ pub(crate) async fn get_campaign_detail(AxumPath(id): AxumPath<String>) -> Respo
         body["phases"] = crate::campaign::phases_json(spec);
     }
     body["live_run"] = serde_json::json!(live);
+    add_health_fields(&mut body);
     // R47 F4: a superseded branch stays renderable, marked.
     let superseded_by = superseded_by(&RunArchiver::resolve_runs_dir(), &clean);
     body["superseded"] = serde_json::json!(superseded_by.is_some());
@@ -5246,6 +5259,74 @@ global.fetch = async (url) => {
         );
         assert_eq!(body["rollup"]["stages"][0]["rounds"][0]["derived"], true);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// R74 F5: the console API carries F1's health numbers and the F2
+    /// colour; a phase over a threshold is red.
+    #[tokio::test]
+    async fn r74_f5_gui_health() {
+        isolate_test_runs_dir();
+        let runs = crate::report::archive::RunArchiver::resolve_runs_dir();
+        let cell = |name: &str, health: serde_json::Value| {
+            let dir = runs.join(name);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let rollup = serde_json::json!({
+                "campaign_id": name, "name": "sdb-sql", "model": "m", "harness": "omp",
+                "effort": "high", "task": "sql", "started_at": "2026-11-09T00:00:00Z",
+                "finished_at": "2026-11-09T01:00:00Z", "stages": [],
+                "reached": 0, "regression_free_tickets": 0, "points": 1.0,
+                "max_points": 76.0, "rules_version": "2026-10-19.45",
+                "total_cost_usd": 0.01, "billed_usd": 0.01, "over_budget": false,
+                "cap_reached": false, "over_wall": false, "health": health
+            });
+            fs::write(dir.join("campaign.json"), rollup.to_string()).unwrap();
+        };
+        let bad = format!("campaign_sdb-sql_r74health_bad_{}", std::process::id());
+        let clean = format!("campaign_sdb-sql_r74health_clean_{}", std::process::id());
+        cell(
+            &bad,
+            serde_json::json!({
+                "turns": 73, "tool_errors": 25, "ref_queries": 0,
+                "ref_refused": 0, "turn_secs_p50": 5.0, "turn_secs_max": 121.0,
+                "empty_responses": 0, "billed_ratio": 1.0
+            }),
+        );
+        cell(
+            &clean,
+            serde_json::json!({
+                "turns": 100, "tool_errors": 0, "ref_queries": 10,
+                "ref_refused": 0, "turn_secs_p50": 10.0, "turn_secs_max": 40.0,
+                "empty_responses": 0, "billed_ratio": 1.0
+            }),
+        );
+        let Json(cells) = get_campaigns().await;
+        let row = cells
+            .iter()
+            .find(|c| c["id"].as_str() == Some(bad.as_str()))
+            .unwrap_or_else(|| panic!("the health cell must render: {cells:?}"));
+        assert_eq!(row["rollup"]["health"]["tool_errors"], 25);
+        assert_eq!(row["health_class"], "red");
+        assert!(row["health_title"]
+            .as_str()
+            .unwrap_or("")
+            .contains("25 tool errors"));
+        let row = cells
+            .iter()
+            .find(|c| c["id"].as_str() == Some(clean.as_str()))
+            .unwrap_or_else(|| panic!("the clean cell must render: {cells:?}"));
+        assert_eq!(row["health_class"], "green");
+
+        let resp = get_campaign_detail(axum::extract::Path(bad.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["rollup"]["health"]["turns"], 73);
+        assert_eq!(body["health_class"], "red");
+        let _ = fs::remove_dir_all(runs.join(&bad));
+        let _ = fs::remove_dir_all(runs.join(&clean));
     }
 
     /// R43 F5/D2: a row whose task no longer exists is skipped with one log

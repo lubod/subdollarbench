@@ -140,6 +140,13 @@ impl PipelineLogger for CampaignLogger {
                     }
                 }
             });
+            // R74 F1: the same counter feeds the grid's live check and the
+            // console; rewrite it on the same 5 s throttle as status.json.
+            let text = std::fs::read_to_string(&self.live).unwrap_or_default();
+            let health = campaign::health_from_live_log(&text);
+            if let Ok(json) = serde_json::to_string_pretty(&health) {
+                let _ = std::fs::write(self.cdir.join("health.json"), json);
+            }
         }
     }
 }
@@ -911,6 +918,12 @@ pub async fn run(
         .load(std::sync::atomic::Ordering::SeqCst)
         .max(env_cells.unwrap_or(1))
         .max(1);
+    // R74 F1: the finished phase's health, with the billed/list ratio.
+    let health = campaign::health_for_run_dir(&cdir, rollup.total_cost_usd, rollup.billed_usd);
+    rollup.health = Some(health.clone());
+    if let Ok(json) = serde_json::to_string_pretty(&health) {
+        let _ = std::fs::write(cdir.join("health.json"), json);
+    }
     write_status(&cdir, "done", None, Some(&rollup));
     let rollup_path = cdir.join("campaign.json");
     std::fs::write(&rollup_path, serde_json::to_string_pretty(&rollup)?)?;
@@ -1585,6 +1598,7 @@ mod tests {
             regression_free_tickets: 1,
             total_cost_usd,
             billed_usd: 0.0,
+            health: None,
             over_budget,
             cap_reached: false,
             budget_usd: 0.0,

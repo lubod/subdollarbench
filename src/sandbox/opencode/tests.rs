@@ -10,7 +10,8 @@ fn assert_agents_ports_clean(content: &str, base: u16, task: &str, worker: u8) {
     let base_pat =
         ::regex::Regex::new(&format!(r"\b{}\b", ::regex::escape(&base.to_string()))).unwrap();
     let alias_pat =
-        ::regex::Regex::new(r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)").unwrap();
+        ::regex::Regex::new(r"(?i)(ref-redis|ref-http|ref-sql|upstream1|upstream2|upstream3)")
+            .unwrap();
     for line in content.lines() {
         if base_pat.is_match(line) && !alias_pat.is_match(line) {
             panic!(
