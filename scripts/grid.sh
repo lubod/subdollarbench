@@ -259,6 +259,99 @@ balance_gate() {
     return 0
 }
 
+# R68 F2: the rehearsal record lives next to the bar records, keyed by the
+# full content key, and names the exact commit it ran on.
+rehearsal_dir() {
+    if [[ -n "${SDB_REHEARSAL_DIR:-}" ]]; then
+        printf '%s' "$SDB_REHEARSAL_DIR"
+    else
+        printf '%s/sdb-gates' \
+            "$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)"
+    fi
+}
+
+rehearsal_record_path() {
+    printf '%s/rehearsal-%s.txt' "$(rehearsal_dir)" "$1"
+}
+
+rehearsal_gate() {
+    local full record commit head
+    full="$(cd "$ROOT" && scripts/flake-bar.sh --key)" || {
+        log "preflight: could not compute the full key"
+        return 1
+    }
+    record="$(rehearsal_record_path "$full")"
+    if [[ ! -f "$record" ]]; then
+        log "preflight: no rehearsal record for full key $full ($record); run scripts/grid.sh --rehearsal"
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS$' "$record"; then
+        log "preflight: the rehearsal record for full key $full is not a PASS ($record)"
+        return 1
+    fi
+    commit="$(awk '$1 == "commit:" { print $2; exit }' "$record")"
+    head="$(cd "$ROOT" && git rev-parse HEAD)"
+    if [[ "$commit" != "$head" ]]; then
+        log "preflight: the rehearsal record is for commit ${commit:-?}, not $head; rerun scripts/grid.sh --rehearsal"
+        return 1
+    fi
+    return 0
+}
+
+# R68 F2: a --rehearsal that ran every career's four phases at $0 writes
+# the record sql-cell.sh and the paid preflight require. A partial
+# --max-phase run writes none.
+write_rehearsal_record() {
+    local full record image
+    if [[ "$MAX_PHASE" != "4" ]]; then
+        log "rehearsal: --max-phase $MAX_PHASE is not a full 4-phase rehearsal; no record"
+        return 0
+    fi
+    if ! python3 - "$LEDGER" "${#CAREERS[@]}" <<'PY'
+import sys
+ledger, careers = sys.argv[1], int(sys.argv[2])
+rows = {}
+for line in open(ledger):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 8 or parts[0] in ("career", ""):
+        continue
+    try:
+        idx, phase, cost = int(parts[0]), int(parts[2]), float(parts[6])
+    except ValueError:
+        sys.exit(f"bad ledger row: {line!r}")
+    rows.setdefault(idx, {})[phase] = (parts[7], cost)
+for idx in range(careers):
+    phases = rows.get(idx, {})
+    for phase in range(1, 5):
+        stop, cost = phases.get(phase, ("missing", 0.0))
+        if stop != "ok":
+            sys.exit(f"career {idx} phase {phase} ended {stop}")
+        if cost != 0:
+            sys.exit(f"career {idx} phase {phase} spent ${cost}")
+PY
+    then
+        log "rehearsal: the ledger is not four ok $0 phases per career; no record"
+        return 1
+    fi
+    full="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
+    record="$(rehearsal_record_path "$full")"
+    image="${SDB_MODEL_CHECK_IMAGE_DIGEST:-}"
+    if [[ -z "$image" ]]; then
+        image="$(docker image inspect subdollar-sandbox --format '{{.Id}}' 2>/dev/null || true)"
+    fi
+    mkdir -p "$(dirname "$record")"
+    {
+        echo "commit:  $(cd "$ROOT" && git rev-parse HEAD)"
+        echo "key:     rehearsal-$full"
+        echo "grid:    ${#CAREERS[@]} careers, 4 phases, $LANES lanes"
+        echo "image:   ${image:-unknown}"
+        echo "time:    $(date -u +%FT%TZ)"
+        echo "RESULT: PASS"
+    } > "$record"
+    log "rehearsal: wrote $record"
+    return 0
+}
+
 preflight() {
     local worker="$1"
     if [[ "${SDB_GRID_SKIP_PREFLIGHT:-0}" == "1" ]]; then
@@ -280,11 +373,16 @@ preflight() {
     fi
     if [[ "$REHEARSAL" != "1" ]]; then
         local key record
-        # R52 F4: one key computation for the bar, the cell and the grid.
-        key="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
+        # R52 F4/R68 F1: one grader-key computation for the bar, the cell
+        # and the grid; a plumbing change does not need a new bar.
+        key="$(cd "$ROOT" && scripts/flake-bar.sh --grader-key)"
         record="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
         if ! grep -q 'RESULT: PASS' "$record" 2>/dev/null; then
-            log "preflight: no PASS flake record for key $key ($record)"
+            log "preflight: no PASS flake record for grader key $key ($record)"
+            return 1
+        fi
+        # R68 F2: the $0 rehearsal must be on this exact commit.
+        if ! rehearsal_gate; then
             return 1
         fi
     fi
@@ -622,7 +720,10 @@ stop=0
 [[ "${SDB_FAKE_STOP_ID:-}" == "$id" ]] && stop=1
 res_phase="${SDB_FAKE_RESULT_PHASE:-$phase}"
 res_chain="${SDB_FAKE_RESULT_CHAIN-$chain}"
-python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" "${SDB_FAKE_BILLED:-0}" <<'PY'
+cost="${SDB_FAKE_COST:-0.1}"
+# R68 F2: a rehearsal spends $0, as a real one does.
+[[ "${SDB_CELL_REHEARSAL:-0}" == "1" ]] && cost=0
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "$cost" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" "${SDB_FAKE_BILLED:-0}" <<'PY'
 import json, sys
 out, cid, phase, worker, chain, stop, cost, res_phase, res_chain, fault, billed = sys.argv[1:12]
 json.dump({
@@ -898,6 +999,7 @@ EOF
     mkdir -p "$runs"
     printf '%s\n' c1 > "$scenario/careers.txt"
     SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/reh.trace" SDB_FAKE_PREFIX=reh \
+        SDB_REHEARSAL_DIR="$scenario/gates" \
         "$ROOT/scripts/grid.sh" --rehearsal --careers "$scenario/careers.txt" \
         --lanes 1 --cell "$fake" >"$scenario/reh.out" 2>&1
     [[ -f "$runs/.grid-rehearsal-ledger.tsv" ]] || {
@@ -1167,7 +1269,7 @@ EOF
     [[ ! -f "$STOP" ]] || { echo "probe race: a false STOP"; exit 1; }
     MAX_PHASE=4
 
-    # 11) R68 F3: a paid grid refuses a model with no fresh PASS
+    # 17) R68 F3: a paid grid refuses a model with no fresh PASS
     # model-check record on the current sandbox image.
     scenario="$dir/eleven"
     mkdir -p "$scenario/gates"
@@ -1216,6 +1318,57 @@ EOF
         echo "a fresh matching model-check record was refused"; exit 1; }
     echo "[self-test] a fresh matching model-check record allows"
     unset SDB_MODEL_CHECK_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
+
+    # 18) R68 F2: a full 4-phase $0 rehearsal writes the full-key record;
+    # a stopped phase or a partial run writes none.
+    scenario="$dir/twelve"
+    mkdir -p "$scenario"
+    export SDB_REHEARSAL_DIR="$scenario/gates"
+    export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:rehearsal"
+    ledger="$scenario/ledger.tsv"
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$ledger"
+    for c in 0 1; do
+        for p in 1 2 3 4; do
+            printf '%s\tm\t%s\t1\tid\t1\t0\tok\tx\n' "$c" "$p" >> "$ledger"
+        done
+    done
+    LEDGER="$ledger"
+    CAREERS=(c1 c2)
+    MAX_PHASE=4
+    LANES=1
+    write_rehearsal_record || {
+        echo "a full 4-phase rehearsal wrote no record"; exit 1; }
+    full="$(scripts/flake-bar.sh --key)"
+    record="$scenario/gates/rehearsal-$full.txt"
+    [[ -f "$record" ]] || { echo "the rehearsal record is missing"; exit 1; }
+    grep -q "^commit:  $(git rev-parse HEAD)$" "$record" || {
+        echo "the rehearsal record does not name the commit"; exit 1; }
+    grep -q '^RESULT: PASS$' "$record" || {
+        echo "the rehearsal record is not a PASS"; exit 1; }
+    rehearsal_gate || { echo "the rehearsal gate refused a fresh record"; exit 1; }
+    cp "$record" "$record.good"
+    sed -i 's/^commit:  .*/commit:  deadbeef/' "$record"
+    if rehearsal_gate 2>/dev/null; then
+        echo "a rehearsal record for another commit was accepted"; exit 1
+    fi
+    mv "$record.good" "$record"
+    rm -f "$record"
+    awk -F'\t' 'BEGIN { OFS = "\t" } NR == 2 { $8 = "stopped" } { print }' \
+        "$ledger" > "$ledger.tmp"
+    mv "$ledger.tmp" "$ledger"
+    if write_rehearsal_record 2>/dev/null; then
+        echo "a stopped rehearsal phase wrote a record"; exit 1
+    fi
+    [[ ! -f "$record" ]] || { echo "a stopped rehearsal wrote a record"; exit 1; }
+    awk -F'\t' 'BEGIN { OFS = "\t" } NR == 2 { $8 = "ok" } { print }' \
+        "$ledger" > "$ledger.tmp"
+    mv "$ledger.tmp" "$ledger"
+    MAX_PHASE=1
+    write_rehearsal_record 2>/dev/null || true
+    [[ ! -f "$record" ]] || { echo "a partial rehearsal wrote a record"; exit 1; }
+    MAX_PHASE=4
+    unset SDB_REHEARSAL_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
+    echo "[self-test] the rehearsal record is full, commit-keyed and \$0"
 
     echo "RESULT: PASS (grid self-test)"
 }
@@ -1336,3 +1489,6 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 run_grid
+if [[ "$REHEARSAL" == "1" ]]; then
+    write_rehearsal_record
+fi

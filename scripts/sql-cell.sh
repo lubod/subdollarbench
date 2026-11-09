@@ -58,18 +58,41 @@ cell_gate() {
         echo "[cell] SMOKE: not a publishable cell"
         return 0
     fi
-    local key record
-    key="$(cd "$root" && scripts/flake-bar.sh --key)" || {
-        echo "[cell] FATAL: could not compute the flake key" >&2
+    local key full record rehearsal_record commit head
+    # R68 F1: the bar record is keyed by the grader paths only; a
+    # plumbing change does not need a new bar.
+    key="$(cd "$root" && scripts/flake-bar.sh --grader-key)" || {
+        echo "[cell] FATAL: could not compute the grader key" >&2
+        return 1
+    }
+    full="$(cd "$root" && scripts/flake-bar.sh --key)" || {
+        echo "[cell] FATAL: could not compute the full key" >&2
         return 1
     }
     record="$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
     if [[ ! -f "$record" ]]; then
-        echo "[cell] FATAL: no flake record for $key ($record); run scripts/flake-bar.sh" >&2
+        echo "[cell] FATAL: no flake record for grader key $key ($record); run scripts/flake-bar.sh" >&2
         return 1
     fi
     if ! grep -q '^RESULT: PASS' "$record"; then
-        echo "[cell] FATAL: the flake record for $key is not a PASS ($record)" >&2
+        echo "[cell] FATAL: the flake record for grader key $key is not a PASS ($record)" >&2
+        return 1
+    fi
+    # R68 F2: a paid cell also needs a $0 rehearsal on this exact commit,
+    # keyed by the full content key.
+    rehearsal_record="$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/rehearsal-$full.txt"
+    if [[ ! -f "$rehearsal_record" ]]; then
+        echo "[cell] FATAL: no rehearsal record for full key $full ($rehearsal_record); run scripts/grid.sh --rehearsal" >&2
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS$' "$rehearsal_record"; then
+        echo "[cell] FATAL: the rehearsal record for full key $full is not a PASS ($rehearsal_record)" >&2
+        return 1
+    fi
+    commit="$(awk '$1 == "commit:" { print $2; exit }' "$rehearsal_record")"
+    head="$(cd "$root" && git rev-parse HEAD)"
+    if [[ "$commit" != "$head" ]]; then
+        echo "[cell] FATAL: the rehearsal record is for commit ${commit:-?}, not $head; rerun scripts/grid.sh --rehearsal" >&2
         return 1
     fi
     CELL_FLAKE_KEY="$key"
@@ -78,27 +101,41 @@ cell_gate() {
 }
 
 self_test() {
-    local dir repo key record out rc
+    local dir repo key full record rehearsal_record out rc
     dir="$(mktemp -d /tmp/sdb-cell-self-test.XXXXXX)"
     trap "rm -rf '$dir'" EXIT
     repo="$dir/repo"
-    mkdir -p "$repo/src" "$repo/scripts"
+    mkdir -p "$repo/src/cost" "$repo/src/verifier" "$repo/scripts"
     cp scripts/flake-bar.sh scripts/graded-paths.txt scripts/graded-filter.sh \
         scripts/bar-proofs.sh scripts/long-test-lock.sh "$repo/scripts/"
     git -C "$repo" init -q
     git -C "$repo" config user.email cell@example.com
     git -C "$repo" config user.name cell
     echo one > "$repo/src/x.rs"
+    echo "pub const P: u32 = 1;" > "$repo/src/cost/x.rs"
+    echo "pub fn v() {}" > "$repo/src/verifier/x.rs"
     echo lock > "$repo/Cargo.lock"
     git -C "$repo" add -A
     git -C "$repo" commit -qm one
 
-    key="$(cd "$repo" && scripts/flake-bar.sh --key)"
-    record="$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
-    mkdir -p "$(dirname "$record")"
-    printf 'RESULT: PASS\n' > "$record"
+    gate_dir="$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates"
+    mkdir -p "$gate_dir"
+    keys() {
+        key="$(cd "$repo" && scripts/flake-bar.sh --grader-key)"
+        full="$(cd "$repo" && scripts/flake-bar.sh --key)"
+        record="$gate_dir/flake-$key.txt"
+        rehearsal_record="$gate_dir/rehearsal-$full.txt"
+    }
+    write_flake() { printf '%s\n' "$1" > "$record"; }
+    write_rehearsal() {
+        printf 'commit:  %s\nkey:     rehearsal-%s\nRESULT: PASS\n' \
+            "$(git -C "$repo" rev-parse HEAD)" "$full" > "$rehearsal_record"
+    }
+    keys
+    write_flake 'RESULT: PASS'
+    write_rehearsal
 
-    # 1) A dirty tracked file is refused even with a PASS record.
+    # 1) A dirty tracked file is refused even with both records.
     echo two > "$repo/src/x.rs"
     if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
         echo '[self-test] a dirty tracked tree was accepted' >&2; return 1
@@ -106,7 +143,7 @@ self_test() {
     git -C "$repo" checkout -- src/x.rs
     echo '[self-test] dirty tracked refused'
 
-    # 2) No record is refused.
+    # 2) No flake record is refused.
     rm -f "$record"
     if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
         echo '[self-test] a missing record was accepted' >&2; return 1
@@ -114,32 +151,32 @@ self_test() {
     echo '[self-test] missing record refused'
 
     # 3) IN PROGRESS is refused.
-    printf 'RESULT: IN PROGRESS\n' > "$record"
+    write_flake 'RESULT: IN PROGRESS'
     if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
         echo '[self-test] IN PROGRESS was accepted' >&2; return 1
     fi
     echo '[self-test] in-progress record refused'
 
     # 4) FAIL is refused.
-    printf 'RESULT: FAIL (x)\n' > "$record"
+    write_flake 'RESULT: FAIL (x)'
     if cell_gate "$repo" 0.5 0 >/dev/null 2>&1; then
         echo '[self-test] FAIL was accepted' >&2; return 1
     fi
     echo '[self-test] failed record refused'
 
-    # 5) PASS is allowed and reports the key. R61 F4: a cured failure's
-    # suffix does not hide the PASS.
-    printf 'RESULT: PASS\n' > "$record"
+    # 5) PASS is allowed and reports the grader key. R61 F4: a cured
+    # failure's suffix does not hide the PASS.
+    write_flake 'RESULT: PASS'
     cell_gate "$repo" 0.5 0 || { echo '[self-test] PASS was refused' >&2; return 1; }
     [[ "$CELL_FLAKE_KEY" == "$key" && "$CELL_FLAKE_RESULT" == "PASS" ]] || {
-        echo '[self-test] PASS did not report the key' >&2; return 1; }
-    printf 'RESULT: PASS (cured: beta)\n' > "$record"
+        echo '[self-test] PASS did not report the grader key' >&2; return 1; }
+    write_flake 'RESULT: PASS (cured: beta)'
     cell_gate "$repo" 0.5 0 || {
         echo '[self-test] a cured-failure PASS was refused' >&2; return 1; }
     echo '[self-test] pass record allowed'
 
     # 6) SMOKE with no record is allowed and says so.
-    rm -f "$record"
+    rm -f "$record" "$rehearsal_record"
     out="$(cell_gate "$repo" 0.5 1 2>&1)" || {
         echo '[self-test] smoke without a record was refused' >&2; return 1; }
     grep -q 'SMOKE: not a publishable cell' <<<"$out" || {
@@ -154,7 +191,6 @@ self_test() {
 
     # 8) R54 F2: a rehearsal needs no record and says so, even at the
     # official budget. A dirty tree is still refused.
-    rm -f "$record"
     if ! cell_gate "$repo" 0.99 0 1 > "$dir/rehearsal.out" 2>&1; then
         echo '[self-test] rehearsal without a record was refused' >&2; return 1
     fi
@@ -170,6 +206,53 @@ self_test() {
     fi
     git -C "$repo" checkout -- src/x.rs
     echo '[self-test] dirty rehearsal refused'
+
+    # 9) R68 F2: a full-key change with an unchanged grader key and a
+    # rehearsal record is allowed.
+    keys
+    write_flake 'RESULT: PASS'
+    echo "pub const P: u32 = 2;" > "$repo/src/cost/x.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm plumbing
+    old_key="$key"
+    old_full="$full"
+    keys
+    [[ "$key" == "$old_key" ]] || {
+        echo '[self-test] a plumbing edit moved the grader key' >&2; return 1; }
+    [[ "$full" != "$old_full" ]] || {
+        echo '[self-test] a plumbing edit kept the full key' >&2; return 1; }
+    write_rehearsal
+    cell_gate "$repo" 0.99 0 || {
+        echo '[self-test] a plumbing change with a rehearsal record was refused' >&2
+        return 1; }
+    echo '[self-test] a full-key change with a rehearsal record is allowed'
+
+    # 10) Without the new rehearsal record it is refused.
+    rm -f "$rehearsal_record"
+    if cell_gate "$repo" 0.99 0 >/dev/null 2>&1; then
+        echo '[self-test] a missing rehearsal record was accepted' >&2; return 1
+    fi
+    echo '[self-test] missing rehearsal record refused'
+    write_rehearsal
+
+    # 11) A grader-key change without a bar record is refused.
+    echo "pub fn v() { let _ = 1; }" > "$repo/src/verifier/x.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm grader
+    old_key="$key"
+    keys
+    [[ "$key" != "$old_key" ]] || {
+        echo '[self-test] a grader edit kept the grader key' >&2; return 1; }
+    write_rehearsal
+    if cell_gate "$repo" 0.99 0 >/dev/null 2>&1; then
+        echo '[self-test] a grader-key change without a bar record was accepted' >&2
+        return 1
+    fi
+    echo '[self-test] a grader-key change without a bar record is refused'
+    write_flake 'RESULT: PASS'
+    cell_gate "$repo" 0.99 0 || {
+        echo '[self-test] a grader-key bar record was refused' >&2; return 1; }
+    echo '[self-test] a grader-key bar record allows'
 
     echo 'RESULT: PASS (cell self-test)'
     return 0

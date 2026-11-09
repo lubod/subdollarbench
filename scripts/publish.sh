@@ -45,8 +45,15 @@ env_value() {
 # publish. This used to hash `graded-paths.txt` itself, including its
 # `exclude-name`/`keep` data lines and `tests.rs`, so every publish asked
 # for a record no bar ever wrote.
+#
+# R68 F1: the bar record is keyed by the grader paths only; `--key` stays
+# the full key. A plumbing change moves the full key but needs no bar.
 flake_key() {
     "$PWD/scripts/flake-bar.sh" --key
+}
+
+grader_key() {
+    "$PWD/scripts/flake-bar.sh" --grader-key
 }
 
 bar_record() {
@@ -54,7 +61,7 @@ bar_record() {
         printf '%s' "$SDB_BAR_RECORD"
     else
         printf '%s/sdb-gates/flake-%s.txt' \
-            "$(git rev-parse --path-format=absolute --git-common-dir)" "$(flake_key)"
+            "$(git rev-parse --path-format=absolute --git-common-dir)" "$(grader_key)"
     fi
 }
 
@@ -306,11 +313,13 @@ EOF
     [[ -f "$target/stray.txt" ]] || { echo '[self-test] dry run deleted' >&2; exit 1; }
     echo '[self-test] stray target file listed and refused'
 
-    # R65 F4: a fixture repo with a tests.rs edit. publish's key must equal
-    # flake-bar.sh --key, the default bar record must be that key's, and a
-    # PASS record there must validate without SDB_BAR_RECORD.
+    # R65 F4/R68 F1: a fixture repo. publish --key is the full key; the
+    # default bar record is the grader key's. A plumbing edit moves the
+    # full key and leaves the bar record where it is; a grader edit moves
+    # the bar record too.
     fixture="$root/repo"
-    mkdir -p "$fixture/src/sandbox" "$fixture/scripts"
+    mkdir -p "$fixture/src/cost" "$fixture/src/verifier" \
+        "$fixture/src/sandbox" "$fixture/scripts"
     cp scripts/publish.sh scripts/flake-bar.sh scripts/graded-paths.txt \
         scripts/graded-filter.sh scripts/bar-proofs.sh scripts/long-test-lock.sh \
         "$fixture/scripts/"
@@ -318,6 +327,8 @@ EOF
     git -C "$fixture" config user.email publish@example.com
     git -C "$fixture" config user.name publish
     echo one > "$fixture/src/x.rs"
+    echo "pub const P: u32 = 1;" > "$fixture/src/cost/x.rs"
+    echo "pub fn v() {}" > "$fixture/src/verifier/x.rs"
     echo one > "$fixture/src/sandbox/tests.rs"
     echo lock > "$fixture/Cargo.lock"
     git -C "$fixture" add -A
@@ -329,17 +340,47 @@ EOF
     flakekey="$(cd "$fixture" && scripts/flake-bar.sh --key)"
     [[ "$pubkey" == "$flakekey" ]] || {
         echo "[self-test] publish key $pubkey != flake key $flakekey" >&2; exit 1; }
-    fixture_record="$(cd "$fixture" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$pubkey.txt"
-    mkdir -p "$(dirname "$fixture_record")"
+    graderkey="$(cd "$fixture" && scripts/flake-bar.sh --grader-key)"
+    fixture_gates="$(cd "$fixture" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates"
+    fixture_record="$fixture_gates/flake-$graderkey.txt"
+    mkdir -p "$fixture_gates"
     printf 'RESULT: PASS\n' > "$fixture_record"
     fixture_bar="$(cd "$fixture" && scripts/publish.sh --bar)"
     [[ "$fixture_bar" == "$fixture_record" ]] || {
         echo "[self-test] default bar record $fixture_bar != $fixture_record" >&2; exit 1; }
+    echo '[self-test] publish key matches the bar and its record validates'
+
+    # A plumbing edit: the full key moves, the grader key and its bar
+    # record stay.
+    echo "pub const P: u32 = 2;" > "$fixture/src/cost/x.rs"
+    git -C "$fixture" add -A
+    git -C "$fixture" commit -qm plumbing
+    plumbing_key="$(cd "$fixture" && scripts/publish.sh --key)"
+    [[ "$plumbing_key" != "$pubkey" ]] || {
+        echo '[self-test] a plumbing edit kept the full key' >&2; exit 1; }
+    [[ "$(cd "$fixture" && scripts/flake-bar.sh --grader-key)" == "$graderkey" ]] || {
+        echo '[self-test] a plumbing edit moved the grader key' >&2; exit 1; }
+    [[ "$(cd "$fixture" && scripts/publish.sh --bar)" == "$fixture_record" ]] || {
+        echo '[self-test] a plumbing edit moved the bar record' >&2; exit 1; }
+    echo '[self-test] a plumbing edit keeps the bar record'
+
+    # A grader edit: the grader key and the bar record move.
+    echo "pub fn v() { let _ = 1; }" > "$fixture/src/verifier/x.rs"
+    git -C "$fixture" add -A
+    git -C "$fixture" commit -qm grader
+    graderkey2="$(cd "$fixture" && scripts/flake-bar.sh --grader-key)"
+    [[ "$graderkey2" != "$graderkey" ]] || {
+        echo '[self-test] a grader edit kept the grader key' >&2; exit 1; }
+    fixture_bar="$(cd "$fixture" && scripts/publish.sh --bar)"
+    [[ "$fixture_bar" == "$fixture_gates/flake-$graderkey2.txt" ]] || {
+        echo "[self-test] a grader edit did not move the bar record ($fixture_bar)" >&2
+        exit 1; }
+    printf 'RESULT: PASS\n' > "$fixture_bar"
     scan_bin="$(secret_scan_bin)"
     ( cd "$fixture" && SDB_BIN="$scan_bin" SDB_BAR_RECORD= \
         scripts/publish.sh --check "$good" "$fixture_bar" ) || {
         echo '[self-test] the keyed bar record was refused without SDB_BAR_RECORD' >&2; exit 1; }
-    echo '[self-test] publish key matches the bar and its record validates'
+    echo '[self-test] a grader edit moves the bar record and validates'
     # The pre-push hook lists every file for the secret scan; it never
     # reads graded-paths.txt, so it is not a key reader.
     needle="git ls-""tree"
