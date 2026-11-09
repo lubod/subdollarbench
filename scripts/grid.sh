@@ -298,6 +298,64 @@ preflight() {
     done
 }
 
+# R68 F3: a paid grid needs a fresh PASS model-check record for every
+# career's model, made on the current sandbox image digest.
+model_check_gate() {
+    local model="$1" record image record_image time_line age
+    record="$("$ROOT/scripts/model-check.sh" --record "$model")" || {
+        log "preflight: cannot resolve the model-check record for $model"
+        return 1
+    }
+    if [[ ! -f "$record" ]]; then
+        log "preflight: no model-check record for $model ($record); run scripts/model-check.sh $model"
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS$' "$record"; then
+        log "preflight: the model-check record for $model is not a PASS ($record)"
+        return 1
+    fi
+    image="${SDB_MODEL_CHECK_IMAGE_DIGEST:-}"
+    if [[ -z "$image" ]]; then
+        image="$(docker image inspect subdollar-sandbox --format '{{.Id}}' 2>/dev/null || true)"
+    fi
+    if [[ -z "$image" ]]; then
+        log "preflight: cannot read the subdollar-sandbox image digest for $model"
+        return 1
+    fi
+    record_image="$(awk '$1 == "image:" { print $2; exit }' "$record")"
+    if [[ "$record_image" != "$image" ]]; then
+        log "preflight: the model-check record for $model is from another image ($record_image, want $image)"
+        return 1
+    fi
+    time_line="$(awk '$1 == "time:" { print $2; exit }' "$record")"
+    if [[ -z "$time_line" ]]; then
+        log "preflight: the model-check record for $model has no time ($record)"
+        return 1
+    fi
+    age="$(python3 - "$time_line" <<'PY'
+import datetime, sys
+try:
+    t = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+now = datetime.datetime.now(datetime.timezone.utc)
+print(int((now - t).total_seconds()))
+PY
+)" || {
+        log "preflight: the model-check record for $model has a bad time ($time_line)"
+        return 1
+    }
+    if (( age > 604800 )); then
+        log "preflight: the model-check record for $model is older than 7 days ($time_line)"
+        return 1
+    fi
+    if (( age < -300 )); then
+        log "preflight: the model-check record for $model has a future time ($time_line)"
+        return 1
+    fi
+    return 0
+}
+
 result_get() {
     python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -470,7 +528,16 @@ run_lane() {
 }
 
 run_grid() {
-    local marked mark row
+    local marked mark row model
+    # R68 F3: no paid phase starts for a model without a fresh PASS
+    # model-check record. A rehearsal and a dry run spend nothing.
+    if [[ "$REHEARSAL" != "1" && "$DRY_RUN" != "1" \
+        && "${SDB_GRID_SKIP_PREFLIGHT:-0}" != "1" \
+        && "${SDB_GRID_PREFLIGHT_TEST:-0}" != "1" ]]; then
+        for model in "${CAREERS[@]}"; do
+            model_check_gate "$model" || return 1
+        done
+    fi
     # R54-1: a paid grid may not resume from a rehearsal/smoke row: its
     # phase 2+ would chain from the reference workspace and spend on a
     # career the board can never rank.
@@ -1099,6 +1166,56 @@ EOF
         cat "$scenario/out"; exit 1; }
     [[ ! -f "$STOP" ]] || { echo "probe race: a false STOP"; exit 1; }
     MAX_PHASE=4
+
+    # 11) R68 F3: a paid grid refuses a model with no fresh PASS
+    # model-check record on the current sandbox image.
+    scenario="$dir/eleven"
+    mkdir -p "$scenario/gates"
+    printf '%s\n' test-model > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    load_careers "$CAREERS_FILE"
+    export SDB_MODEL_CHECK_DIR="$scenario/gates"
+    export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:fresh"
+    record="$scenario/gates/model-check-test-model.txt"
+    fresh="$(date -u +%FT%TZ)"
+    old="$(date -u -d '8 days ago' +%FT%TZ)"
+
+    rm -f "$record"
+    rc=0
+    ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=0; run_grid ) \
+        >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "a grid without a model-check record was accepted"; exit 1; }
+    [[ ! -f "$LEDGER" ]] || { echo "a grid without a model-check record wrote a ledger"; exit 1; }
+    echo "[self-test] no model-check record refuses the grid"
+
+    printf 'time: %s\nimage: sha256:fresh\nRESULT: PASS\n' "$old" > "$record"
+    if model_check_gate test-model 2>/dev/null; then
+        echo "an old model-check record was accepted"; exit 1
+    fi
+    echo "[self-test] an old model-check record refuses"
+
+    printf 'time: %s\nimage: sha256:other\nRESULT: PASS\n' "$fresh" > "$record"
+    if model_check_gate test-model 2>/dev/null; then
+        echo "another image's model-check record was accepted"; exit 1
+    fi
+    echo "[self-test] another image's model-check record refuses"
+
+    printf 'time: %s\nimage: sha256:fresh\nRESULT: FAIL (x)\n' "$fresh" > "$record"
+    if model_check_gate test-model 2>/dev/null; then
+        echo "a failed model-check record was accepted"; exit 1
+    fi
+    echo "[self-test] a failed model-check record refuses"
+
+    printf 'time: %s\nimage: sha256:fresh\nRESULT: PASS\n' "$fresh" > "$record"
+    model_check_gate test-model 2>/dev/null || {
+        echo "a fresh matching model-check record was refused"; exit 1; }
+    echo "[self-test] a fresh matching model-check record allows"
+    unset SDB_MODEL_CHECK_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
 
     echo "RESULT: PASS (grid self-test)"
 }
