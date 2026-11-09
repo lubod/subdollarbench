@@ -1793,7 +1793,18 @@ case "$1" in
         if [ -n "$SDB_COVTEST_WORKDIR" ]; then : > "$SDB_COVTEST_WORKDIR/READY"; fi
         wait_for_kill
         ;;
-      timeout|cancel)
+      timeout)
+        seed_turn_session
+        wait_for_kill
+        ;;
+      timeout_no_turn)
+        wait_for_kill
+        ;;
+      cancel)
+        wait_for_kill
+        ;;
+      model_not_found_wait)
+        printf '%s\n' 'Model "openrouter/covtest-model" not found' >&2
         wait_for_kill
         ;;
       max_turns)
@@ -1981,13 +1992,50 @@ fn omp_driver() {
         passed += 1;
     }
 
-    // 4. Watchdog timeout: reaped and concluded (stopped_by_limit).
+    // 4. Watchdog timeout after a turn: reaped and concluded
+    //    (stopped_by_limit).
     {
         let (res, logs, _, _) =
             run_omp_scenario("timeout", &root, covtest_limits(10, 1.0, 1), None);
-        let st = res.expect("watchdog stop is a normal conclusion");
+        let st = res.expect("watchdog stop after a turn is a normal conclusion");
         assert_eq!(st.stop_reason.as_deref(), Some("wall"));
         assert!(logs.iter().any(|l| l.contains("Watchdog")));
+        passed += 1;
+    }
+
+    // 4a. R68 F4: a watchdog stop with no turn is a harness fault, never
+    // an Ok session.
+    {
+        let (res, logs, _, _) =
+            run_omp_scenario("timeout_no_turn", &root, covtest_limits(10, 1.0, 1), None);
+        let err = res.expect_err("a watchdog stop with no turn must be an error");
+        let exec = err
+            .downcast_ref::<OmpExecutionError>()
+            .expect("OmpExecutionError");
+        assert!(!exec.started, "the agent never started");
+        assert!(exec.message.contains("never started"), "{}", exec.message);
+        assert!(logs.iter().any(|l| l.contains("Watchdog")));
+        passed += 1;
+    }
+
+    // 4b. R68 F4: omp 18.4.2 prints the model-not-found text and then
+    // waits for the watchdog. A run that never started is an error, not
+    // an Ok watchdog stop.
+    {
+        let (res, logs, _, _) = run_omp_scenario(
+            "model_not_found_wait",
+            &root,
+            covtest_limits(10, 1.0, 1),
+            None,
+        );
+        let err = res.expect_err("a model-not-found wait must be an error");
+        let exec = err
+            .downcast_ref::<OmpExecutionError>()
+            .expect("OmpExecutionError");
+        assert!(!exec.started, "the agent never started");
+        assert!(exec.message.contains("not found"), "{}", exec.message);
+        assert_eq!(exec.partial_stats.stop_reason.as_deref(), Some("crash"));
+        assert!(logs.iter().any(|l| l.contains("not found")));
         passed += 1;
     }
 

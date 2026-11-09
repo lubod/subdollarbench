@@ -4363,3 +4363,150 @@ fn test_git_commit_stage_helper() {
     assert!(patch.contains("ttl.go"), "stage patch must carry the diff");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// R68 F4: the SPEC.md branches for a skipped and an unattempted ticket
+/// (the failed branch already has its own test).
+#[test]
+fn r68_f4_render_spec_md_marks_skipped_and_unattempted() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+    let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+    let s3 = lc.spec.stages.iter().find(|s| s.id == 3).unwrap();
+    let outcomes = vec![(0, LadderOutcome::Full), (1, LadderOutcome::Skipped)];
+    let md = lc
+        .render_spec_md(s3, &lc.prompt_path(s3), &outcomes)
+        .unwrap();
+    assert!(md.contains("SKIPPED, not attempted"), "{md}");
+    assert!(md.contains("was **skipped**"), "{md}");
+    assert!(md.contains("not attempted"), "{md}");
+    assert!(!md.contains("# Ticket 1"), "a skipped ticket is collapsed");
+    assert!(
+        !md.contains("# Ticket 2"),
+        "an unattempted ticket is collapsed"
+    );
+    assert!(md.contains("# Ticket 0"), "a passed ticket stays in full");
+}
+
+/// R68 F4: the harness note's skipped and rollback-anchor branches.
+#[test]
+fn r68_f4_attempt_preamble_names_skipped_and_rollback_anchor() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("campaigns");
+    let lc = load_campaign_from(&root, "sdb-sql").unwrap();
+    let s4 = lc.spec.stages.iter().find(|s| s.id == 4).unwrap();
+    let accepted = Acceptance::accepted_for(s4.acceptance.stages_for("sql"), &[0, 2], 4);
+    let outcomes = vec![
+        (0, LadderOutcome::Full),
+        (1, LadderOutcome::Skipped),
+        (2, LadderOutcome::Full),
+    ];
+    let p = attempt_preamble(
+        &lc.spec.stages,
+        s4,
+        StageVariant::Full,
+        true,
+        &outcomes,
+        &accepted,
+    )
+    .expect("a skipped ticket needs a note");
+    assert!(p.contains("Ticket 1 ("), "{p}");
+    assert!(p.contains("skipped"), "{p}");
+    assert!(p.contains("rolled back to ticket 2's commit"), "{p}");
+    // Two skipped tickets exercise the plural list.
+    let outcomes = vec![
+        (0, LadderOutcome::Full),
+        (1, LadderOutcome::Skipped),
+        (2, LadderOutcome::Skipped),
+    ];
+    let p = attempt_preamble(
+        &lc.spec.stages,
+        s4,
+        StageVariant::Full,
+        true,
+        &outcomes,
+        &accepted,
+    )
+    .expect("two skipped tickets need a note");
+    assert!(p.contains("Tickets 1 (") && p.contains(" and 2 ("), "{p}");
+    assert!(p.contains("were skipped"), "{p}");
+    // No passed ticket: the rollback anchor is the starting state.
+    let outcomes = vec![(0, LadderOutcome::Failed), (1, LadderOutcome::Skipped)];
+    let p = attempt_preamble(
+        &lc.spec.stages,
+        s4,
+        StageVariant::Full,
+        true,
+        &outcomes,
+        &accepted,
+    )
+    .expect("failures need a note");
+    assert!(p.contains("rolled back to the starting state"), "{p}");
+}
+
+/// R68 F4: every career-phase validation guard fails closed.
+#[test]
+fn r68_f4_validate_spec_phase_errors() {
+    let mut lc = fixture_campaign();
+    let phase = |id: u32, title: &str, stages: Vec<u32>| PhaseSpec {
+        id,
+        title: title.into(),
+        stages,
+    };
+    let check = |lc: &LoadedCampaign, want: &str| {
+        let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
+        assert!(err.contains(want), "wanted {want:?}, got {err}");
+    };
+
+    lc.spec.phases = vec![phase(2, "p", vec![0, 1, 2])];
+    check(&lc, "numbered 1..=n");
+    lc.spec.phases = vec![phase(1, "", vec![0, 1, 2])];
+    check(&lc, "empty title");
+    lc.spec.phases = vec![phase(1, "p", vec![])];
+    check(&lc, "has no stages");
+    lc.spec.phases = vec![phase(1, "p", vec![0, 1, 9])];
+    check(&lc, "unknown stage 9");
+    lc.spec.phases = vec![phase(1, "p", vec![0, 1]), phase(2, "q", vec![1, 2])];
+    check(&lc, "more than one phase");
+    lc.spec.phases = vec![phase(1, "p", vec![1, 0])];
+    check(&lc, "contiguous and in order");
+    lc.spec.phases = vec![phase(1, "p", vec![0, 1])];
+    check(&lc, "do not partition");
+    lc.spec.phases = vec![phase(1, "p", vec![0, 1, 2])];
+    assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+}
+
+/// R68 F4: the tier, needs and lite validation guards.
+#[test]
+fn r68_f4_validate_spec_lite_and_needs_errors() {
+    let mut lc = fixture_campaign();
+    let check = |lc: &LoadedCampaign, want: &str| {
+        let err = validate_spec(&lc.spec, &lc.root).unwrap_err().to_string();
+        assert!(err.contains(want), "wanted {want:?}, got {err}");
+    };
+    let lite = |budget: f64, turns: u32, weight: f64, prompt: &str| LiteSpec {
+        prompt: prompt.into(),
+        profile: Vec::new(),
+        budget_usd: budget,
+        max_turns: turns,
+        weight,
+    };
+
+    lc.spec.stages[0].tier = 0;
+    check(&lc, "tier must be >= 1");
+    lc.spec.stages[0].tier = 1;
+    lc.spec.stages[1].needs = vec![9];
+    check(&lc, "needs unknown stage 9");
+    lc.spec.stages[1].needs = vec![1];
+    check(&lc, "not an earlier stage");
+    lc.spec.stages[1].needs.clear();
+
+    lc.spec.stages[1].lite = Some(lite(0.0, 10, 0.4, "stages/1-lite.md"));
+    check(&lc, "lite budget");
+    lc.spec.stages[1].lite = Some(lite(0.1, 0, 0.4, "stages/1-lite.md"));
+    check(&lc, "lite max_turns");
+    lc.spec.stages[1].lite = Some(lite(0.1, 10, 1.0, "stages/1-lite.md"));
+    check(&lc, "lite weight");
+    lc.spec.stages[1].lite = Some(lite(0.1, 10, 0.4, "stages/missing.md"));
+    check(&lc, "lite prompt missing");
+    std::fs::write(lc.root.join("stages/1-lite.md"), "# lite").unwrap();
+    lc.spec.stages[1].lite = Some(lite(0.1, 10, 0.4, "stages/1-lite.md"));
+    assert!(validate_spec(&lc.spec, &lc.root).is_ok());
+}

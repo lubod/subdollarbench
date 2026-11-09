@@ -55,9 +55,13 @@ jobs:
           while read -r name; do
             skips+=(--skip "$name")
           done < <(scripts/live-proofs.sh)
-          # Coverage measures the whole active tree: round 43 deleted the
-          # retired single-shot verifiers, so there is no exclusion left.
-          # Lines measured 84.36% on this CI set; round 29's
+          # Coverage measures the product code, not the test code. R68 F4:
+          # the 19 live proofs CI skips live in tests.rs files since round
+          # 61, and their never-run bodies counted as missed lines (82.48%
+          # at 2798819, 83.23% at 0507473). The tests.rs files are test-only;
+          # excluding them restores the product measurement. Lines measured
+          # 84.36% on this CI set before that split; round 29's
           # measured-round-down rule gives the 84 ratchet, which only goes up.
           cargo llvm-cov --all-targets --summary-only \
+            --ignore-filename-regex '(^|/)tests\.rs$' \
             --fail-under-lines 84 -- "${skips[@]}"

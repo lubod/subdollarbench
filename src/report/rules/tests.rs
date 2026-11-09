@@ -386,29 +386,80 @@ fn r43_f4_graded_lists_agree() {
     let root = crate::config::get_repo_root();
     let paths = fs::read_to_string(root.join("scripts/graded-paths.txt"))
         .expect("scripts/graded-paths.txt is readable");
-    let bases: Vec<&str> = paths
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
+    let mut bases: Vec<String> = Vec::new();
+    let mut excludes: Vec<String> = Vec::new();
+    for line in paths.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        match fields.next() {
+            Some("grader") | Some("plumbing") => {
+                if let Some(path) = fields.next() {
+                    bases.push(path.to_string());
+                }
+            }
+            Some("exclude-name") => {
+                if let Some(name) = fields.next() {
+                    excludes.push(name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
     assert!(!bases.is_empty(), "graded-paths.txt has no entries");
+    let covered = |rel: &str| {
+        bases
+            .iter()
+            .any(|b| rel == b || rel.starts_with(&format!("{b}/")))
+    };
     let mut checked = 0;
     for line in GRADED_MANIFEST.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let rel = ["runtime-file", "runtime-dir", "file", "dir"]
+        let (kind, rel) = ["runtime-file", "runtime-dir", "file", "dir"]
             .iter()
-            .find_map(|kind| line.strip_prefix(&format!("{kind} ")))
+            .find_map(|kind| line.strip_prefix(&format!("{kind} ")).map(|r| (*kind, r)))
             .unwrap_or_else(|| panic!("unrecognised graded entry {line:?}"));
         checked += 1;
-        assert!(
-            bases
-                .iter()
-                .any(|b| rel == *b || rel.starts_with(&format!("{b}/"))),
-            "graded-files entry {rel:?} is not under any graded path: {bases:?}"
-        );
+        if kind == "file" || kind == "runtime-file" {
+            assert!(
+                covered(rel),
+                "graded-files entry {rel:?} is not under any graded path"
+            );
+            continue;
+        }
+        // R68 F1: a directory entry (src/sandbox) may sit above a split of
+        // graded paths. Every non-test file under it must still be covered;
+        // a tests.rs is outside the graded list by the shared rule.
+        let mut stack = vec![root.join(rel)];
+        while let Some(dir) = stack.pop() {
+            let entries = fs::read_dir(&dir).unwrap_or_else(|e| {
+                panic!("graded-files dir {} is unreadable: {e}", dir.display())
+            });
+            for entry in entries {
+                let path = entry.expect("graded-files dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if excludes.iter().any(|e| e == name) {
+                    continue;
+                }
+                let relpath = path
+                    .strip_prefix(&root)
+                    .expect("graded-files path under the repo root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                assert!(
+                    covered(&relpath),
+                    "graded-files entry {relpath:?} is not under any graded path: {bases:?}"
+                );
+            }
+        }
     }
     assert!(checked >= 10, "only {checked} graded entries parsed");
 }

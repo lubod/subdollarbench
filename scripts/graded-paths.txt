@@ -1,30 +1,56 @@
 # One graded-path list for scripts/gate.sh (scope), scripts/flake-bar.sh
-# (record key) and the ready gate's proof map. A change under any of the
-# path lines below moves the flake record and the rules fingerprint (where
+# (record key) and the ready gate's proof map. A change under any path
+# line below moves the full key and the rules fingerprint (where
 # applicable).
+#
+# Each path line starts with its class:
+#
+#   grader    the bar's live proofs execute it, or it decides a score.
+#             A change moves the grader key (flake-bar.sh --grader-key)
+#             and needs a bar before a paid cell.
+#   plumbing  pricing, recording, display and this list. A change moves
+#             the full key only; no new bar.
+#
+# The classes govern the bar only. A change to what the candidate sees
+# (src/sandbox/omp.rs's prompt and arguments, the bench policy,
+# tool_normalizer) still falls under the rules-bump policy (AGENTS.md,
+# "Rules version"); the full key still covers it, so it still needs the
+# --ready gate.
 #
 # The two data lines at the end are read by scripts/graded-filter.sh, the
 # one place the tests.rs rule lives: a file whose basename is exclude-name
 # is ignored (test code is not in the release binary), except the exact
 # keep path (the file that holds the live proofs).
-src/verifier
-src/pipeline.rs
-src/sandbox
-src/campaign.rs
-src/scoring.rs
-src/cost
-src/prompts
-src/bench
-src/report/rules.rs
-src/report/graded_hash.rs
-src/report/leaderboard.rs
-campaigns
-tasks
-build.rs
-src/report/graded-files.txt
-scripts/graded-paths.txt
-extensions
-Cargo.lock
-rust-toolchain.toml
+grader src/verifier
+grader src/pipeline.rs
+# mod.rs stays plumbing while it holds no code docker.rs or omp_updater.rs uses.
+plumbing src/sandbox/mod.rs
+grader src/sandbox/docker.rs
+grader src/sandbox/docker
+grader src/sandbox/omp_updater.rs
+grader src/sandbox/omp_updater
+plumbing src/sandbox/omp.rs
+plumbing src/sandbox/omp
+plumbing src/sandbox/opencode.rs
+plumbing src/sandbox/opencode
+plumbing src/sandbox/tool_normalizer.rs
+plumbing src/sandbox/tool_normalizer
+plumbing src/sandbox/fixtures
+grader src/scoring.rs
+plumbing src/cost
+plumbing src/campaign.rs
+grader src/prompts
+grader src/bench
+grader src/report/rules.rs
+plumbing src/report/graded_hash.rs
+plumbing src/report/leaderboard.rs
+grader campaigns
+grader tasks
+grader build.rs
+plumbing src/report/graded-files.txt
+plumbing scripts/graded-paths.txt
+grader extensions
+grader Cargo.lock
+grader rust-toolchain.toml
 exclude-name tests.rs
 keep src/pipeline/tests.rs

@@ -16,9 +16,19 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 . "$BAR_ROOT/scripts/graded-filter.sh"
 . "$BAR_ROOT/scripts/bar-proofs.sh"
 mapfile -t graded_paths < <(graded_path_entries)
+mapfile -t grader_paths < <(grader_path_entries)
+# R68 F1: the full key covers every graded path (the fingerprint and the
+# --ready scope); the grader key covers only the paths the bar's live
+# proofs execute or that decide a score, and keys the bar record.
 flake_key() {
     local repo="$1" tree="$2"
     ( cd "$repo" && git ls-tree -r "$tree" -- "${graded_paths[@]}" \
+        | graded_filter \
+        | sha256sum | cut -c1-12 )
+}
+grader_key() {
+    local repo="$1" tree="$2"
+    ( cd "$repo" && git ls-tree -r "$tree" -- "${grader_paths[@]}" \
         | graded_filter \
         | sha256sum | cut -c1-12 )
 }
@@ -27,6 +37,7 @@ passes=1
 only=""
 self_test=0
 key_only=0
+grader_key_only=0
 list_only=0
 load=0
 while [[ $# -gt 0 ]]; do
@@ -39,6 +50,8 @@ while [[ $# -gt 0 ]]; do
             only="$2"; shift 2 ;;
         --key)
             key_only=1; shift ;;
+        --grader-key)
+            grader_key_only=1; shift ;;
         --self-test)
             self_test=1; shift ;;
         --list)
@@ -58,9 +71,15 @@ done
 }
 
 # R52 F4 (round 40 F2): the one key computation; sql-cell.sh and grid.sh
-# call this instead of copying the graded-path hash.
+# call this instead of copying the graded-path hash. R68 F1: the bar
+# record, sql-cell.sh, grid.sh and publish.sh use --grader-key; --key is
+# the full key (the fingerprint and the --ready scope).
 if [[ "$key_only" -eq 1 ]]; then
     flake_key "$(git rev-parse --show-toplevel)" HEAD
+    exit 0
+fi
+if [[ "$grader_key_only" -eq 1 ]]; then
+    grader_key "$(git rev-parse --show-toplevel)" HEAD
     exit 0
 fi
 
@@ -499,62 +518,95 @@ if [[ "$self_test" -eq 1 ]]; then
     done
 
     # R28 F2: Cargo.lock is in the shared list and moves the content key.
+    # R68 F1: it is a grader path, so it moves both keys.
     if ! printf '%s\n' "${graded_paths[@]}" | grep -qx 'Cargo.lock'; then
         echo "graded-paths.txt is missing Cargo.lock"
         exit 1
     fi
+    if ! printf '%s\n' "${grader_paths[@]}" | grep -qx 'Cargo.lock'; then
+        echo "Cargo.lock is not a grader path"
+        exit 1
+    fi
 
     # R27-3: a docs-only commit keeps the content key; a graded edit moves it.
+    # R68 F1: a plumbing edit keeps the grader key and moves the full key;
+    # a grader edit moves both.
     repo="$dir/repo"
-    mkdir -p "$repo/src" "$repo/docs" "$repo/scripts"
+    mkdir -p "$repo/src/cost" "$repo/src/verifier" "$repo/docs" "$repo/scripts"
     cp scripts/graded-paths.txt "$repo/scripts/graded-paths.txt"
     git -C "$repo" init -q
     git -C "$repo" config user.email flake@example.com
     git -C "$repo" config user.name flake
     echo "pub const X: u32 = 1;" > "$repo/src/scoring.rs"
+    echo "pub const P: u32 = 1;" > "$repo/src/cost/x.rs"
+    echo "pub fn v() {}" > "$repo/src/verifier/x.rs"
     echo "version = 1" > "$repo/Cargo.lock"
     echo "one" > "$repo/docs/readme.md"
     git -C "$repo" add -A
     git -C "$repo" commit -qm one
     key1=$(flake_key "$repo" HEAD)
+    gkey1=$(grader_key "$repo" HEAD)
     # R52 F4: --key prints the same key as the record header.
     bar_abs="$PWD/scripts/flake-bar.sh"
     got_key="$(cd "$repo" && "$bar_abs" --key)"
     [[ "$got_key" == "$key1" ]] || {
         echo "--key printed $got_key, expected $key1"; exit 1;
     }
+    got_grader="$(cd "$repo" && "$bar_abs" --grader-key)"
+    [[ "$got_grader" == "$gkey1" ]] || {
+        echo "--grader-key printed $got_grader, expected $gkey1"; exit 1;
+    }
     echo "two" > "$repo/docs/readme.md"
     git -C "$repo" add -A
     git -C "$repo" commit -qm two
     key2=$(flake_key "$repo" HEAD)
+    gkey2=$(grader_key "$repo" HEAD)
     [[ "$key1" == "$key2" ]] || { echo "doc-only commit changed the key"; exit 1; }
+    [[ "$gkey1" == "$gkey2" ]] || { echo "doc-only commit changed the grader key"; exit 1; }
+    echo "pub const P: u32 = 2;" > "$repo/src/cost/x.rs"
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm plumbing-edit
+    key2b=$(flake_key "$repo" HEAD)
+    gkey2b=$(grader_key "$repo" HEAD)
+    [[ "$key2" != "$key2b" ]] || { echo "a plumbing edit kept the full key"; exit 1; }
+    [[ "$gkey2" == "$gkey2b" ]] || { echo "a plumbing edit moved the grader key"; exit 1; }
     echo "version = 2" > "$repo/Cargo.lock"
     git -C "$repo" add -A
     git -C "$repo" commit -qm three
     key3=$(flake_key "$repo" HEAD)
-    [[ "$key1" != "$key3" ]] || { echo "Cargo.lock edit kept the key"; exit 1; }
+    gkey3=$(grader_key "$repo" HEAD)
+    [[ "$key2b" != "$key3" ]] || { echo "Cargo.lock edit kept the key"; exit 1; }
+    [[ "$gkey2b" != "$gkey3" ]] || { echo "Cargo.lock edit kept the grader key"; exit 1; }
     echo "pub const X: u32 = 2;" > "$repo/src/scoring.rs"
     git -C "$repo" add -A
     git -C "$repo" commit -qm four
     key4=$(flake_key "$repo" HEAD)
+    gkey4=$(grader_key "$repo" HEAD)
     [[ "$key3" != "$key4" ]] || { echo "graded edit kept the key"; exit 1; }
+    [[ "$gkey3" != "$gkey4" ]] || { echo "graded edit kept the grader key"; exit 1; }
     mkdir -p "$repo/src/verifier/x"
     echo "test" > "$repo/src/verifier/x/tests.rs"
     git -C "$repo" add -A
     git -C "$repo" commit -qm tests-rs
     key5=$(flake_key "$repo" HEAD)
+    gkey5=$(grader_key "$repo" HEAD)
     [[ "$key4" == "$key5" ]] || { echo "tests.rs moved the key"; exit 1; }
+    [[ "$gkey4" == "$gkey5" ]] || { echo "tests.rs moved the grader key"; exit 1; }
     mkdir -p "$repo/src/pipeline"
     echo "proof" > "$repo/src/pipeline/tests.rs"
     git -C "$repo" add -A
     git -C "$repo" commit -qm pipeline-tests
     key6=$(flake_key "$repo" HEAD)
+    gkey6=$(grader_key "$repo" HEAD)
     [[ "$key5" != "$key6" ]] || { echo "pipeline/tests.rs kept the key"; exit 1; }
+    [[ "$gkey5" != "$gkey6" ]] || { echo "pipeline/tests.rs kept the grader key"; exit 1; }
     echo "pub fn y() {}" > "$repo/src/verifier/x.rs"
     git -C "$repo" add -A
     git -C "$repo" commit -qm verifier-edit
     key7=$(flake_key "$repo" HEAD)
+    gkey7=$(grader_key "$repo" HEAD)
     [[ "$key6" != "$key7" ]] || { echo "production edit kept the key"; exit 1; }
+    [[ "$gkey6" != "$gkey7" ]] || { echo "production edit kept the grader key"; exit 1; }
     # R48-5: the bar's lock holder blocks the probe, and releases on exit.
     lock="$dir/long-test.lock"
     (
@@ -602,7 +654,8 @@ if [[ -n "$only" ]]; then
 fi
 
 commit="$(git rev-parse --short=12 HEAD)"
-key="$(flake_key "$(git rev-parse --show-toplevel)" HEAD)"
+full_key="$(flake_key "$(git rev-parse --show-toplevel)" HEAD)"
+key="$(grader_key "$(git rev-parse --show-toplevel)" HEAD)"
 dir="$(git rev-parse --path-format=absolute --git-common-dir)/sdb-gates"
 mkdir -p "$dir"
 load_suffix=""
@@ -612,6 +665,7 @@ if [[ ! -f "$record" ]]; then
     {
         echo "commit:  $(git rev-parse HEAD)"
         echo "key:     flake-$key$load_suffix"
+        echo "full:    flake-$full_key"
         echo "load:    $load"
         echo "branch:  $(git rev-parse --abbrev-ref HEAD)"
         echo "subject: $(git log -1 --format=%s)"

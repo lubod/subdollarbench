@@ -232,6 +232,14 @@ pub(crate) fn take_ready_signal(workdir: &std::path::Path) -> bool {
     std::fs::remove_file(&p).is_ok()
 }
 
+/// R68 F4: omp's model-resolution failure. omp 18.4.2 prints
+/// `Model "..." not found` and then waits for the watchdog instead of
+/// exiting, so this text is the only signal that the agent never started.
+fn is_model_not_found(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("model") && lower.contains("not found")
+}
+
 /// Billing tripwire: classify provider session errors that must pause the
 /// wave instead of scoring a 0% model failure. Matches HTTP billing/auth/
 /// throttle statuses in session JSON or stderr text (402/401/429 + phrases).
@@ -921,16 +929,24 @@ impl OmpRunner {
         // Spawn thread to read stdout. Any stdout at all is a sign of life:
         // an argv rejection (round-13 R1) prints only to stderr.
         let stdout_seen = Arc::new(AtomicBool::new(false));
+        // R68 F4: omp 18.4.2 prints "Model ... not found" and then waits
+        // for the watchdog instead of exiting. Keep the text so a run
+        // that never started is a harness fault, not an Ok session.
+        let model_not_found = Arc::new(AtomicBool::new(false));
         if let Some(stdout) = child.stdout.take() {
             let tx_out = tx.clone();
             let ext_flag = extension_feed.clone();
             let seen = stdout_seen.clone();
+            let not_found_out = model_not_found.clone();
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         seen.store(true, Ordering::SeqCst);
+                    }
+                    if is_model_not_found(trimmed) {
+                        not_found_out.store(true, Ordering::SeqCst);
                     }
                     if let Some(tagged) = Self::convert_bench_event(trimmed) {
                         ext_flag.store(true, Ordering::SeqCst);
@@ -947,6 +963,7 @@ impl OmpRunner {
         // Spawn thread to read stderr. Provider billing errors surface here
         // (not the session file), so classify each line for the tripwire.
         let billing_tripped_err = billing_tripped.clone();
+        let not_found_err = model_not_found.clone();
         if let Some(stderr) = child.stderr.take() {
             let tx_err = tx.clone();
             thread::spawn(move || {
@@ -956,6 +973,9 @@ impl OmpRunner {
                     if !trimmed.is_empty() {
                         if classify_billing_error(trimmed).is_some() {
                             billing_tripped_err.store(true, Ordering::SeqCst);
+                        }
+                        if is_model_not_found(trimmed) {
+                            not_found_err.store(true, Ordering::SeqCst);
                         }
                         let _ = tx_err.send(format!("[STDERR] {}", trimmed));
                     }
@@ -976,6 +996,9 @@ impl OmpRunner {
 
         let start_instant = std::time::Instant::now();
         let mut ready_seen = false;
+        // R68 F4: only the wall-clock watchdog turns a never-started run
+        // into a harness fault; a cancellation is an operator stop.
+        let mut watchdog_stopped = false;
         let status = loop {
             // Check cancellation request immediately
             if let Some(ref cf) = cancel_flag {
@@ -994,6 +1017,7 @@ impl OmpRunner {
                 if start_instant.elapsed().as_secs() >= max_secs {
                     let msg = format!("[LIMIT] Watchdog: maximum time limit ({}s) reached. Concluding agent run...", max_secs);
                     log_fn(msg.clone());
+                    watchdog_stopped = true;
                     limit_reached.store(true, Ordering::SeqCst);
                     *limit_reason.lock().unwrap() = Some(msg);
                     kill_agent();
@@ -1129,6 +1153,31 @@ impl OmpRunner {
                     }));
                 }
             }
+        }
+
+        // R68 F4: a run that never started is a harness fault, never an Ok
+        // session. omp 18.4.2 prints the model-not-found text and waits for
+        // the watchdog; a watchdog stop with no session and no turn is the
+        // same fault without the text.
+        let never_started = final_path.is_none()
+            && turn_counter.load(Ordering::SeqCst) == 0
+            && stats.steps_taken == 0
+            && stats.total_tokens == 0;
+        if never_started && model_not_found.load(Ordering::SeqCst) {
+            stats.stop_reason = Some("crash".to_string());
+            return Err(anyhow::Error::new(OmpExecutionError {
+                message: "OMP agent reported the model was not found".to_string(),
+                partial_stats: stats,
+                started: false,
+            }));
+        }
+        if watchdog_stopped && never_started {
+            stats.stop_reason = Some("crash".to_string());
+            return Err(anyhow::Error::new(OmpExecutionError {
+                message: "OMP agent never started before the watchdog".to_string(),
+                partial_stats: stats,
+                started: false,
+            }));
         }
 
         // R23 D1/D5: record why the session ended. A budget/turn/watchdog

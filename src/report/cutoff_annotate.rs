@@ -100,7 +100,23 @@ fn is_cutoff_trial(manifest: &Value, console: &str, workspace_dir: &Path) -> boo
 /// Dry-run by default. `apply=false` reports what would change and writes
 /// nothing, matching `repair`/`cost-annotate` semantics.
 pub fn run_cutoff_annotate(runs_dir: &Path, apply: bool) -> Result<CutoffAnnotateReport> {
-    let root = get_repo_root();
+    run_cutoff_annotate_at(
+        &get_repo_root(),
+        runs_dir,
+        apply,
+        LeaderboardManager::open_store_if_exists(),
+    )
+}
+
+/// R68 F4: the testable form. The public entry point passes the real repo
+/// root and store; the test passes a temp root and store, so the scan and
+/// the DB update run without touching the canonical `runs/`.
+fn run_cutoff_annotate_at(
+    root: &Path,
+    runs_dir: &Path,
+    apply: bool,
+    store: Option<crate::report::Store>,
+) -> Result<CutoffAnnotateReport> {
     let canon_runs = root.join("runs");
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     if canon(runs_dir) != canon(&canon_runs) {
@@ -185,7 +201,7 @@ pub fn run_cutoff_annotate(runs_dir: &Path, apply: bool) -> Result<CutoffAnnotat
 
     // bench.db `runs` rows, so analysis queries agree with the manifests.
     let mut db_annotated = 0usize;
-    if let Some(store) = LeaderboardManager::open_store_if_exists() {
+    if let Some(store) = store {
         let ids: std::collections::HashSet<&str> =
             flagged.iter().map(|(_, id)| id.as_str()).collect();
         for mut m in store.load_run_manifests() {
@@ -292,6 +308,93 @@ mod tests {
             &ws
         ));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    fn typed_manifest(run_id: &str) -> crate::report::RunManifest {
+        serde_json::from_value(serde_json::json!({
+            "run_id": run_id,
+            "model": "openrouter/inclusionai/ling-3.1-flash",
+            "task": "pdf",
+            "status": "failed_tests",
+            "language": "Python",
+            "started_at": "2026-10-01T00:00:00Z",
+            "completed_at": "2026-10-01T00:01:00Z",
+            "duration_seconds": 60.0,
+            "pass_rate": 0.0,
+            "passed_stages": 0,
+            "total_stages": 1,
+            "stages": [],
+            "throughput_req_sec": null,
+            "tokens": {"prompt_tokens": 0, "cached_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "cost_usd": 0.0,
+            "savings_percent": 0.0,
+            "efficiency_score": 0.0,
+            "files": [],
+            "cutoff_turn1": null
+        }))
+        .expect("cutoff manifest fixture")
+    }
+
+    #[test]
+    fn test_run_cutoff_annotate_scans_and_writes() {
+        let root = empty_workspace("run");
+        let runs = root.join("runs");
+        let trial = "pdf_openrouter_x_20261008_000000_w3_trial1";
+        let write = |name: &str, manifest: &Value, console: &str| {
+            let dir = runs.join(name);
+            std::fs::create_dir_all(dir.join("workspace")).unwrap();
+            std::fs::write(
+                dir.join("manifest.json"),
+                serde_json::to_string(manifest).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.join("console.log"), console).unwrap();
+        };
+        let mut trial_m = cutoff_manifest();
+        trial_m["run_id"] = Value::String(trial.to_string());
+        write("trial", &trial_m, &cutoff_console());
+        let mut done = trial_m.clone();
+        done["run_id"] = Value::String("done_trial1".to_string());
+        done["cutoff_turn1"] = Value::Bool(true);
+        write("done", &done, &cutoff_console());
+        let mut billing = trial_m.clone();
+        billing["run_id"] = Value::String("billing_trial1".to_string());
+        write(
+            "billing",
+            &billing,
+            &format!("{}HTTP/1.1 401 Unauthorized\n", cutoff_console()),
+        );
+        let mut normal = trial_m.clone();
+        normal["run_id"] = Value::String("normal_trial1".to_string());
+        normal["status"] = Value::String("completed".to_string());
+        write("normal", &normal, &cutoff_console());
+
+        let report = run_cutoff_annotate_at(&root, &runs, false, None).unwrap();
+        assert_eq!(report.manifests_scanned, 4);
+        assert_eq!(report.annotated, vec![trial.to_string()]);
+        assert_eq!(report.skipped_billing, 1);
+        assert_eq!(report.db_annotated, 0);
+
+        // The DB row is updated when the store is supplied; the manifest
+        // write is the same pass.
+        let store = crate::report::Store::open(&root.join("bench.db")).unwrap();
+        store.upsert_run_manifest(&typed_manifest(trial)).unwrap();
+        let report = run_cutoff_annotate_at(&root, &runs, true, Some(store)).unwrap();
+        assert_eq!(report.annotated, vec![trial.to_string()]);
+        assert_eq!(report.db_annotated, 1);
+        let stored = crate::report::Store::open(&root.join("bench.db"))
+            .unwrap()
+            .load_run_manifests();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].cutoff_turn1, Some(true));
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(runs.join("trial/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["cutoff_turn1"], Value::Bool(true));
+        let again = run_cutoff_annotate_at(&root, &runs, false, None).unwrap();
+        assert!(again.annotated.is_empty(), "re-runs are idempotent");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

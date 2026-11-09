@@ -259,6 +259,99 @@ balance_gate() {
     return 0
 }
 
+# R68 F2: the rehearsal record lives next to the bar records, keyed by the
+# full content key, and names the exact commit it ran on.
+rehearsal_dir() {
+    if [[ -n "${SDB_REHEARSAL_DIR:-}" ]]; then
+        printf '%s' "$SDB_REHEARSAL_DIR"
+    else
+        printf '%s/sdb-gates' \
+            "$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)"
+    fi
+}
+
+rehearsal_record_path() {
+    printf '%s/rehearsal-%s.txt' "$(rehearsal_dir)" "$1"
+}
+
+rehearsal_gate() {
+    local full record commit head
+    full="$(cd "$ROOT" && scripts/flake-bar.sh --key)" || {
+        log "preflight: could not compute the full key"
+        return 1
+    }
+    record="$(rehearsal_record_path "$full")"
+    if [[ ! -f "$record" ]]; then
+        log "preflight: no rehearsal record for full key $full ($record); run scripts/grid.sh --rehearsal"
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS$' "$record"; then
+        log "preflight: the rehearsal record for full key $full is not a PASS ($record)"
+        return 1
+    fi
+    commit="$(awk '$1 == "commit:" { print $2; exit }' "$record")"
+    head="$(cd "$ROOT" && git rev-parse HEAD)"
+    if [[ "$commit" != "$head" ]]; then
+        log "preflight: the rehearsal record is for commit ${commit:-?}, not $head; rerun scripts/grid.sh --rehearsal"
+        return 1
+    fi
+    return 0
+}
+
+# R68 F2: a --rehearsal that ran every career's four phases at $0 writes
+# the record sql-cell.sh and the paid preflight require. A partial
+# --max-phase run writes none.
+write_rehearsal_record() {
+    local full record image
+    if [[ "$MAX_PHASE" != "4" ]]; then
+        log "rehearsal: --max-phase $MAX_PHASE is not a full 4-phase rehearsal; no record"
+        return 0
+    fi
+    if ! python3 - "$LEDGER" "${#CAREERS[@]}" <<'PY'
+import sys
+ledger, careers = sys.argv[1], int(sys.argv[2])
+rows = {}
+for line in open(ledger):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 8 or parts[0] in ("career", ""):
+        continue
+    try:
+        idx, phase, cost = int(parts[0]), int(parts[2]), float(parts[6])
+    except ValueError:
+        sys.exit(f"bad ledger row: {line!r}")
+    rows.setdefault(idx, {})[phase] = (parts[7], cost)
+for idx in range(careers):
+    phases = rows.get(idx, {})
+    for phase in range(1, 5):
+        stop, cost = phases.get(phase, ("missing", 0.0))
+        if stop != "ok":
+            sys.exit(f"career {idx} phase {phase} ended {stop}")
+        if cost != 0:
+            sys.exit(f"career {idx} phase {phase} spent ${cost}")
+PY
+    then
+        log "rehearsal: the ledger is not four ok $0 phases per career; no record"
+        return 1
+    fi
+    full="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
+    record="$(rehearsal_record_path "$full")"
+    image="${SDB_MODEL_CHECK_IMAGE_DIGEST:-}"
+    if [[ -z "$image" ]]; then
+        image="$(docker image inspect subdollar-sandbox --format '{{.Id}}' 2>/dev/null || true)"
+    fi
+    mkdir -p "$(dirname "$record")"
+    {
+        echo "commit:  $(cd "$ROOT" && git rev-parse HEAD)"
+        echo "key:     rehearsal-$full"
+        echo "grid:    ${#CAREERS[@]} careers, 4 phases, $LANES lanes"
+        echo "image:   ${image:-unknown}"
+        echo "time:    $(date -u +%FT%TZ)"
+        echo "RESULT: PASS"
+    } > "$record"
+    log "rehearsal: wrote $record"
+    return 0
+}
+
 preflight() {
     local worker="$1"
     if [[ "${SDB_GRID_SKIP_PREFLIGHT:-0}" == "1" ]]; then
@@ -280,11 +373,16 @@ preflight() {
     fi
     if [[ "$REHEARSAL" != "1" ]]; then
         local key record
-        # R52 F4: one key computation for the bar, the cell and the grid.
-        key="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
+        # R52 F4/R68 F1: one grader-key computation for the bar, the cell
+        # and the grid; a plumbing change does not need a new bar.
+        key="$(cd "$ROOT" && scripts/flake-bar.sh --grader-key)"
         record="$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)/sdb-gates/flake-$key.txt"
         if ! grep -q 'RESULT: PASS' "$record" 2>/dev/null; then
-            log "preflight: no PASS flake record for key $key ($record)"
+            log "preflight: no PASS flake record for grader key $key ($record)"
+            return 1
+        fi
+        # R68 F2: the $0 rehearsal must be on this exact commit.
+        if ! rehearsal_gate; then
             return 1
         fi
     fi
@@ -296,6 +394,64 @@ preflight() {
             return 1
         fi
     done
+}
+
+# R68 F3: a paid grid needs a fresh PASS model-check record for every
+# career's model, made on the current sandbox image digest.
+model_check_gate() {
+    local model="$1" record image record_image time_line age
+    record="$("$ROOT/scripts/model-check.sh" --record "$model")" || {
+        log "preflight: cannot resolve the model-check record for $model"
+        return 1
+    }
+    if [[ ! -f "$record" ]]; then
+        log "preflight: no model-check record for $model ($record); run scripts/model-check.sh $model"
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS$' "$record"; then
+        log "preflight: the model-check record for $model is not a PASS ($record)"
+        return 1
+    fi
+    image="${SDB_MODEL_CHECK_IMAGE_DIGEST:-}"
+    if [[ -z "$image" ]]; then
+        image="$(docker image inspect subdollar-sandbox --format '{{.Id}}' 2>/dev/null || true)"
+    fi
+    if [[ -z "$image" ]]; then
+        log "preflight: cannot read the subdollar-sandbox image digest for $model"
+        return 1
+    fi
+    record_image="$(awk '$1 == "image:" { print $2; exit }' "$record")"
+    if [[ "$record_image" != "$image" ]]; then
+        log "preflight: the model-check record for $model is from another image ($record_image, want $image)"
+        return 1
+    fi
+    time_line="$(awk '$1 == "time:" { print $2; exit }' "$record")"
+    if [[ -z "$time_line" ]]; then
+        log "preflight: the model-check record for $model has no time ($record)"
+        return 1
+    fi
+    age="$(python3 - "$time_line" <<'PY'
+import datetime, sys
+try:
+    t = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+now = datetime.datetime.now(datetime.timezone.utc)
+print(int((now - t).total_seconds()))
+PY
+)" || {
+        log "preflight: the model-check record for $model has a bad time ($time_line)"
+        return 1
+    }
+    if (( age > 604800 )); then
+        log "preflight: the model-check record for $model is older than 7 days ($time_line)"
+        return 1
+    fi
+    if (( age < -300 )); then
+        log "preflight: the model-check record for $model has a future time ($time_line)"
+        return 1
+    fi
+    return 0
 }
 
 result_get() {
@@ -340,6 +496,26 @@ career_state() {
     ) 200>>"$LEDGER.lock"
 }
 
+# R68 F5: provider tool-call errors against agent turns in a finished
+# phase's live.log. The minimax phases (#29) carried 8-76% errors; the
+# published models at most 0.1%. A fault needs both >2% and at least 5
+# errors, so a single bad turn in a short phase is not a provider fault.
+provider_fault_counts() {
+    local log="$1" turns errors
+    turns="$(grep -ac '\[BENCH-POLICY\] turn=' "$log" 2>/dev/null || true)"
+    errors="$(grep -acE 'provider stream ended with an error|Upstream error from' "$log" 2>/dev/null || true)"
+    printf '%s\t%s\n' "${turns:-0}" "${errors:-0}"
+}
+
+provider_fault() {
+    local id="$1" log turns errors
+    log="$RUNS/$id/live.log"
+    [[ -f "$log" ]] || return 1
+    read -r turns errors < <(provider_fault_counts "$log")
+    [[ "$turns" -gt 0 && "$errors" -ge 5 ]] || return 1
+    awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'
+}
+
 run_cell() {
     local career="$1" model="$2" phase="$3" chain="$4" worker="$5" result="$6"
     SDB_CELL_CAREER="$career" \
@@ -356,7 +532,7 @@ run_lane() {
     local lane="$1"
     local worker=$((WORKER_BASE + lane))
     local idx model phase chain result id rc token last_phase last_id last_stop start_phase
-    local failed=0
+    local failed=0 provider_turns=0 provider_errors=0
     for idx in "${!CAREERS[@]}"; do
         model="${CAREERS[$idx]}"
         if (( idx % LANES != lane )); then
@@ -443,9 +619,30 @@ run_lane() {
             elif awk -v c="$cost" 'BEGIN { exit !(c > 0.99) }'; then
                 stop="cost > 0.99"
             fi
+            # R68 F5: a finished phase whose live.log carries provider
+            # tool-call errors above 2% of its turns is a provider fault,
+            # not a model result. The ledger row says so and the run is
+            # hidden before anything can publish it.
+            if [[ -n "$id" && "$id" != "—" ]] && provider_fault "$id"; then
+                read -r provider_turns provider_errors < <(provider_fault_counts "$RUNS/$id/live.log")
+                stop="provider_fault"
+            fi
             billed="$(result_get "$result" billed_usd)"
             ledger_add "$idx" "$model" "$phase" "$worker" "${id:-—}" "${points:-0}" "${cost:-0}" "$stop" "$token"
             rm -f "$result"
+            if [[ "$stop" == "provider_fault" ]]; then
+                mkdir -p "$RUNS/$id"
+                printf 'provider fault: %s errors in %s turns (%.2f%%)\n' \
+                    "$provider_errors" "$provider_turns" \
+                    "$(awk -v e="$provider_errors" -v t="$provider_turns" \
+                        'BEGIN { printf "%.2f", 100 * e / t }')" \
+                    > "$RUNS/$id/.portal_hidden"
+                printf 'hold: provider fault: %s errors in %s turns\n' \
+                    "$provider_errors" "$provider_turns" > "$HOLD"
+                log "lane $lane: career $idx $model phase $phase provider fault: $provider_errors errors in $provider_turns turns; hidden; hold at $HOLD"
+                wait_hold
+                break
+            fi
             # R67 F2: a bill above 1.25x list means the pin did not hold.
             if [[ "$stop" == "ok" && -n "$billed" && "$cost" != "0" ]] \
                 && awk -v b="$billed" -v l="$cost" 'BEGIN { exit !(b > 1.25 * l) }'; then
@@ -470,7 +667,16 @@ run_lane() {
 }
 
 run_grid() {
-    local marked mark row
+    local marked mark row model
+    # R68 F3: no paid phase starts for a model without a fresh PASS
+    # model-check record. A rehearsal and a dry run spend nothing.
+    if [[ "$REHEARSAL" != "1" && "$DRY_RUN" != "1" \
+        && "${SDB_GRID_SKIP_PREFLIGHT:-0}" != "1" \
+        && "${SDB_GRID_PREFLIGHT_TEST:-0}" != "1" ]]; then
+        for model in "${CAREERS[@]}"; do
+            model_check_gate "$model" || return 1
+        done
+    fi
     # R54-1: a paid grid may not resume from a rehearsal/smoke row: its
     # phase 2+ would chain from the reference workspace and spend on a
     # career the board can never rank.
@@ -548,6 +754,17 @@ if [[ "$phase" -gt 1 && "$chain" != "$prefix-c$career-$model-p$((phase - 1))" ]]
     exit 1
 fi
 printf '%s\t%s\t%s\t%s\n' "$career" "$model" "$phase" "$chain" >> "${SDB_GRID_TRACE:?}"
+if [[ -n "${SDB_FAKE_TURNS:-}" ]]; then
+    log="${SDB_RUNS_DIR:?}/$id/live.log"
+    mkdir -p "$(dirname "$log")"
+    : > "$log"
+    for i in $(seq 1 "$SDB_FAKE_TURNS"); do
+        printf '[BENCH-POLICY] turn=%s/100 idle=false\n' "$i" >> "$log"
+    done
+    for i in $(seq 1 "${SDB_FAKE_ERRORS:-0}"); do
+        printf 'provider stream ended with an error\n' >> "$log"
+    done
+fi
 if [[ "${SDB_FAKE_SLEEP_ALL:-0}" == "1" || "${SDB_FAKE_SLEEP_ID:-}" == "$id" ]]; then
     sleep "${SDB_FAKE_SLEEP:-0.3}"
 fi
@@ -555,7 +772,10 @@ stop=0
 [[ "${SDB_FAKE_STOP_ID:-}" == "$id" ]] && stop=1
 res_phase="${SDB_FAKE_RESULT_PHASE:-$phase}"
 res_chain="${SDB_FAKE_RESULT_CHAIN-$chain}"
-python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "${SDB_FAKE_COST:-0.1}" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" "${SDB_FAKE_BILLED:-0}" <<'PY'
+cost="${SDB_FAKE_COST:-0.1}"
+# R68 F2: a rehearsal spends $0, as a real one does.
+[[ "${SDB_CELL_REHEARSAL:-0}" == "1" ]] && cost=0
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" "$stop" "$cost" "$res_phase" "$res_chain" "${SDB_FAKE_HARNESS_FAULT:-}" "${SDB_FAKE_BILLED:-0}" <<'PY'
 import json, sys
 out, cid, phase, worker, chain, stop, cost, res_phase, res_chain, fault, billed = sys.argv[1:12]
 json.dump({
@@ -831,6 +1051,7 @@ EOF
     mkdir -p "$runs"
     printf '%s\n' c1 > "$scenario/careers.txt"
     SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/reh.trace" SDB_FAKE_PREFIX=reh \
+        SDB_REHEARSAL_DIR="$scenario/gates" \
         "$ROOT/scripts/grid.sh" --rehearsal --careers "$scenario/careers.txt" \
         --lanes 1 --cell "$fake" >"$scenario/reh.out" 2>&1
     [[ -f "$runs/.grid-rehearsal-ledger.tsv" ]] || {
@@ -1100,6 +1321,212 @@ EOF
     [[ ! -f "$STOP" ]] || { echo "probe race: a false STOP"; exit 1; }
     MAX_PHASE=4
 
+    # 17) R68 F3: a paid grid refuses a model with no fresh PASS
+    # model-check record on the current sandbox image.
+    scenario="$dir/eleven"
+    mkdir -p "$scenario/gates"
+    printf '%s\n' test-model > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    load_careers "$CAREERS_FILE"
+    export SDB_MODEL_CHECK_DIR="$scenario/gates"
+    export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:fresh"
+    record="$scenario/gates/model-check-test-model.txt"
+    fresh="$(date -u +%FT%TZ)"
+    old="$(date -u -d '8 days ago' +%FT%TZ)"
+
+    rm -f "$record"
+    rc=0
+    ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=0; run_grid ) \
+        >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "a grid without a model-check record was accepted"; exit 1; }
+    [[ ! -f "$LEDGER" ]] || { echo "a grid without a model-check record wrote a ledger"; exit 1; }
+    echo "[self-test] no model-check record refuses the grid"
+
+    printf 'time: %s\nimage: sha256:fresh\nRESULT: PASS\n' "$old" > "$record"
+    if model_check_gate test-model 2>/dev/null; then
+        echo "an old model-check record was accepted"; exit 1
+    fi
+    echo "[self-test] an old model-check record refuses"
+
+    printf 'time: %s\nimage: sha256:other\nRESULT: PASS\n' "$fresh" > "$record"
+    if model_check_gate test-model 2>/dev/null; then
+        echo "another image's model-check record was accepted"; exit 1
+    fi
+    echo "[self-test] another image's model-check record refuses"
+
+    printf 'time: %s\nimage: sha256:fresh\nRESULT: FAIL (x)\n' "$fresh" > "$record"
+    if model_check_gate test-model 2>/dev/null; then
+        echo "a failed model-check record was accepted"; exit 1
+    fi
+    echo "[self-test] a failed model-check record refuses"
+
+    printf 'time: %s\nimage: sha256:fresh\nRESULT: PASS\n' "$fresh" > "$record"
+    model_check_gate test-model 2>/dev/null || {
+        echo "a fresh matching model-check record was refused"; exit 1; }
+    echo "[self-test] a fresh matching model-check record allows"
+    unset SDB_MODEL_CHECK_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
+
+    # 18) R68 F2: a full 4-phase $0 rehearsal writes the full-key record;
+    # a stopped phase or a partial run writes none.
+    scenario="$dir/twelve"
+    mkdir -p "$scenario"
+    export SDB_REHEARSAL_DIR="$scenario/gates"
+    export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:rehearsal"
+    ledger="$scenario/ledger.tsv"
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$ledger"
+    for c in 0 1; do
+        for p in 1 2 3 4; do
+            printf '%s\tm\t%s\t1\tid\t1\t0\tok\tx\n' "$c" "$p" >> "$ledger"
+        done
+    done
+    LEDGER="$ledger"
+    CAREERS=(c1 c2)
+    MAX_PHASE=4
+    LANES=1
+    write_rehearsal_record || {
+        echo "a full 4-phase rehearsal wrote no record"; exit 1; }
+    full="$(scripts/flake-bar.sh --key)"
+    record="$scenario/gates/rehearsal-$full.txt"
+    [[ -f "$record" ]] || { echo "the rehearsal record is missing"; exit 1; }
+    grep -q "^commit:  $(git rev-parse HEAD)$" "$record" || {
+        echo "the rehearsal record does not name the commit"; exit 1; }
+    grep -q '^RESULT: PASS$' "$record" || {
+        echo "the rehearsal record is not a PASS"; exit 1; }
+    rehearsal_gate || { echo "the rehearsal gate refused a fresh record"; exit 1; }
+    cp "$record" "$record.good"
+    sed -i 's/^commit:  .*/commit:  deadbeef/' "$record"
+    if rehearsal_gate 2>/dev/null; then
+        echo "a rehearsal record for another commit was accepted"; exit 1
+    fi
+    mv "$record.good" "$record"
+    rm -f "$record"
+    awk -F'\t' 'BEGIN { OFS = "\t" } NR == 2 { $8 = "stopped" } { print }' \
+        "$ledger" > "$ledger.tmp"
+    mv "$ledger.tmp" "$ledger"
+    if write_rehearsal_record 2>/dev/null; then
+        echo "a stopped rehearsal phase wrote a record"; exit 1
+    fi
+    [[ ! -f "$record" ]] || { echo "a stopped rehearsal wrote a record"; exit 1; }
+    awk -F'\t' 'BEGIN { OFS = "\t" } NR == 2 { $8 = "ok" } { print }' \
+        "$ledger" > "$ledger.tmp"
+    mv "$ledger.tmp" "$ledger"
+    MAX_PHASE=1
+    write_rehearsal_record 2>/dev/null || true
+    [[ ! -f "$record" ]] || { echo "a partial rehearsal wrote a record"; exit 1; }
+    MAX_PHASE=4
+    unset SDB_REHEARSAL_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
+    echo "[self-test] the rehearsal record is full, commit-keyed and \$0"
+
+    # 19) R68 F5: 5 provider errors in 33 turns (15.15%) is a provider
+    # fault: the ledger row says provider_fault, the run is hidden with
+    # the counts, and the grid holds until the hold is released.
+    scenario="$dir/nineteen"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0
+    MAX_PHASE=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f5
+    export SDB_FAKE_TURNS=33
+    export SDB_FAKE_ERRORS=5
+    load_careers "$CAREERS_FILE"
+    ( run_grid ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "a 15% provider fault did not hold the grid"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    fi
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "provider_fault" ]] || {
+        echo "a 15% provider fault wrote stop '$stop'"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    }
+    hidden="$runs/f5-c0-c1-p1/.portal_hidden"
+    [[ -f "$hidden" ]] || {
+        echo "a provider fault did not hide the run"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    }
+    grep -q '5 errors in 33 turns' "$hidden" || {
+        echo "the hidden reason does not name the counts: $(cat "$hidden")"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    }
+    rm -f "$HOLD"
+    wait "$pid" || { echo "the held grid failed"; exit 1; }
+    [[ ! -f "$STOP" ]] || { echo "a provider fault touched STOP"; exit 1; }
+    echo "[self-test] a 15% provider fault holds and hides the run"
+
+    # 20) 1 error in 1000 turns (0.1%) is not a provider fault.
+    scenario="$dir/twenty"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f5b
+    export SDB_FAKE_TURNS=1000
+    export SDB_FAKE_ERRORS=1
+    load_careers "$CAREERS_FILE"
+    run_grid || { echo "a 0.1% phase failed the grid"; exit 1; }
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "ok" ]] || { echo "a 0.1% phase wrote stop '$stop'"; exit 1; }
+    [[ ! -f "$runs/f5b-c0-c1-p1/.portal_hidden" ]] || {
+        echo "a 0.1% phase was hidden"; exit 1; }
+    echo "[self-test] a 0.1% phase passes"
+
+    # 21) 3 errors in 20 turns is 15%, but under the 5-error floor.
+    scenario="$dir/twentyone"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f5c
+    export SDB_FAKE_TURNS=20
+    export SDB_FAKE_ERRORS=3
+    load_careers "$CAREERS_FILE"
+    run_grid || { echo "a 3-error phase failed the grid"; exit 1; }
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "ok" ]] || { echo "a 3-error phase wrote stop '$stop'"; exit 1; }
+    [[ ! -f "$runs/f5c-c0-c1-p1/.portal_hidden" ]] || {
+        echo "a 3-error phase was hidden"; exit 1; }
+    echo "[self-test] 3 errors in 20 turns pass (under the 5-error floor)"
+    unset SDB_FAKE_TURNS SDB_FAKE_ERRORS SDB_FAKE_PREFIX SDB_RUNS_DIR
+
     echo "RESULT: PASS (grid self-test)"
 }
 
@@ -1219,3 +1646,6 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 run_grid
+if [[ "$REHEARSAL" == "1" ]]; then
+    write_rehearsal_record
+fi

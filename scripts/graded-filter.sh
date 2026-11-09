@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
-# R61 F3/R61-5: the one tests.rs rule for the graded-path list.
+# R61 F3/R61-5, R68 F1: the one tests.rs rule and the two classes for the
+# graded-path list.
 #
-# `scripts/graded-paths.txt` holds the path patterns first, then two kinds
-# of data lines that are not pathspecs:
+# `scripts/graded-paths.txt` holds class-prefixed path lines first:
+#
+#   grader   src/verifier
+#   plumbing src/cost
+#
+# then two kinds of data lines that are not pathspecs:
 #
 #   exclude-name tests.rs
 #   keep src/pipeline/tests.rs
 #
-# `graded_path_entries` prints the pathspecs (and the keep path, which the
-# patterns above do not match) for `git ls-tree`/`git diff`, and every
-# reader filters the resulting paths through `graded_filter`.
+# `graded_path_entries` prints every pathspec (and the keep path, which the
+# patterns above do not match) for the full key and `git diff`;
+# `grader_path_entries` prints the grader paths and the keep path for the
+# bar record key. Every reader filters the resulting paths through
+# `graded_filter`.
+graded_class_entries() {
+    local class
+    for class in "$@"; do
+        awk -v c="$class" '$1 == c { print $2 }' \
+            "$(git rev-parse --show-toplevel)/scripts/graded-paths.txt"
+    done
+}
 graded_path_entries() {
-    grep -vE '^[[:space:]]*(#|$)|^(exclude-name|keep)[[:space:]]' \
-        "$(git rev-parse --show-toplevel)/scripts/graded-paths.txt"
+    graded_class_entries grader plumbing
+    graded_keeps
+}
+grader_path_entries() {
+    graded_class_entries grader
     graded_keeps
 }
 graded_exclude_names() {
