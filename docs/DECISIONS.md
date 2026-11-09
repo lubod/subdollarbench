@@ -653,9 +653,11 @@ The benchmark answers "what does a dollar buy" (round 23):
   **grading** changes. That covers `src/verifier`, `campaigns`, `tasks`,
   `src/prompts`, `extensions`, and the grading path of
   `src/pipeline.rs`. Pricing, harness plumbing, recording and display
-  changes need the `--ready` gate and a $0 rehearsal, and their key
-  carries a waiver that points to the last real bar. Round 68 encodes
-  the rule.
+  changes need the `--ready` gate and a $0 rehearsal on the exact
+  commit. **Encoded in round 68** (merged 2026-11-09): the bar record is
+  keyed by the grader key (`flake-bar.sh --grader-key`); today's grader
+  content (`2aa33e35372b`) carries a labelled migration waiver pointing
+  to the last real bar (`flake-589e9fd33cd2.txt`).
 - **Why:** the bar's live proofs grade the reference server; they never
   call a provider, read a price or render a page. A change outside the
   grader re-runs 7 h of proofs whose behaviour it can't affect (rounds 65

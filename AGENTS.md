@@ -211,8 +211,9 @@ A round's "done" record lives in its round file, not in
     so a bump restarts careers at phase 1. Published results always name
     their rules version.
   - **A graded-path change without a bump** needs the `--ready` gate
-    ("Gates") and a new 20-pass flake bar on that content before the
-    next published cell.
+    ("Gates"). A new 20-pass flake bar is needed only when a **grader**
+    path changed (round 68, `docs/DECISIONS.md` #26); a **plumbing**
+    path needs a $0 rehearsal on the exact commit instead.
 - **Claims cite code:** a statement about behaviour in a round file or a
   review names `path:line`, or the test that shows it.
 
@@ -270,7 +271,7 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
   file in (`scripts/graded-filter.sh`). Test files are also outside the
   rules fingerprint (`src/report/graded_hash.rs`).
 - **The live proofs not chosen** still run 20 times in the flake bar
-  before any published cell.
+  before the next published cell, when a grader path changed.
 - **The reviewer** reads the gate record for the `ready` commit instead
   of rerunning the suite, reruns what the change puts at risk, and may
   ask for the full gate on any round.
@@ -283,9 +284,12 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
   (round 63). Since round 63, a stage proof below 20 grades stages 0-4
   and its own; the two stage-20 proofs grade the whole ladder. A full bar
   takes about 7 h.
-  `flake-bar.sh --key` prints the graded-content key; the record is
-  `<git-common-dir>/sdb-gates/flake-<key>.txt`, so docs-only commits
-  keep it. A FAIL line names a file with that run's output.
+  `flake-bar.sh --key` prints the full graded-content key (the
+  fingerprint and the `--ready` scope). `flake-bar.sh --grader-key`
+  hashes only the **grader** paths (round 68), and the bar record is
+  `<git-common-dir>/sdb-gates/flake-<grader-key>.txt`, so docs-only and
+  plumbing commits keep it. A FAIL line names a file with that run's
+  output.
 - **Standard** (round 61, D1): a failed proof reruns once right away
   (`TEST <t> RERUN PASS|FAIL`; a rerun doesn't count toward the 20).
   - A failure cured by its rerun is allowed once per proof and twice per
@@ -298,11 +302,26 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
   good. Fix the cause, move the record and its logs aside into
   `sdb-gates/void-flake-<key>-<utc>-<reason>/` (never delete them), and
   restart the bar.
-- **When:** a full bar (every proof at its target) after any
-  graded-path change, before the next
-  published cell. `scripts/sql-cell.sh` refuses an official cell without
-  a PASS record (`SDB_CELL_SMOKE=1` runs a sub-$0.99 smoke cell without
-  one).
+- **Grader or plumbing** (round 68): `scripts/graded-paths.txt` marks
+  each graded path. A path is **grader** if the bar's live proofs
+  execute it or if it decides a score; the rest are **plumbing**. The
+  classes decide only the bar; a change to what the candidate sees still
+  needs a rules bump.
+- **When:** a full bar (every proof at its target) after any **grader**
+  change, before the next published cell. A **plumbing** change needs a
+  $0 rehearsal on the exact commit (`grid.sh --rehearsal` writes
+  `sdb-gates/rehearsal-<full-key>.txt`). `scripts/sql-cell.sh`,
+  `grid.sh` and `publish.sh` refuse an official cell without both
+  records (`SDB_CELL_SMOKE=1` runs a sub-$0.99 smoke cell without
+  them).
+- **Before a model's first grid** (round 68 F3, DECISIONS #28, #29):
+  `scripts/model-check.sh <model>` must PASS within 7 days on the current
+  sandbox image: one call through the sandbox's omp (the exact model id
+  sent and served, the pinned provider, the bill within 1.25×) and a
+  tool-call round trip. `grid.sh` refuses a model without it.
+- **A provider fault is not a score** (round 68 F5): a phase whose
+  provider tool-call errors pass 2 % of turns (at least 5) is marked
+  `provider_fault`, hidden, and the grid holds.
 - **While it runs:** never start a second runner, and don't run
   `cargo test`, the gate or local Docker builds next to it.
 
@@ -310,7 +329,9 @@ It writes `<git-common-dir>/sdb-gates/<commit>.txt` (full),
 and `clippy` on the pinned toolchain; it builds `subdollar-sandbox` with
 the runner's UID and GID; it runs every test except the ones
 `scripts/live-proofs.sh` prints, on test workers 8 and above. Line
-coverage is gated at 84 % or more, and the ratchet only goes up.
+coverage of the product code (`tests.rs` files excluded, round 68) is
+gated at 84 % or more, and the ratchet only goes up. The reviewer
+checks CI after every push.
 
 ## Pointers
 

@@ -66,7 +66,7 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [65](65.md) | A provider credit failure stops the grid (R63-3); a balance preflight; `publish.sh` uses the one key; fresh input tokens on every route; the published pages read clearly (F6-F8 added after open) (graded: `--ready`, then a bar) | merged `3fae830` |
 | [66](66.md) | Ready for the next grid: four new models priced; one board per rules version, every fingerprint shown (graded: `--ready`, then one bar for 65+66) | merged `1a1aa3b` |
 | [67](67.md) | The bill matches the snapshot (one pinned provider per model; billed recorded beside list); the GUI shows every run (R66-5, R66-4, R64-3, R66-3) (graded: `--ready`, then a bar) | merged `dc3cacb` |
-| [68](68.md) | The bar is required only when grading changes: grader vs plumbing paths, a grader key, a rehearsal record per commit, a pre-grid model check through the sandbox's omp (DECISIONS #26, #28) | open |
+| [68](68.md) | The bar is required only when grading changes: grader vs plumbing paths, a grader key, a rehearsal record per commit, a pre-grid model check through the sandbox's omp (DECISIONS #26, #28) | merged `9a63909` |
 | [69](69.md) | A facelift for the public pages: one palette, a plain header, the board leads with the answer, the results page reads as a report (display only) | merged `6e6c8ee` |
 | [70](70.md) | The facelift's follow-ups: the rehearsal footnote, the phone board, cards that match the board, restored tests, polish (R69-2 to R69-7; display only) | merged `5356bd7`, follow-up `2fef700` |
 | [71](71.md) | The board stays small and distinct as the grid grows: one agreement strip, a 30-career size budget enforced at publish, 10+ colours with a second channel (R70-2 to R70-4; display only) | merged `aa36801` |
