@@ -275,6 +275,13 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   bumps the rules version, pins a current omp, grades what the candidate
   sees, and pins 10 models; then **every model reruns** on the new board
   (about $60-75). **No paid cell on master until round 75 merges.**
+- **The `.46` grid** (operator, 2026-11-09): one model at a time, the
+  operator looks at each before the next; untested first, cheapest
+  first: ling-3.1-flash, minimax (off-peak only), glm-5.3-flash, hy4;
+  then luna, deepseek (off-peak only), haiku, luna-pro, mimo-flash,
+  qwen. Model 1 (ling) is armed (`runs/grid-arm-v46-ling.sh`): after the
+  bar on `c18f72a19608`, a $0 rehearsal, then 3 careers. The model
+  checks expire 2026-11-16; re-run them for the models after that.
 - ~~Investigate: `ref-sql` drops out~~ (solved by round 74: a prompt
   renderer bug, not an outage).
 - (old note) **Investigate: `ref-sql` drops out during agent sessions** (all
