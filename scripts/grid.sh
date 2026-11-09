@@ -516,9 +516,70 @@ provider_fault() {
     awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'
 }
 
+# R74 F2: while a phase runs, read its health.json every poll (2 min in a
+# paid grid; SDB_GRID_HEALTH_POLL overrides for tests). After 20 turns,
+# tool errors over 2 % (and at least 5) or empty responses over 5 % (and
+# at least 5) stop the phase: write .live_stop, the live result for the
+# lane, and kill the cell's process group. The first clean 30-turn check
+# on the canary lane opens the other lanes. A slow median turn or >10 %
+# ref-sql refusals only warn; the console shows the amber health.
+live_check() {
+    local model="$1" worker="$2" phase="$3" cell_pid="$4" marker="$5" out="$6"
+    local tag="${model//\//_}"; tag="${tag//:/_}"
+    local poll="${SDB_GRID_HEALTH_POLL:-120}"
+    local dir="" vals turns errors empty p50 refr refq
+    while kill -0 "$cell_pid" 2>/dev/null; do
+        if [[ -z "$dir" ]]; then
+            dir="$(find "$RUNS" -maxdepth 1 -type d -name "campaign_sdb-sql_${tag}_*_w${worker}" -newer "$marker" -print -quit 2>/dev/null || true)"
+        fi
+        if [[ -n "$dir" && -f "$dir/health.json" ]]; then
+            vals="$(python3 - "$dir/health.json" <<'PY'
+import json, sys
+try:
+    h = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+print(int(h.get("turns") or 0), int(h.get("tool_errors") or 0),
+      int(h.get("empty_responses") or 0), float(h.get("turn_secs_p50") or 0),
+      int(h.get("ref_refused") or 0), int(h.get("ref_queries") or 0))
+PY
+)" || vals=""
+            if [[ -n "$vals" ]]; then
+                read -r turns errors empty p50 refr refq <<< "$vals"
+                if (( turns >= 20 && errors >= 5 )) \
+                    && awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'; then
+                    printf '%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" > "$out"
+                    printf 'live provider fault: %s errors in %s turns\n' "$errors" "$turns" > "$dir/.live_stop"
+                    [[ "$worker" == "$WORKER_BASE" ]] && : > "$RUNS/.canary_failed"
+                    kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true
+                    return 0
+                fi
+                if (( turns >= 20 && empty >= 5 )) \
+                    && awk -v e="$empty" -v t="$turns" 'BEGIN { exit !(100 * e / t > 5) }'; then
+                    printf '%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" > "$out"
+                    printf 'live provider fault: %s empty responses in %s turns\n' "$empty" "$turns" > "$dir/.live_stop"
+                    [[ "$worker" == "$WORKER_BASE" ]] && : > "$RUNS/.canary_failed"
+                    kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true
+                    return 0
+                fi
+                if (( turns >= 30 )) && [[ "$worker" == "$WORKER_BASE" && ! -f "$RUNS/.canary_failed" ]]; then
+                    : > "$RUNS/.canary_ok"
+                fi
+                if awk -v p="$p50" 'BEGIN { exit !(p > 180) }'; then
+                    log "live health warning: worker $worker phase $phase median turn ${p50}s"
+                fi
+                if (( refq > 0 )) && awk -v r="$refr" -v q="$refq" 'BEGIN { exit !(100 * r / q > 10) }'; then
+                    log "live health warning: worker $worker phase $phase ref-sql ${refr}/${refq} refused"
+                fi
+            fi
+        fi
+        sleep "$poll"
+    done
+}
+
 run_cell() {
     local career="$1" model="$2" phase="$3" chain="$4" worker="$5" result="$6"
-    SDB_CELL_CAREER="$career" \
+    exec setsid env SDB_CELL_CAREER="$career" \
     SDB_CELL_PHASE="$phase" \
     SDB_CELL_CHAIN="$chain" \
     SDB_CELL_WORKER="$worker" \
@@ -590,8 +651,18 @@ run_lane() {
                 return 1
             fi
             result="$(mktemp)"
+            live_result="$(mktemp)"
+            marker="$RUNS/.grid-live-marker-$worker-$phase-$$"
+            : > "$marker"
             rc=0
-            run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" || rc=$?
+            run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" &
+            cell_pid=$!
+            live_check "$model" "$worker" "$phase" "$cell_pid" "$marker" "$live_result" &
+            monitor_pid=$!
+            wait "$cell_pid" || rc=$?
+            kill "$monitor_pid" 2>/dev/null || true
+            wait "$monitor_pid" 2>/dev/null || true
+            rm -f "$marker"
             id="$(result_get "$result" campaign_id)"
             local got_phase got_chain points cost stop billed
             got_phase="$(result_get "$result" phase)"
@@ -619,17 +690,22 @@ run_lane() {
             elif awk -v c="$cost" 'BEGIN { exit !(c > 0.99) }'; then
                 stop="cost > 0.99"
             fi
+            if [[ -s "$live_result" ]]; then
+                read -r live_id provider_turns provider_errors < "$live_result"
+                [[ -n "$live_id" ]] && id="$live_id"
+                stop="provider_fault"
+            fi
             # R68 F5: a finished phase whose live.log carries provider
             # tool-call errors above 2% of its turns is a provider fault,
             # not a model result. The ledger row says so and the run is
             # hidden before anything can publish it.
-            if [[ -n "$id" && "$id" != "—" ]] && provider_fault "$id"; then
+            if [[ "$stop" == "ok" && -n "$id" && "$id" != "—" ]] && provider_fault "$id"; then
                 read -r provider_turns provider_errors < <(provider_fault_counts "$RUNS/$id/live.log")
                 stop="provider_fault"
             fi
             billed="$(result_get "$result" billed_usd)"
             ledger_add "$idx" "$model" "$phase" "$worker" "${id:-—}" "${points:-0}" "${cost:-0}" "$stop" "$token"
-            rm -f "$result"
+            rm -f "$result" "$live_result"
             if [[ "$stop" == "provider_fault" ]]; then
                 mkdir -p "$RUNS/$id"
                 printf 'provider fault: %s errors in %s turns (%.2f%%)\n' \
@@ -728,10 +804,38 @@ run_grid() {
     fi
     local pids=() lane
     local rc=0
-    for ((lane = 0; lane < LANES; lane++)); do
-        run_lane "$lane" &
-        pids+=("$!")
-    done
+    local canary="${SDB_GRID_CANARY:-1}"
+    if [[ "$REHEARSAL" == "1" || "$DRY_RUN" == "1" ]]; then
+        canary=0
+    fi
+    mkdir -p "$RUNS"
+    rm -f "$RUNS/.canary_ok" "$RUNS/.canary_failed"
+    if [[ "$canary" == "1" && "$LANES" -gt 1 ]]; then
+        # R74 F2: lane 1 starts alone; the other lanes start only after
+        # its live check passed 30 turns cleanly. A stopped canary leaves
+        # .canary_failed and the other lanes never start.
+        run_lane 0 &
+        local canary_pid=$!
+        pids+=("$canary_pid")
+        while kill -0 "$canary_pid" 2>/dev/null; do
+            [[ -f "$RUNS/.canary_ok" ]] && break
+            sleep 0.2
+        done
+        local canary_done=0
+        kill -0 "$canary_pid" 2>/dev/null || canary_done=1
+        if [[ -f "$RUNS/.canary_ok" ]] \
+            || [[ "$canary_done" -eq 1 && ! -f "$RUNS/.canary_failed" && ! -f "$STOP" ]]; then
+            for ((lane = 1; lane < LANES; lane++)); do
+                run_lane "$lane" &
+                pids+=("$!")
+            done
+        fi
+    else
+        for ((lane = 0; lane < LANES; lane++)); do
+            run_lane "$lane" &
+            pids+=("$!")
+        done
+    fi
     for pid in "${pids[@]}"; do
         if ! wait "$pid"; then
             rc=1
@@ -786,6 +890,13 @@ if [[ "$fault_attempts" -gt 0 && "$phase" == "$fault_phase" ]]; then
         SDB_FAKE_ERRORS=0
     fi
 fi
+if [[ -n "${SDB_FAKE_HEALTH:-}" ]]; then
+    tag="${model//\//_}"; tag="${tag//:/_}"
+    hdir="${SDB_RUNS_DIR:?}/campaign_sdb-sql_${tag}_$(date -u +%Y%m%d_%H%M%S)_${RANDOM}_w${worker}"
+    mkdir -p "$hdir"
+    printf '%s\n' "$SDB_FAKE_HEALTH" > "$hdir/health.json"
+    sleep "${SDB_FAKE_LIVE_SLEEP:-1}"
+fi
 if [[ -n "${SDB_FAKE_TURNS:-}" ]]; then
     log="${SDB_RUNS_DIR:?}/$id/live.log"
     mkdir -p "$(dirname "$log")"
@@ -832,6 +943,8 @@ EOF
     CELL="$fake"
     SDB_GRID_SKIP_PREFLIGHT=1
     export SDB_GRID_SKIP_PREFLIGHT
+    SDB_GRID_CANARY=0
+    export SDB_GRID_CANARY
     # R65 F3: every self-test case gets a rich balance unless it overrides
     # it; the balance cases below drive the hold path explicitly.
     balance="$dir/balance.sh"
@@ -1664,6 +1777,173 @@ EOF
     echo "[self-test] a second fault stops the career and names both faults"
     unset SDB_FAKE_FAULT_PHASE SDB_FAKE_FAULT_ATTEMPTS SDB_FAKE_FAULT_COUNT
     unset SDB_FAKE_TURNS SDB_FAKE_ERRORS SDB_FAKE_PREFIX SDB_RUNS_DIR
+
+    # 24) R74 F2: a live minimax-shaped health (20 turns, 5 errors) stops
+    # the phase within its first 30 turns; the run is hidden and the grid
+    # holds. The F6 rerun faults again and the career STOPs.
+    scenario="$dir/twentyfour"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0
+    MAX_PHASE=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f2a
+    export SDB_FAKE_HEALTH='{"turns":20,"tool_errors":5,"ref_queries":0,"ref_refused":0,"turn_secs_p50":5.0,"turn_secs_max":20.0,"empty_responses":0,"billed_ratio":1.0}'
+    export SDB_FAKE_LIVE_SLEEP=1
+    export SDB_GRID_HEALTH_POLL=0.1
+    load_careers "$CAREERS_FILE"
+    ( run_grid ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "the live minimax health did not hold the grid"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    fi
+    hdir="$(find "$runs" -maxdepth 1 -type d -name 'campaign_sdb-sql_c1_*_w1' | head -1)"
+    [[ -f "$hdir/.live_stop" ]] || {
+        echo "the live check wrote no .live_stop"; kill "$pid" 2>/dev/null || true; exit 1; }
+    grep -q '5 errors in 20 turns' "$hdir/.live_stop" || {
+        echo "the live stop counts are wrong: $(cat "$hdir/.live_stop")"
+        kill "$pid" 2>/dev/null || true; exit 1; }
+    [[ -f "$hdir/.portal_hidden" ]] || {
+        echo "the live-stopped run is not hidden"; kill "$pid" 2>/dev/null || true; exit 1; }
+    rm -f "$HOLD"
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "the live fault did not rerun into a second hold"
+        kill "$pid" 2>/dev/null || true
+        exit 1
+    fi
+    rm -f "$HOLD"
+    rc=0
+    wait "$pid" || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "the double live fault did not STOP (rc=$rc)"; exit 1; }
+    got="$(awk -F'\t' 'NR > 1 { printf "%s:%s ", $3, $8 }' "$LEDGER")"
+    [[ "$got" == "1:provider_fault 1:provider_fault " ]] || {
+        echo "live-fault ledger: $got"; exit 1; }
+    echo "[self-test] the live check stops a minimax-shaped phase within 30 turns"
+    unset SDB_FAKE_HEALTH SDB_FAKE_LIVE_SLEEP SDB_GRID_HEALTH_POLL
+
+    # 25) A clean live health is not stopped.
+    scenario="$dir/twentyfive"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f2b
+    export SDB_FAKE_HEALTH='{"turns":100,"tool_errors":0,"ref_queries":10,"ref_refused":0,"turn_secs_p50":10.0,"turn_secs_max":40.0,"empty_responses":0,"billed_ratio":1.0}'
+    export SDB_FAKE_LIVE_SLEEP=1
+    export SDB_GRID_HEALTH_POLL=0.1
+    load_careers "$CAREERS_FILE"
+    run_grid || { echo "a clean live health failed the grid"; exit 1; }
+    stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
+    [[ "$stop" == "ok" ]] || { echo "a clean live health wrote '$stop'"; exit 1; }
+    if find "$runs" -maxdepth 2 -name .live_stop -print -quit | grep -q .; then
+        echo "a clean live health was stopped"; exit 1
+    fi
+    echo "[self-test] a clean live health is not stopped"
+    unset SDB_FAKE_HEALTH SDB_FAKE_LIVE_SLEEP SDB_GRID_HEALTH_POLL
+
+    # 26) A clean canary opens lanes 2 and 3 after 30 turns.
+    scenario="$dir/twentysix"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\nc2\nc3\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LANES=3
+    MAX_PHASE=1
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f2c
+    export SDB_FAKE_HEALTH='{"turns":30,"tool_errors":0,"ref_queries":10,"ref_refused":0,"turn_secs_p50":10.0,"turn_secs_max":40.0,"empty_responses":0,"billed_ratio":1.0}'
+    export SDB_FAKE_LIVE_SLEEP=2
+    export SDB_GRID_HEALTH_POLL=0.1
+    export SDB_GRID_CANARY=1
+    load_careers "$CAREERS_FILE"
+    run_grid || { echo "the clean-canary grid failed"; exit 1; }
+    workers="$(awk -F'\t' 'NR > 1 { print $4 }' "$LEDGER" | sort -u | paste -sd, -)"
+    [[ "$workers" == "1,2,3" ]] || { echo "clean canary workers: $workers"; exit 1; }
+    [[ -f "$runs/.canary_ok" ]] || { echo "the canary never passed 30 turns"; exit 1; }
+    echo "[self-test] a clean canary opens the other lanes after 30 turns"
+    unset SDB_FAKE_HEALTH SDB_FAKE_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_GRID_CANARY
+
+    # 27) A stopped canary never opens the other lanes.
+    scenario="$dir/twentyseven"
+    runs="$scenario/runs"
+    mkdir -p "$runs"
+    printf 'c1\nc2\nc3\n' > "$scenario/careers.txt"
+    CAREERS_FILE="$scenario/careers.txt"
+    LEDGER="$scenario/ledger.tsv"
+    HOLD="$scenario/hold"
+    STOP="$scenario/stop"
+    RUNS="$runs"
+    export SDB_RUNS_DIR="$runs"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    export SDB_GRID_TRACE
+    export SDB_FAKE_PREFIX=f2d
+    export SDB_FAKE_HEALTH='{"turns":20,"tool_errors":5,"ref_queries":0,"ref_refused":0,"turn_secs_p50":5.0,"turn_secs_max":20.0,"empty_responses":0,"billed_ratio":1.0}'
+    export SDB_FAKE_LIVE_SLEEP=1
+    export SDB_GRID_HEALTH_POLL=0.1
+    export SDB_GRID_CANARY=1
+    load_careers "$CAREERS_FILE"
+    ( run_grid ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "the stopped canary did not hold"; kill "$pid" 2>/dev/null || true; exit 1
+    fi
+    [[ -f "$runs/.canary_failed" ]] || {
+        echo "the canary did not record its failure"; kill "$pid" 2>/dev/null || true; exit 1; }
+    rm -f "$HOLD"
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        echo "the stopped canary did not rerun into a second hold"
+        kill "$pid" 2>/dev/null || true; exit 1
+    fi
+    rm -f "$HOLD"
+    rc=0
+    wait "$pid" || rc=$?
+    [[ "$rc" -eq 1 ]] || { echo "the stopped canary did not STOP (rc=$rc)"; exit 1; }
+    workers="$(awk -F'\t' 'NR > 1 { print $4 }' "$LEDGER" | sort -u | paste -sd, -)"
+    [[ "$workers" == "1" ]] || { echo "lanes started behind a stopped canary: $workers"; exit 1; }
+    echo "[self-test] a stopped canary never opens the other lanes"
+    unset SDB_FAKE_HEALTH SDB_FAKE_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_GRID_CANARY
+    unset SDB_FAKE_PREFIX SDB_RUNS_DIR
 
     echo "RESULT: PASS (grid self-test)"
 }
