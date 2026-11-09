@@ -502,8 +502,8 @@ career_state() {
 # errors, so a single bad turn in a short phase is not a provider fault.
 provider_fault_counts() {
     local log="$1" turns errors
-    turns="$(grep -c '\[BENCH-POLICY\] turn=' "$log" 2>/dev/null || true)"
-    errors="$(grep -cE 'provider stream ended with an error|Upstream error from' "$log" 2>/dev/null || true)"
+    turns="$(grep -ac '\[BENCH-POLICY\] turn=' "$log" 2>/dev/null || true)"
+    errors="$(grep -acE 'provider stream ended with an error|Upstream error from' "$log" 2>/dev/null || true)"
     printf '%s\t%s\n' "${turns:-0}" "${errors:-0}"
 }
 
@@ -623,8 +623,7 @@ run_lane() {
             # tool-call errors above 2% of its turns is a provider fault,
             # not a model result. The ledger row says so and the run is
             # hidden before anything can publish it.
-            if [[ "$stop" == "ok" && -n "$id" && "$id" != "—" ]] \
-                && provider_fault "$id"; then
+            if [[ -n "$id" && "$id" != "—" ]] && provider_fault "$id"; then
                 read -r provider_turns provider_errors < <(provider_fault_counts "$RUNS/$id/live.log")
                 stop="provider_fault"
             fi
@@ -642,7 +641,7 @@ run_lane() {
                     "$provider_errors" "$provider_turns" > "$HOLD"
                 log "lane $lane: career $idx $model phase $phase provider fault: $provider_errors errors in $provider_turns turns; hidden; hold at $HOLD"
                 wait_hold
-                return "$failed"
+                break
             fi
             # R67 F2: a bill above 1.25x list means the pin did not hold.
             if [[ "$stop" == "ok" && -n "$billed" && "$cost" != "0" ]] \
