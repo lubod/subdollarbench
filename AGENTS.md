@@ -221,7 +221,9 @@ A round's "done" record lives in its round file, not in
 
 - **Implementer:** `git commit --author="opencode <opencode@localhost>"`;
   message `RNN <ID>: <what>`, then a body that says why.
-- **Reviewer:** commits end with
+- **Reviewer:** the author is the operator's identity, `lubod
+  <lubo.drobny@gmail.com>` (operator, 2026-11-09; set in the repo's git
+  config); commits end with
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Merges use
   `--no-ff` with the message `Merge roundNN: <theme>`.
 - **Both:** one item per commit; never commit to master directly during
