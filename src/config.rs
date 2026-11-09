@@ -631,15 +631,31 @@ pub fn template_ports_for_worker(content: &str, base_port: u16, worker: u8) -> S
     // upstreams") never matches, so candidate ports on alias lines are
     // still rewritten.
     let alias_pat = ::regex::Regex::new(
-        r"(?i)(ref-redis|ref-http|upstream1|upstream2|upstream3)((\s*(-p|--port)\s*[= ]?)?\s*:?\s*\d+)?",
+        r"(?i)(ref-redis|ref-http|ref-sql|upstream1|upstream2|upstream3)((\s*(-p|--port)\s*[= ]?)?\s*:?\s*\d+)?",
     )
     .unwrap();
+    // The SQL reference's prose line says "`ref-sql`, port 5480" — the
+    // bare "port" is not attached to the alias, so the word rewrite would
+    // still turn it into the candidate's port. On a line that names the
+    // ref-sql alias, shield that prose port too.
+    let ref_port_pat =
+        ::regex::Regex::new(&format!(r"(?i)\bport\s+{}\b", ::regex::escape(&base))).unwrap();
     content
         .lines()
         .map(|line| {
             let mut stash: Vec<String> = Vec::new();
+            let pre = if line.to_lowercase().contains("ref-sql") {
+                ref_port_pat
+                    .replace_all(line, |caps: &::regex::Captures| {
+                        stash.push(caps[0].to_string());
+                        format!("@@SDBALIAS{}@@", stash.len() - 1)
+                    })
+                    .to_string()
+            } else {
+                line.to_string()
+            };
             let shielded = alias_pat
-                .replace_all(line, |caps: &::regex::Captures| {
+                .replace_all(&pre, |caps: &::regex::Captures| {
                     stash.push(caps[0].to_string());
                     format!("@@SDBALIAS{}@@", stash.len() - 1)
                 })
@@ -759,6 +775,18 @@ mod tests {
         let got = template_ports_for_worker(mixed, 8091, 3);
         assert!(got.contains(":8391"), "{got}");
         assert!(got.contains("upstream1:80"), "{got}");
+        // R74 F4: the SQL reference is an in-network alias on its own port;
+        // only the candidate's port may move. Without ref-sql in the alias
+        // list, the prompt told every worker to reach `ref-sql:5780` (the
+        // candidate port) and the reference (on 5480) refused.
+        let sql_ref =
+            "reference at `ref-sql`, port 5480 (`nc ref-sql 5480`); your server on `0.0.0.0:5480`";
+        let got = template_ports_for_worker(sql_ref, 5480, 3);
+        assert!(got.contains("ref-sql"), "{got}");
+        assert!(got.contains("port 5480"), "{got}");
+        assert!(got.contains("nc ref-sql 5480"), "{got}");
+        assert!(got.contains("0.0.0.0:5780"), "{got}");
+        assert!(!got.contains("port 5780"), "{got}");
     }
 
     #[test]
