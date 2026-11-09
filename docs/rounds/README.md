@@ -73,4 +73,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [72](72.md) | The expanded careers use the board's width: a full-width row, a compact one-line career label, phone cards, equal markers (R71-3; display only) | merged `6459c68` |
 | [73](73.md) | Price rows for glm-5.3-flash and ling-3.1-flash (opens after round 68) | superseded by 75 |
 | [74](74.md) | Run health: per-phase health numbers, a live check that stops a bad phase, a canary lane, an audit that gates publishing, the `ref-sql` dropouts fixed, health on the GUI | merged `2fa7f5b` |
-| [75](75.md) | A new rules version: the reference port fixed in the prompt, omp pinned for real, what the candidate sees graded, pins for 10 models, every model reruns | draft |
+| [75](75.md) | A new rules version: the reference port fixed in the prompt, omp pinned for real, what the candidate sees graded, pins for 10 models, every model reruns | open |
