@@ -63,6 +63,41 @@ impl PhaseHealth {
             self.empty_responses as f64 / self.turns as f64
         }
     }
+
+    /// R74 F5: the console's health colour against F2's thresholds. Red
+    /// is a provider fault (the live check stops it); amber is a warning
+    /// (a slow median turn or too many ref-sql refusals); green otherwise.
+    pub fn severity(&self) -> &'static str {
+        let tool = self.tool_errors >= 5 && self.tool_error_ratio() > 0.02;
+        let empty = self.empty_responses >= 5 && self.empty_ratio() > 0.05;
+        let billed = self.billed_ratio.map(|r| r > 1.25).unwrap_or(false);
+        if tool || empty || billed {
+            "red"
+        } else if self.turn_secs_p50 > 180.0 || self.ref_refused_ratio() > 0.10 {
+            "amber"
+        } else {
+            "green"
+        }
+    }
+
+    /// The compact health cell's title: every number F1 records.
+    pub fn title(&self) -> String {
+        let billed = match self.billed_ratio {
+            Some(r) => format!("{r:.3}"),
+            None => "—".to_string(),
+        };
+        format!(
+            "{} turns · {} tool errors · ref {}/{} · turn p50 {:.0}s max {:.0}s · {} empty · billed/list {}",
+            self.turns,
+            self.tool_errors,
+            self.ref_refused,
+            self.ref_queries,
+            self.turn_secs_p50,
+            self.turn_secs_max,
+            self.empty_responses,
+            billed
+        )
+    }
 }
 
 fn clock(line: &str) -> Option<u64> {
