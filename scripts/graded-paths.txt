@@ -39,6 +39,7 @@ plumbing src/sandbox/fixtures
 grader src/scoring.rs
 plumbing src/cost
 plumbing src/campaign.rs
+plumbing src/campaign
 grader src/prompts
 grader src/bench
 grader src/report/rules.rs

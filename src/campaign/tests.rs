@@ -4520,7 +4520,7 @@ fn r68_f4_validate_spec_lite_and_needs_errors() {
 /// clean.
 #[test]
 fn r74_f1_health_from_logs() {
-    let minimax = health_from_live_log(include_str!("fixtures/health/minimax-20261108-w1.log"));
+    let minimax = health_from_live_log(include_str!("fixtures/health/minimax-20261108-w1.txt"));
     assert_eq!(minimax.turns, 73, "minimax turns");
     assert_eq!(minimax.tool_errors, 25, "minimax provider tool errors");
     assert_eq!(minimax.ref_queries, 11, "minimax ref-sql queries");
@@ -4531,7 +4531,7 @@ fn r74_f1_health_from_logs() {
         minimax
     );
 
-    let luna = health_from_live_log(include_str!("fixtures/health/luna-pro-20261108-w3.log"));
+    let luna = health_from_live_log(include_str!("fixtures/health/luna-pro-20261108-w3.txt"));
     assert_eq!(luna.turns, 264, "luna turns");
     assert_eq!(luna.tool_errors, 0, "luna has no provider tool errors");
     assert!(luna.ref_queries > 0, "luna queried ref-sql");
@@ -4542,7 +4542,7 @@ fn r74_f1_health_from_logs() {
         luna
     );
 
-    let deep = health_from_live_log(include_str!("fixtures/health/deepseek-20261031.log"));
+    let deep = health_from_live_log(include_str!("fixtures/health/deepseek-20261031.txt"));
     assert_eq!(deep.turns, 60, "deepseek turns");
     assert_eq!(deep.tool_errors, 0, "deepseek has no provider tool errors");
     assert_eq!(deep.ref_refused, 0, "deepseek has no ref-sql refusals");
