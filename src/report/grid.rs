@@ -2612,6 +2612,19 @@ fn render_results(cells: &[CareerCell]) -> String {
         .map(|c| c.rules.as_str())
         .find(|r| !r.is_empty())
         .unwrap_or(crate::report::rules::RULES_VERSION);
+    // R75 F5: the .45 board's known issue, from round 74's health records.
+    // The line shows on the .45 page and on any page that still carries a
+    // .45 career, so the old board says what it was.
+    // The fallback (an export with only .45 careers, rendered by a newer
+    // binary) needs current to be empty; a .46 board with .45 history in
+    // the same runs dir must not carry the old board's known issue.
+    let known_issue = if rules == "2026-10-19.45"
+        || (current.is_empty() && cells.iter().any(|c| c.rules == "2026-10-19.45"))
+    {
+        "<div class=\"mut note\"><b>Known issue (rules 2026-10-19.45):</b> the stage prompt gave the reference server's port as the lane's port (5580, 5680 or 5780 instead of 5480), so a reference query could be refused. Reference queries refused, from the health records: anthropic/claude-haiku-5.5 3/120 (2.5%), deepseek/deepseek-v4.1-flash-1017 10/283 (3.5%), openai/gpt-6-luna 16/89 (18.0%), openai/gpt-6-luna-pro 23/98 (23.5%), qwen/qwen3.8-flash 6/270 (2.2%), xiaomi/mimo-v2.6-flash 11/424 (2.6%). Fixed in 2026-11-09.46.</div>".to_string()
+    } else {
+        String::new()
+    };
     let image = current
         .iter()
         .filter_map(|c| c.sandbox_image.as_deref())
@@ -2789,7 +2802,7 @@ fn render_results(cells: &[CareerCell]) -> String {
     ));
     h.push_str(section_nav());
     h.push_str(&format!(
-        "<section id=\"measured\" class=\"methodology measured\"><h2>What it measured</h2><div class=\"wrap\"><table class=\"measured-table\"><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>cap policy: at list price for runs from .39; each career records its own; $0.99 per phase × 4 phases = ${:.2}; 21 tickets (0-20)</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}</section>",
+        "<section id=\"measured\" class=\"methodology measured\"><h2>What it measured</h2><div class=\"wrap\"><table class=\"measured-table\"><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>cap policy: at list price for runs from .39; each career records its own; $0.99 per phase × 4 phases = ${:.2}; 21 tickets (0-20)</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}{known_issue}</section>",
         esc(rules),
         esc(crate::report::rules::sqlite_version()),
         esc(image),
@@ -2959,10 +2972,26 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
             *fingerprint_careers.entry(f.clone()).or_default() += 1;
         }
     }
+    // R75 F5: the models with every current-rules career finished. The
+    // publish gate refuses an export with fewer than 3 of them.
+    let mut model_done: HashMap<&str, bool> = HashMap::new();
+    for c in &cells {
+        if c.key.current_rules && !c.rehearsal && !c.smoke {
+            let done = model_done.entry(c.model.as_str()).or_insert(true);
+            *done = *done && c.finished;
+        }
+    }
+    let mut ranked_models: Vec<&str> = model_done
+        .into_iter()
+        .filter(|(_, done)| *done)
+        .map(|(model, _)| model)
+        .collect();
+    ranked_models.sort();
     let meta = serde_json::json!({
         "rules_version": ranked.iter().map(|c| c.rules.as_str()).find(|r| !r.is_empty()).unwrap_or(crate::report::rules::RULES_VERSION),
         "current_rules": crate::report::rules::RULES_VERSION,
         "ranked_rules": ranked_rules,
+        "ranked_models": ranked_models,
         "fingerprint": fingerprint,
         "ranked_fingerprints": ranked_fingerprints,
         "fingerprint_careers": fingerprint_careers,
@@ -3654,6 +3683,9 @@ mod tests {
         let (base, runs, out) = fixture("r44fp");
         career_with_stamp(&runs, "f1", "m1", [1.0; 4], [0.01; 4], "fp-a");
         career_with_stamp(&runs, "f2", "m2", [2.0; 4], [0.01; 4], "fp-b");
+        // R75 F5: the publish gate needs 3 models with finished careers;
+        // this career keeps the fingerprint set at fp-a and fp-b.
+        career_with_stamp(&runs, "f3", "m3", [3.0; 4], [0.01; 4], "fp-a");
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         let fps: Vec<String> = meta["ranked_fingerprints"]
@@ -3669,7 +3701,7 @@ mod tests {
         // R66 F2: two fingerprints under one rules version are listed with
         // their counts, not warned about.
         assert!(html.contains("Graded under"), "{html}");
-        assert!(html.contains("<code>fp-a</code> (1 career)"), "{html}");
+        assert!(html.contains("<code>fp-a</code> (2 careers)"), "{html}");
         assert!(html.contains("<code>fp-b</code> (1 career)"), "{html}");
         assert!(
             html.contains("Fingerprints differ when the harness or the price list changed"),
@@ -4059,6 +4091,56 @@ mod tests {
         // Portal polish: a smoke cell is a footnote, not a row.
         assert!(board.contains("Not ranked: a smoke cell scored"), "{board}");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R75 F5: the .45 results page carries the known issue and the
+    /// per-model reference-refusal shares; a current-rules page does not.
+    #[test]
+    fn r75_f5_known_issue() {
+        let (base, runs, out) = fixture("r75known");
+        career(&runs, "old", "m-old", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            set_phase_rules(&runs, "old", phase, "2026-10-19.45");
+        }
+        let cells = careers(runs.to_str().unwrap());
+        let html = render_results(&cells);
+        for needle in [
+            "Known issue (rules 2026-10-19.45)",
+            "5480",
+            "anthropic/claude-haiku-5.5 3/120 (2.5%)",
+            "deepseek/deepseek-v4.1-flash-1017 10/283 (3.5%)",
+            "openai/gpt-6-luna 16/89 (18.0%)",
+            "openai/gpt-6-luna-pro 23/98 (23.5%)",
+            "qwen/qwen3.8-flash 6/270 (2.2%)",
+            "xiaomi/mimo-v2.6-flash 11/424 (2.6%)",
+            "Fixed in 2026-11-09.46",
+        ] {
+            assert!(
+                html.contains(needle),
+                "the .45 results page misses {needle}: {html}"
+            );
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let exported = read(&out.join("results.html"));
+        assert!(
+            exported.contains("Known issue (rules 2026-10-19.45)"),
+            "{exported}"
+        );
+        let (base2, runs2, _) = fixture("r75known-current");
+        career(&runs2, "new", "m-new", [1.0; 4], [0.01; 4]);
+        // A .46 board whose runs dir still holds .45 history: the .45 line
+        // must not follow it.
+        career(&runs2, "old2", "m-old2", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            set_phase_rules(&runs2, "old2", phase, "2026-10-19.45");
+        }
+        let fresh = render_results(&careers(runs2.to_str().unwrap()));
+        assert!(
+            !fresh.contains("Known issue (rules 2026-10-19.45)"),
+            "{fresh}"
+        );
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&base2);
     }
 
     /// R64 F1 (B1, B2, B3): the header counts ranked careers only, points
@@ -4975,7 +5057,7 @@ mod tests {
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
         let html = read(&out.join("results.html"));
         assert!(html.contains("<th>Prices</th>"), "{html}");
-        assert!(html.contains("2026-11-08"), "{html}");
+        assert!(html.contains("2026-11-09"), "{html}");
         assert!(html.contains("base rates per call"), "{html}");
         let mimo = format!(
             "{}</span> — none",

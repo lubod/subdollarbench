@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-11-08",
+  "as_of": "2026-11-09",
   "source": "OpenRouter /api/v1/models; exact catalog ids; cache_read is input_cache_read, cache_write is input_cache_write or the prompt rate when absent",
   "models": [
     {
@@ -122,11 +122,27 @@
     },
     {
       "id": "minimax/minimax-m3.1-flash",
-      "prompt_per_million": 0.1125,
-      "completion_per_million": 0.45,
-      "cache_read_per_million": 0.01125,
-      "cache_write_per_million": 0.1125,
-      "provider": "gmicloud/fp8"
+      "prompt_per_million": 0.075,
+      "completion_per_million": 0.3,
+      "cache_read_per_million": 0.0075,
+      "cache_write_per_million": 0.075,
+      "provider": "minimax"
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "provider": "z-ai/fp8",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.03,
+      "cache_write_per_million": 0.15
+    },
+    {
+      "id": "inclusionai/ling-3.1-flash",
+      "provider": "novita",
+      "prompt_per_million": 0.045,
+      "completion_per_million": 0.135,
+      "cache_read_per_million": 0.009,
+      "cache_write_per_million": 0.045
     },
     {
       "id": "openai/gpt-6-luna-pro",

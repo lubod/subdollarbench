@@ -118,6 +118,17 @@ if not int(v.get("ranked") or 0) > 0:
 if int(v.get("ranked_rehearsal") or 0) > 0:
     print("[publish] refusal: a rehearsal or smoke cell is in the ranked set", file=sys.stderr)
     raise SystemExit(1)
+# R75 F5: no empty board. An export with fewer than 3 models whose
+# current-rules careers all finished is refused, so the public site keeps
+# the last full bundle. An older binary has no ranked_models field; its
+# models list is the whole export, and its export is the current board.
+models = v.get("ranked_models")
+if models is None:
+    models = v.get("models") or []
+if not isinstance(models, list) or len(models) < 3:
+    print("[publish] refusal: %d model(s) with all their careers finished under %s (need 3): %r"
+          % (len(models), current, models), file=sys.stderr)
+    raise SystemExit(1)
 PY
     [[ -f "$bar" ]] || { echo "[publish] refusal: flake record missing ($bar)" >&2; return 1; }
     grep -q '^RESULT: PASS' "$bar" || {
@@ -206,7 +217,7 @@ if [[ "$self_test" -eq 1 ]]; then
     mkdir -p "$good" "$target"
     printf '<html>board</html>\n' > "$good/index.html"
     printf '<html>results</html>\n' > "$good/results.html"
-    printf '{"careers":3,"ranked":3,"current_rules":"2026-10-19.42","ranked_rules":["2026-10-19.42"],"fingerprint":"fp-binary","ranked_fingerprints":["fp-one"],"fingerprint_careers":{"fp-one":3}}\n' > "$good/grid.json"
+    printf '{"careers":3,"ranked":3,"current_rules":"2026-10-19.42","ranked_rules":["2026-10-19.42"],"ranked_models":["m-one","m-two","m-three"],"fingerprint":"fp-binary","ranked_fingerprints":["fp-one"],"fingerprint_careers":{"fp-one":3}}\n' > "$good/grid.json"
     bar="$root/flake.txt"
     printf 'RESULT: PASS\n' > "$bar"
 
@@ -253,6 +264,24 @@ PY
         echo '[self-test] mixed rules versions were accepted' >&2; exit 1
     fi
     echo '[self-test] mixed rules versions refused'
+
+    # R75 F5: 2 complete models refuse, 3 pass (the good export).
+    two="$root/two-models"
+    cp -a "$good" "$two"
+    python3 - "$two/grid.json" <<'PY'
+import json,sys
+p=sys.argv[1]; v=json.load(open(p))
+v["ranked_models"]=["m-one","m-two"]
+json.dump(v,open(p,"w"))
+PY
+    rc=0
+    out="$(validate_export "$two" "$bar" 2>&1)" || rc=$?
+    [[ "$rc" -ne 0 ]] || { echo '[self-test] 2 complete models were accepted' >&2; exit 1; }
+    grep -q '2 model(s) with all their careers finished' <<<"$out" || {
+        echo "[self-test] the 2-model refusal did not name the count: $out" >&2
+        exit 1
+    }
+    echo '[self-test] 2 complete models refused, 3 pass'
 
     rehearsal="$root/rehearsal"
     cp -a "$good" "$rehearsal"

@@ -3,9 +3,11 @@
 #
 # One tiny call through the sandbox's omp (the same image and ~/.omp mount
 # the cells use), then OpenRouter's generation API. It passes only when
-# omp sent exactly the requested id, OpenRouter served that id (its dated
-# id starts with it) from the pinned provider, and the bill is within
-# 1.25x of the snapshot price for the call.
+# omp sent exactly the requested id, OpenRouter served the model's
+# canonical_slug exactly (not a prefix), the record's provider is the pin,
+# and the bill is within 1.25x of the snapshot price for the record's own
+# native token counts (prompt, cached, completion and cache writes) with
+# all four snapshot rates.
 #
 # Usage: scripts/model-check.sh <model>
 #        scripts/model-check.sh --slug <model>
@@ -26,6 +28,7 @@
 #   SDB_MODEL_CHECK_IMAGE_DIGEST      image digest instead of docker inspect
 #   SDB_MODEL_CHECK_SESSION_JSON      a canned omp session file
 #   SDB_MODEL_CHECK_GENERATION_JSON   a canned generation response
+#   SDB_MODEL_CHECK_MODELS_JSON       a canned /api/v1/models response
 #   SDB_ENV_FILE                      where to read OPENROUTER_API_KEY
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -87,25 +90,47 @@ if [[ "$mode" == "self-test" ]]; then
         export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:selftest"
         mkdir -p "$SDB_MODEL_CHECK_DIR"
 
-        # The snapshot rates for the pinned fixture model.
-        read -r rate_prompt rate_completion < <(python3 - "$ROOT/src/cost/model_prices.json" <<'PY'
+        # The snapshot rates for a fixture model (all four).
+        snapshot_rates() {
+            python3 - "$ROOT/src/cost/model_prices.json" "$1" <<'PY'
 import json, sys
 snap = json.load(open(sys.argv[1]))
+want = sys.argv[2].lower()
 for e in snap["models"]:
-    if e["id"] == "openai/gpt-6-luna-pro":
-        print(e["prompt_per_million"], e["completion_per_million"])
+    if e["id"].lower() == want:
+        print(e["prompt_per_million"], e["cache_read_per_million"],
+              e["cache_write_per_million"], e["completion_per_million"])
         break
 else:
-    raise SystemExit("gpt-6-luna-pro is missing from the snapshot")
+    raise SystemExit("missing from the snapshot")
 PY
-)
+        }
+        read -r rate_prompt rate_cache_read rate_cache_write rate_completion \
+            < <(snapshot_rates "openai/gpt-6-luna-pro")
+
+        # R75 F4: the canonical slugs (a canned /api/v1/models response).
+        cat > "$dir/models.json" <<'JSON'
+{"data":[
+ {"id":"openai/gpt-6-luna-pro","canonical_slug":"openai/gpt-6-luna-pro-20260922"},
+ {"id":"tencent/hy4","canonical_slug":"tencent/hy4-20261104"},
+ {"id":"z-ai/glm-5.3","canonical_slug":"z-ai/glm-5.3-20260101"},
+ {"id":"deepseek/deepseek-v4.1-flash-1017","canonical_slug":"deepseek/deepseek-v4.1-flash-20261017"}
+]}
+JSON
+        export SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json"
 
         fixture() {
             local sent="$1" served="$2" provider="$3" bill="$4" fallback="$5"
+            local tokens_prompt="${6:-100}" tokens_cached="${7:-0}"
+            local tokens_completion="${8:-10}" tokens_write="${9:-0}"
             python3 - "$dir/session.jsonl" "$dir/generation.json" \
-                "$sent" "$served" "$provider" "$bill" "$fallback" <<'PY'
+                "$sent" "$served" "$provider" "$bill" "$fallback" \
+                "$tokens_prompt" "$tokens_cached" "$tokens_completion" \
+                "$tokens_write" <<'PY'
 import json, sys
-session, generation, sent, served, provider, bill, fallback = sys.argv[1:8]
+(session, generation, sent, served, provider, bill, fallback,
+ tokens_prompt, tokens_cached, tokens_completion,
+ tokens_write) = sys.argv[1:12]
 with open(session, "w") as f:
     f.write(json.dumps({
         "type": "model_change",
@@ -127,8 +152,12 @@ with open(generation, "w") as f:
         "model": served,
         "provider_name": provider,
         "total_cost": float(bill),
-        "tokens_prompt": 100,
-        "tokens_completion": 10,
+        "tokens_prompt": int(tokens_prompt) * 3 // 5,
+        "tokens_completion": 1,
+        "native_tokens_prompt": int(tokens_prompt),
+        "native_tokens_cached": int(tokens_cached),
+        "native_tokens_completion": int(tokens_completion),
+        "native_tokens_cache_write": int(tokens_write),
     }}, f)
 PY
         }
@@ -232,6 +261,33 @@ PY
         expect_pass "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an exact match passes"
 
+        case_name=all-rates
+        read -r p cr cw c < <(snapshot_rates "openai/gpt-6-luna-pro")
+        fixture "openrouter/openai/gpt-6-luna-pro" \
+            "openai/gpt-6-luna-pro-20260922" "OpenAI" \
+            "$(awk -v p="$p" -v cr="$cr" -v cw="$cw" -v c="$c" \
+                'BEGIN { printf "%.10f", (30 * p + 50 * cr + 20 * cw + 10 * c) / 1000000 }')" \
+            0 100 50 10 20
+        expect_pass "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] the bill uses the fresh, cached, write and completion counts"
+
+        case_name=dated-canonical
+        read -r p cr cw c < <(snapshot_rates "deepseek/deepseek-v4.1-flash-1017")
+        fixture "openrouter/deepseek/deepseek-v4.1-flash-1017" \
+            "deepseek/deepseek-v4.1-flash-20261017" "DeepSeek" \
+            "$(awk -v p="$p" -v c="$c" \
+                'BEGIN { printf "%.10f", 100 * p / 1000000 + 10 * c / 1000000 }')" 0
+        expect_pass "openrouter/deepseek/deepseek-v4.1-flash-1017"
+        echo "[self-test] a dated canonical_slug passes"
+
+        case_name=served-prefix
+        read -r p cr cw c < <(snapshot_rates "tencent/hy4")
+        fixture "openrouter/tencent/hy4" "tencent/hy4-preview-20260101" "Tencent" \
+            "$(awk -v p="$p" -v c="$c" \
+                'BEGIN { printf "%.10f", 100 * p / 1000000 + 10 * c / 1000000 }')" 0
+        expect_fail "want canonical tencent/hy4-20261104" "openrouter/tencent/hy4"
+        echo "[self-test] a served id that only shares the prefix fails"
+
         case_name=gmicloud-tool-error
         tool_set "provider stream ended with an error" 1 1
         expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
@@ -292,16 +348,27 @@ for e in snap["models"]:
             "found": True,
             "provider": e.get("provider") or "",
             "prompt": e["prompt_per_million"],
+            "cache_read": e["cache_read_per_million"],
+            "cache_write": e["cache_write_per_million"],
             "completion": e["completion_per_million"],
         }))
         break
 else:
-    print(json.dumps({"found": False, "provider": "", "prompt": 0, "completion": 0}))
+    print(json.dumps({
+        "found": False,
+        "provider": "",
+        "prompt": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "completion": 0,
+    }))
 PY
 )"
 pin="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["provider"])' "$snapshot")"
 found="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["found"] else "0")' "$snapshot")"
 rate_prompt="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["prompt"])' "$snapshot")"
+rate_cache_read="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["cache_read"])' "$snapshot")"
+rate_cache_write="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["cache_write"])' "$snapshot")"
 rate_completion="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["completion"])' "$snapshot")"
 
 if [[ -n "$pin" ]]; then
@@ -335,6 +402,49 @@ cleanup() {
     rm -rf "$work"
 }
 trap cleanup EXIT
+
+# R75 F4: the served id must equal the model's canonical_slug exactly
+# (live 2026-11-09: sent deepseek/deepseek-v4.1-flash-1017, served
+# deepseek/deepseek-v4.1-flash-20261017). A prefix would let tencent/hy4
+# match tencent/hy4-preview-..., so it is compared exactly.
+models_json="${SDB_MODEL_CHECK_MODELS_JSON:-}"
+if [[ -z "$models_json" ]]; then
+    models_json="$work/models.json"
+    if ! curl -sS https://openrouter.ai/api/v1/models -o "$models_json"; then
+        models_json=""
+    fi
+fi
+canonical=""
+if [[ -n "$models_json" && -s "$models_json" ]]; then
+    canonical="$(python3 - "$models_json" "$id" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1])).get("data") or []
+except Exception:
+    raise SystemExit(0)
+want = sys.argv[2].lower()
+for m in data:
+    if (m.get("id") or "").lower() == want:
+        print(m.get("canonical_slug") or "")
+        break
+PY
+)"
+fi
+if [[ -z "$canonical" ]]; then
+    {
+        echo "model:    $id"
+        echo "sent:     (not run)"
+        echo "served:   (not queried)"
+        echo "provider: (not queried)"
+        echo "bill:     (not queried)"
+        echo "canonical: (missing)"
+        echo "time:     $time_utc"
+        echo "image:    $image"
+        echo "RESULT: FAIL (no canonical_slug for $id in /api/v1/models)"
+    } > "$record"
+    echo "[model-check] FATAL: no canonical_slug for $id ($record)" >&2
+    exit 1
+fi
 
 session_file="${SDB_MODEL_CHECK_SESSION_JSON:-}"
 generation_file="${SDB_MODEL_CHECK_GENERATION_JSON:-}"
@@ -498,10 +608,13 @@ if [[ -z "$response_id" ]]; then
     exit 1
 fi
 
-if [[ -z "$generation_file" ]]; then
-    generation_file="$(mktemp)"
-    # The generation record is eventually consistent: a query right after
-    # the call can answer 404 "not found" (live 2026-11-09). Retry briefly.
+# R75 F4: the generation record is eventually consistent: a query right
+# after the call can answer 404 "not found" (live 2026-11-09). Retry for
+# up to 60 s; if it is still missing, run the tool-call round trip and
+# retry once more for 60 s (the record can take minutes), then FAIL with
+# that in the record.
+fetch_generation() {
+    local attempts="$1" attempt rc
     attempt=0
     while :; do
         attempt=$((attempt + 1))
@@ -526,106 +639,27 @@ data = v.get("data") or {}
 raise SystemExit(0 if data.get("id") else 1)
 PY
         then
-            break
+            return 0
         fi
-        if [[ "$attempt" -ge 20 ]]; then
-            {
-                echo "model:    $id"
-                echo "sent:     $(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$parsed")"
-                echo "served:   (generation query failed)"
-                echo "provider: (not queried)"
-                echo "bill:     (not queried)"
-                echo "time:     $time_utc"
-                echo "image:    $image"
-                echo "RESULT: FAIL (generation API exit $rc)"
-            } > "$record"
-            echo "[model-check] FATAL: generation API exit $rc after $attempt attempts ($record)" >&2
-            exit 1
+        if [[ "$attempt" -ge "$attempts" ]]; then
+            GEN_ERROR="generation API exit $rc"
+            return 1
         fi
         sleep 1
     done
+}
+
+gen_missing=0
+gen_note=""
+if [[ -z "$generation_file" ]]; then
+    generation_file="$work/generation.json"
 fi
-
-verdict="$(
-    python3 - "$id" "$pin" "$found" "$rate_prompt" "$rate_completion" \
-        "$parsed" "$generation_file" <<'PY'
-import json, re, sys
-
-(model_id, pin, found, rate_prompt, rate_completion,
- parsed_path, generation_path) = sys.argv[1:8]
-parsed = json.loads(parsed_path)
-gen = json.load(open(generation_path)).get("data") or {}
-
-sent = (parsed.get("sent") or "").removeprefix("openrouter/")
-served = gen.get("model") or ""
-provider_name = gen.get("provider_name") or ""
-response_id = parsed.get("responseId") or ""
-gen_id = gen.get("id") or ""
-fallback = bool(parsed.get("fallback"))
-bill = float(gen.get("total_cost") or 0.0)
-tokens_prompt = int(gen.get("tokens_prompt") or 0)
-tokens_completion = int(gen.get("tokens_completion") or 0)
-priced = found == "1"
-pinned = bool(pin)
-
-reasons = []
-sent_ok = sent.lower() == model_id.lower()
-if not sent_ok:
-    reasons.append("sent %s, want %s" % (sent or "(none)", model_id))
-if fallback:
-    reasons.append("omp resolved a fallback model")
-served_ok = served.lower().startswith(model_id.lower())
-if not served_ok:
-    reasons.append("served %s, want %s*" % (served or "(none)", model_id))
-if gen_id and gen_id != response_id:
-    reasons.append("generation id %s, want %s" % (gen_id, response_id))
-
-provider_ok = None
-if pinned:
-    base = re.sub(r"[^a-z0-9]", "", pin.split("/")[0].lower())
-    seen = re.sub(r"[^a-z0-9]", "", provider_name.lower())
-    provider_ok = bool(base) and (seen == base or seen.startswith(base))
-    if not provider_ok:
-        reasons.append("provider %s, want pin %s" % (provider_name or "(none)", pin))
-
-bill_ok = None
-expected = (tokens_prompt * float(rate_prompt) + tokens_completion * float(rate_completion)) / 1_000_000
-ratio = None
-if priced and expected > 0:
-    ratio = bill / expected
-    bill_ok = ratio <= 1.25
-    if not bill_ok:
-        reasons.append("bill $%.8f is %.2fx the snapshot $%.8f" % (bill, ratio, expected))
-elif not priced:
-    pass
-
-print(json.dumps({
-    "sent": sent,
-    "served": served,
-    "provider_name": provider_name,
-    "pinned": pinned,
-    "priced": priced,
-    "provider_ok": provider_ok,
-    "bill": bill,
-    "expected": expected,
-    "ratio": ratio,
-    "bill_ok": bill_ok,
-    "reasons": reasons,
-    "ok": not reasons,
-}))
-PY
-)"
-
-ok="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["ok"] else "0")' "$verdict")"
-sent="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$verdict")"
-served="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["served"])' "$verdict")"
-provider_name="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["provider_name"])' "$verdict")"
-ratio="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("" if v["ratio"] is None else "%.3f" % v["ratio"])' "$verdict")"
-bill="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["bill"])' "$verdict")"
-expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["expected"])' "$verdict")"
-pinned="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["pinned"] else "0")' "$verdict")"
-priced="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["priced"] else "0")' "$verdict")"
-reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])["reasons"]))' "$verdict")"
+if [[ -n "${SDB_MODEL_CHECK_GENERATION_JSON:-}" ]]; then
+    : # canned by the self-test
+elif ! fetch_generation 60; then
+    gen_missing=1
+    gen_note="missing after 60 s; retried for 60 s after the tool calls"
+fi
 
 # R68 F3: the tool-call round trip, twice. The prompt needs two bash calls
 # with arguments; the first command's output must appear and no provider
@@ -661,6 +695,156 @@ for i in 1 2; do
     [[ "$error" == "yes" ]] && tool_errors=$((tool_errors + 1))
     [[ "$output" == "yes" && "$error" == "no" ]] || tool_ok=0
 done
+
+if [[ "$gen_missing" == "1" ]]; then
+    fetch_generation 60 || true
+fi
+
+if [[ ! -s "$generation_file" ]] || ! python3 - "$generation_file" <<'PY'
+import json, sys
+try:
+    v = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+data = v.get("data") or {}
+raise SystemExit(0 if data.get("id") else 1)
+PY
+then
+    {
+        echo "model:    $id"
+        echo "sent:     $(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$parsed")"
+        echo "served:   (generation query failed)"
+        echo "provider: (not queried)"
+        echo "bill:     (not queried)"
+        echo "canonical: $canonical"
+        if [[ -n "$gen_note" ]]; then
+            echo "generation: $gen_note"
+        fi
+        for line in "${tool_lines[@]}"; do
+            echo "$line"
+        done
+        echo "tool-calls: $tool_outputs/2 output, $tool_errors/2 errors"
+        echo "time:     $time_utc"
+        echo "image:    $image"
+        echo "RESULT: FAIL (${GEN_ERROR:-generation API}; ${gen_note:-no record})"
+    } > "$record"
+    echo "[model-check] FATAL: ${GEN_ERROR:-generation API}; ${gen_note:-no record} ($record)" >&2
+    exit 1
+fi
+
+verdict="$(
+    python3 - "$id" "$canonical" "$pin" "$found" "$rate_prompt" \
+        "$rate_cache_read" "$rate_cache_write" "$rate_completion" \
+        "$parsed" "$generation_file" <<'PY'
+import json, re, sys
+
+(model_id, canonical, pin, found, rate_prompt, rate_cache_read,
+ rate_cache_write, rate_completion, parsed_path, generation_path) = sys.argv[1:11]
+parsed = json.loads(parsed_path)
+gen = json.load(open(generation_path)).get("data") or {}
+
+sent = (parsed.get("sent") or "").removeprefix("openrouter/")
+served = gen.get("model") or ""
+provider_name = gen.get("provider_name") or ""
+response_id = parsed.get("responseId") or ""
+gen_id = gen.get("id") or ""
+fallback = bool(parsed.get("fallback"))
+bill = float(gen.get("total_cost") or 0.0)
+
+
+def num(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# R75 F4: the provider's own counts, the same basis the bill is charged
+# on. tokens_prompt/tokens_completion are OpenRouter's tokenizer counts;
+# the native counts are what the provider billed (live 2026-11-09: an
+# Anthropic reply billed 18 prompt + 4 completion where OpenRouter
+# counted 6 + 1).
+tokens_prompt = num(gen.get("native_tokens_prompt")) or num(gen.get("tokens_prompt"))
+tokens_cached = num(gen.get("native_tokens_cached")) or num(gen.get("tokens_cached"))
+tokens_completion = num(gen.get("native_tokens_completion")) or num(gen.get("tokens_completion"))
+tokens_write = num(gen.get("native_tokens_cache_write")) or num(gen.get("tokens_cache_write"))
+# native_tokens_prompt is the TOTAL prompt, cached and written tokens
+# included; the calculator's prompt_tokens is the fresh part. Live
+# 2026-11-09, gpt-6-luna-pro: 8456 native prompt, 2528 cached, and
+# $0.00064058 = 5928*0.1 + 2528*0.01 + 45*0.5 per million.
+tokens_fresh = max(0, tokens_prompt - tokens_cached - tokens_write)
+priced = found == "1"
+pinned = bool(pin)
+
+reasons = []
+sent_ok = sent.lower() == model_id.lower()
+if not sent_ok:
+    reasons.append("sent %s, want %s" % (sent or "(none)", model_id))
+if fallback:
+    reasons.append("omp resolved a fallback model")
+served_ok = bool(canonical) and served.lower() == canonical.lower()
+if not served_ok:
+    reasons.append("served %s, want canonical %s" % (served or "(none)", canonical or "(none)"))
+if gen_id and gen_id != response_id:
+    reasons.append("generation id %s, want %s" % (gen_id, response_id))
+
+provider_ok = None
+if pinned:
+    base = re.sub(r"[^a-z0-9]", "", pin.split("/")[0].lower())
+    seen = re.sub(r"[^a-z0-9]", "", provider_name.lower())
+    provider_ok = bool(base) and (seen == base or seen.startswith(base))
+    if not provider_ok:
+        reasons.append("provider %s, want pin %s" % (provider_name or "(none)", pin))
+
+bill_ok = None
+expected = (
+    tokens_fresh * float(rate_prompt)
+    + tokens_cached * float(rate_cache_read)
+    + tokens_write * float(rate_cache_write)
+    + tokens_completion * float(rate_completion)
+) / 1_000_000
+ratio = None
+if priced and expected > 0:
+    ratio = bill / expected
+    bill_ok = ratio <= 1.25
+    if not bill_ok:
+        reasons.append("bill $%.8f is %.2fx the snapshot $%.8f" % (bill, ratio, expected))
+
+print(json.dumps({
+    "sent": sent,
+    "served": served,
+    "canonical": canonical,
+    "provider_name": provider_name,
+    "pinned": pinned,
+    "priced": priced,
+    "provider_ok": provider_ok,
+    "bill": bill,
+    "expected": expected,
+    "ratio": ratio,
+    "bill_ok": bill_ok,
+    "tokens_fresh": tokens_fresh,
+    "tokens_prompt": tokens_prompt,
+    "tokens_cached": tokens_cached,
+    "tokens_completion": tokens_completion,
+    "tokens_write": tokens_write,
+    "reasons": reasons,
+    "ok": not reasons,
+}))
+PY
+)"
+
+ok="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["ok"] else "0")' "$verdict")"
+sent="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$verdict")"
+served="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["served"])' "$verdict")"
+provider_name="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["provider_name"])' "$verdict")"
+ratio="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("" if v["ratio"] is None else "%.3f" % v["ratio"])' "$verdict")"
+bill="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["bill"])' "$verdict")"
+expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["expected"])' "$verdict")"
+tokens_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d fresh, %d cached, %d completion, %d cache write" % (v["tokens_fresh"], v["tokens_cached"], v["tokens_completion"], v["tokens_write"]))' "$verdict")"
+pinned="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["pinned"] else "0")' "$verdict")"
+priced="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["priced"] else "0")' "$verdict")"
+reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])["reasons"]))' "$verdict")"
+
 if [[ "$tool_ok" != "1" ]]; then
     ok=0
     if [[ -n "$reasons" ]]; then
@@ -674,6 +858,7 @@ fi
     echo "model:    $id"
     echo "sent:     $sent"
     echo "served:   $served"
+    echo "canonical: $canonical"
     if [[ "$pinned" == "1" ]]; then
         echo "provider: $provider_name (pin: $pin)"
     else
@@ -681,8 +866,13 @@ fi
     fi
     if [[ "$priced" == "1" ]]; then
         echo "bill:     \$$bill (snapshot \$$expected, ratio $ratio)"
+        echo "tokens:   $tokens_line (native)"
     else
         echo "bill:     \$$bill (no snapshot row; bill check skipped)"
+        echo "tokens:   $tokens_line (native)"
+    fi
+    if [[ -n "$gen_note" ]]; then
+        echo "generation: $gen_note"
     fi
     for line in "${tool_lines[@]}"; do
         echo "$line"

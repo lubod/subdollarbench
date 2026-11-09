@@ -15,6 +15,15 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-09.46`: round 75. The reference server's port is fixed in
+///   the prompt (round 74 R74-1: `ref-sql` is on 5480, not the lane's
+///   port), the sandbox omp is pinned to the version F2 picks, and the
+///   prompt renderer is graded (F3: `src/config.rs` and
+///   `Dockerfile.sandbox` are grader paths). Why: R74-1 and
+///   DECISIONS #28, #29. Score impact: unknown in sign per model; the
+///   OpenAI models lost the reference on 19-27 % of their queries under
+///   `.45`, the others 1-4 %. `.45` results are not comparable with
+///   `.46`; careers restart at phase 1.
 /// - `2026-10-19.45`: round 58. Stage 12's busy retries use a 10 s time
 ///   budget with full-jitter exponential backoff (2-16 ms) instead of 400
 ///   fixed tries, so a correct server is not failed by a starved client's
@@ -815,7 +824,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-10-19.45";
+pub const RULES_VERSION: &str = "2026-11-09.46";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.

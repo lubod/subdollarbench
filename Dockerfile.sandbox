@@ -35,7 +35,7 @@ RUN chown -R ubuntu:ubuntu /workspace \
        fi
 
 # Install OMP (Oh My Pi agent harness)
-ARG OMP_VERSION=18.4.2
+ARG OMP_VERSION=18.18.3
 RUN npm install -g @oh-my-pi/pi-coding-agent@${OMP_VERSION}
 
 # Install OpenCode CLI (second agent harness, pinned — must match

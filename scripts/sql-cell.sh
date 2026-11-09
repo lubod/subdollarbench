@@ -254,7 +254,43 @@ self_test() {
         echo '[self-test] a grader-key bar record was refused' >&2; return 1; }
     echo '[self-test] a grader-key bar record allows'
 
+    # R75 F2: the image's omp must match the Dockerfile pin.
+    pin="$(sed -n 's/^ARG OMP_VERSION=//p' "$ROOT/Dockerfile.sandbox" | head -1)"
+    [[ -n "$pin" ]] || { echo '[self-test] no OMP_VERSION pin' >&2; return 1; }
+    if ( export SDB_CELL_IMAGE_OMP=18.4.2; check_omp_pin "$ROOT" >/dev/null 2>&1 ); then
+        echo '[self-test] a mismatched image omp was accepted' >&2; return 1
+    fi
+    echo '[self-test] mismatched image omp refused'
+    ( export SDB_CELL_IMAGE_OMP="$pin"; check_omp_pin "$ROOT" ) || {
+        echo '[self-test] the pinned image omp was refused' >&2; return 1; }
+    echo '[self-test] pinned image omp allowed'
+
     echo 'RESULT: PASS (cell self-test)'
+    return 0
+}
+
+# R75 F2: the paid cell runs only on the pinned omp. The Dockerfile's
+# ARG is the pin; the image's `omp --version` must equal it.
+check_omp_pin() {
+    local root="$1" pin image
+    pin="$(sed -n 's/^ARG OMP_VERSION=//p' "$root/Dockerfile.sandbox" | head -1)"
+    if [[ -z "$pin" ]]; then
+        echo "[cell] FATAL: no OMP_VERSION pin in $root/Dockerfile.sandbox" >&2
+        return 1
+    fi
+    image="${SDB_CELL_IMAGE_OMP:-}"
+    if [[ -z "$image" ]]; then
+        image="$(timeout 20 docker run --rm subdollar-sandbox omp --version 2>/dev/null \
+            | sed -n 's#^omp/##p' | head -1)"
+    fi
+    if [[ -z "$image" ]]; then
+        echo "[cell] FATAL: cannot read the sandbox image's omp version" >&2
+        return 1
+    fi
+    if [[ "$image" != "$pin" ]]; then
+        echo "[cell] FATAL: sandbox omp $image != pinned $pin; rebuild subdollar-sandbox" >&2
+        return 1
+    fi
     return 0
 }
 
@@ -310,6 +346,7 @@ if [[ "$REHEARSAL" != "1" && -f "$ROOT/.env" ]]; then
 fi
 
 cell_gate "$ROOT" "$BUDGET" "$SMOKE" "$REHEARSAL" || exit 1
+check_omp_pin "$ROOT" || exit 1
 
 echo "[cell] building release binary ($BIN)"
 (cd "$ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --bins)
