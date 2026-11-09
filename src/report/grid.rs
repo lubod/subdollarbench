@@ -5578,6 +5578,36 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&base);
     }
+    /// R72 R1: the phone column widths leave the model column at least
+    /// 110 px of the 349 px board table, so a name cannot spill into the
+    /// points cell.
+    #[test]
+    fn r72_r1_phone_columns() {
+        let css = include_str!("portal_board.css");
+        let media = &css[css.find("@media (max-width: 700px)").expect("phone rule")..];
+        let width = |class: &str| -> f64 {
+            let needle = format!(".board-table th.{class}, .board-table td.{class} {{ width: ");
+            let at = media
+                .find(&needle)
+                .unwrap_or_else(|| panic!("missing {class} width"));
+            let rest = &media[at + needle.len()..];
+            rest[..rest.find("px").unwrap()].parse().unwrap()
+        };
+        let sum = width("col-rank") + width("col-points") + width("col-perf") + width("col-spend");
+        assert_eq!(sum, 238.0, "the phone columns are 40+88+50+60");
+        // The 390 px board table measures 349 px (the 390 viewport less
+        // the page padding and scrollbar); the model column is the rest.
+        assert!(
+            349.0 - sum >= 110.0,
+            "the model column keeps at least 110 px: {}",
+            349.0 - sum
+        );
+        assert!(
+            media.contains(".hero { font-size: 1.05rem; }"),
+            "the points hero shrinks to fit its 88 px cell"
+        );
+    }
+
     /// R72 F1: the careers sit in a full-width row under the model row,
     /// with the toggle under the model's name, not inside td.col-model.
     #[test]

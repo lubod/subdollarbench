@@ -311,10 +311,10 @@ section[id] { scroll-margin-top: 72px; }
   .board-table { table-layout: fixed; }
   .board-table th.col-rank, .board-table td.col-rank { width: 40px; }
   .share { display: block; margin: 2px 0 0; padding: 0 4px; }
-  .board-table th.col-points, .board-table td.col-points { width: 96px; }
+  .board-table th.col-points, .board-table td.col-points { width: 88px; }
   .board-table th.col-perf, .board-table td.col-perf { width: 50px; }
   .board-table th.col-spend, .board-table td.col-spend { width: 60px; }
-  .hero { font-size: 1.2rem; }
+  .hero { font-size: 1.05rem; }
   .points-bar { width: 100%; }
   /* The secondary numbers are in the expanded career table on a phone. */
   .secondary { display: none; }
