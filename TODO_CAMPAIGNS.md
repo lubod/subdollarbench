@@ -228,6 +228,15 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     `runs/grid-v21-luna-pro.careers` (3 careers), 3 lanes, `--cap 12`,
     ledger `runs/.grid-v21-luna-pro-ledger.tsv`. The `@openai` pin was
     checked live (served by OpenAI, not `openai/fast` at 2×).
+  - **Luna-pro done 2026-11-09 02:48 CET:** median career 58.4 / 76
+    (55.8, 58.4, 62.2), #3 of 7. $7.37 at list, $6.82 billed (0.93×).
+    Deployed with rounds 69-71; bundle `portal/sdb-results-2026-11-09.zip`.
+  - **Mimo-pro started 2026-11-09 07:02 CET** (operator: "start mimo"):
+    `runs/grid-arm-mimo-pro.sh`, same shape, ledger
+    `runs/.grid-v21-mimo-pro-ledger.tsv`. The `@xiaomi/fp8` pin was
+    checked live (served by Xiaomi, bill = snapshot exactly). The balance
+    at start was $13.34; at up to $0.99 a phase the grid may pause on the
+    balance preflight near the end until a top-up.
 - **Before it starts:** round 65 merged, its bar PASS, and the account
   balance at least the billed estimate plus headroom (round 65 F3 checks
   it per phase).
