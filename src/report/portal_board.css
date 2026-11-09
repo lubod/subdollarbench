@@ -170,17 +170,41 @@ td.rank { font-weight: 800; color: #fff; white-space: nowrap; }
 .agree .strip { margin-top: 0; }
 .agree-link { color: var(--pri); font-size: var(--fs-xs); }
 .agree .mut { margin-top: 3px; }
-details.more { margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--mut); }
+details.more { margin: 0; font-size: var(--fs-xs); color: var(--mut); }
 details.more summary { cursor: pointer; color: var(--pri); font-weight: 600; }
+/* R72 F1: the careers span all six board columns in their own row. */
+.more-row > td { padding: 0; border-top: 0; background: rgba(255,255,255,0.015); }
+.more-row .more { width: 100%; }
+.more-row summary { padding: 4px 10px 4px 111px; }
+.more-row .agree, .more-row .more-strips, .more-row .table-scroll { margin: 6px 10px; }
+.more-row .table-scroll { overflow-x: visible; }
+.more-row .agree .strip { margin-top: 0; }
 details.more .line { margin: 2px 0 0 12px; }
 .more-strips { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-2) 0; }
-.strip-metric { display: flex; align-items: center; gap: 5px; }
+.strip-metric { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .strip-metric .val { font-size: var(--fs-xs); }
-.career-table td { font-size: var(--fs-xs); }
-.career-table { min-width: 900px; }
+.career-table td { font-size: var(--fs-xs); padding: 6px; }
+.career-table { width: 100%; min-width: 0; table-layout: fixed; }
+.career-table th:nth-child(1), .career-table td:nth-child(1) { width: 24px; }
+.career-table th:nth-child(2), .career-table td:nth-child(2) { width: 140px; }
+.career-table th:nth-child(3), .career-table td:nth-child(3) { width: 380px; }
+.career-table th:nth-child(4), .career-table td:nth-child(4) { width: 90px; }
+.career-table th:nth-child(5), .career-table td:nth-child(5) { width: 80px; }
+.career-table th:nth-child(6), .career-table td:nth-child(6) { width: 60px; }
+.career-table th:nth-child(7), .career-table td:nth-child(7) { width: 55px; }
+.career-table th:nth-child(8), .career-table td:nth-child(8) { width: 60px; }
+.career-table th:nth-child(9), .career-table td:nth-child(9) { width: 55px; }
+.career-table th:nth-child(10), .career-table td:nth-child(10) { width: 70px; }
+.career-table th:nth-child(11), .career-table td:nth-child(11) { width: 55px; }
+.career-table th:nth-child(12), .career-table td:nth-child(12) { width: 110px; }
+.career-table th:nth-child(13), .career-table td:nth-child(13) { width: 60px; }
+.career-table th { white-space: normal; line-height: 1.2; }
+.career-table .strip { flex-wrap: nowrap; margin-top: 0; }
+.career-table .col-career { white-space: nowrap; }
+.career-table .col-tickets .strip { gap: 2px; }
+
 .note { padding: 2px 4px; }
 .divider { color: var(--mut); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .05em; margin: var(--sp-2) 0; }
-.unfinished .career-table { min-width: 1000px; }
 
 /* Ladder squares + legend. */
 .sq {
@@ -287,10 +311,13 @@ section[id] { scroll-margin-top: 72px; }
   .board-table { table-layout: fixed; }
   .board-table th.col-rank, .board-table td.col-rank { width: 40px; }
   .share { display: block; margin: 2px 0 0; padding: 0 4px; }
-  .board-table th.col-points, .board-table td.col-points { width: 96px; }
+  .board-table th.col-points, .board-table td.col-points { width: 88px; }
   .board-table th.col-perf, .board-table td.col-perf { width: 50px; }
   .board-table th.col-spend, .board-table td.col-spend { width: 60px; }
-  .hero { font-size: 1.2rem; }
+  /* R72 R1: give the model the rest explicitly; the colspan=6 more row
+     would otherwise create a phantom 6th auto column beside Spend. */
+  .board-table th.col-model, .board-table td.col-model { width: 111px; }
+  .hero { font-size: 1.05rem; }
   .points-bar { width: 100%; }
   /* The secondary numbers are in the expanded career table on a phone. */
   .secondary { display: none; }
@@ -298,7 +325,53 @@ section[id] { scroll-margin-top: 72px; }
   h1 { font-size: var(--fs-lg); }
   .head-side { align-items: flex-start; text-align: left; }
   .section-nav { gap: var(--sp-3); padding: 8px 10px; font-size: var(--fs-xs); }
-  .career-table { display: block; overflow-x: auto; min-width: 0; }
+  /* R72 F3: each expanded career is a card, not a sideways-scrolling table. */
+  .more-row summary { padding-left: 33px; }
+  .more-row .table-scroll { overflow: visible; }
+  .more-row .agree, .more-row .more-strips, .more-row .table-scroll { margin: 6px; }
+  .career-table { display: block; width: 100%; min-width: 0; }
+  .career-table th, .career-table td { width: auto !important; }
+  .career-table thead { display: none; }
+  .career-table tbody { display: block; }
+  .career-table tr.career-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, auto));
+    gap: 4px 8px;
+    padding: 10px;
+    margin: 8px 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card-2);
+  }
+  .career-table td { display: block; padding: 0; border: 0; background: transparent; }
+  .career-table td:first-child { display: none; }
+  .career-table td.col-career { grid-column: 1 / 4; grid-row: 1; white-space: nowrap; font-weight: 600; }
+  .career-table td.col-points { grid-column: 4; grid-row: 1; text-align: right; font-weight: 700; }
+  .career-table td.col-perf { grid-column: 1; grid-row: 2; }
+  .career-table td.col-spend { grid-column: 2; grid-row: 2; }
+  .career-table td.col-highest { grid-column: 3; grid-row: 2; }
+  .career-table td.col-green { grid-column: 4; grid-row: 2; text-align: right; }
+  .career-table td.col-tickets { grid-column: 1 / -1; grid-row: 3; }
+  .career-table td.col-tickets .strip { max-width: 190px; flex-wrap: wrap; }
+  .career-table td.col-ppd { grid-column: 1; grid-row: 4; }
+  .career-table td.col-duration { grid-column: 2; grid-row: 4; }
+  .career-table td.col-turns { grid-column: 3; grid-row: 4; }
+  .career-table td.col-tokens { grid-column: 4; grid-row: 4; text-align: right; }
+  .career-table td.col-state { display: none; }
+  .career-table td.col-points::before { content: "points "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-perf::before { content: "perf "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-spend::before { content: "spend "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-highest::before { content: "highest "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-green::before { content: "kept "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-ppd::before { content: "pts/$ "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-duration::before { content: "duration "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-turns::before { content: "turns "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-tokens::before { content: "tokens "; color: var(--mut); font-weight: 400; }
+  .career-table td.col-perf, .career-table td.col-spend, .career-table td.col-highest,
+  .career-table td.col-green, .career-table td.col-ppd, .career-table td.col-duration,
+  .career-table td.col-turns, .career-table td.col-tokens { font-size: 0.64rem; white-space: nowrap; }
+  .career-table .col-tokens > span[data-short] { font-size: 0; }
+  .career-table .col-tokens > span[data-short]::before { content: attr(data-short); font-size: 0.64rem; }
   .measured-table { grid-template-columns: 1fr; }
   .measured-table tr:nth-child(odd) { border-right: 0; }
   .measured .wrap { overflow-x: visible; }
