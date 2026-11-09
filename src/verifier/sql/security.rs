@@ -342,16 +342,51 @@ fn statement_timeout_check(addr: &str, cfg: &SecurityConfig) -> Result<(), Strin
     expect_one(&mut c, "after a cancelled statement")
 }
 
+/// AUTH for the cap fill. A refusal answered `ERR limit` is retryable:
+/// the earlier checks' closes can take a few ms to free their slots, and
+/// a correct server may still count a closed socket when the fill starts
+/// (CI 42655763250: "connection 3 of the first 4 was refused"). Any other
+/// failure is final. The bool says whether the error may be retried.
+fn auth_for_cap(addr: &str, cfg: &SecurityConfig) -> Result<Raw, (bool, String)> {
+    let mut c = match Raw::connect(addr, cfg.timeout, "AUTH") {
+        Ok(c) => c,
+        Err(e) => return Err((false, e)),
+    };
+    if let Err(e) = c.send(format!("AUTH {}\n", cfg.password).as_bytes()) {
+        return Err((false, e));
+    }
+    match c.response() {
+        Ok(Response::Ok(_)) => Ok(c),
+        Ok(Response::Err { class, text }) if class == "limit" => {
+            Err((true, format!("AUTH answered ERR limit: {text}")))
+        }
+        Ok(other) => Err((false, format!("AUTH answered {other:?}, expected OK"))),
+        Err(e) => Err((false, e)),
+    }
+}
+
 fn connection_cap_check(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
     let mut held = Vec::with_capacity(cfg.max_conns);
+    // R75 F6: a refusal answered `ERR limit` is retried for up to 2 s,
+    // 50 ms apart, like the release step at the end of this check. Any
+    // other refusal, or a cap still full after 2 s, fails as before.
+    let fill_deadline = Instant::now() + Duration::from_secs(2);
     for i in 0..cfg.max_conns {
-        match auth(addr, cfg) {
-            Ok(c) => held.push(c),
-            Err(e) => {
-                return Err(format!(
-                    "connection {i} of the first {} was refused: {e}",
-                    cfg.max_conns
-                ))
+        loop {
+            match auth_for_cap(addr, cfg) {
+                Ok(c) => {
+                    held.push(c);
+                    break;
+                }
+                Err((true, _)) if Instant::now() < fill_deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err((_, e)) => {
+                    return Err(format!(
+                        "connection {i} of the first {} was refused: {e}",
+                        cfg.max_conns
+                    ))
+                }
             }
         }
     }

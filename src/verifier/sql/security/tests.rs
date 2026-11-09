@@ -15,6 +15,9 @@ enum Mode {
     LeaksPassword,
     NoLimits,
     Uncapped,
+    /// R75 F6: a faithful server that frees a closed connection's slot
+    /// 100 ms after it notices the close.
+    SlowRelease,
 }
 
 fn depth_ok(sql: &str, max: usize) -> bool {
@@ -125,8 +128,25 @@ fn spawn(mode: Mode, cfg: SecurityConfig) -> String {
             let current = current.clone();
             std::thread::spawn(move || {
                 handle(stream, &cfg, mode);
+                if mode == Mode::SlowRelease {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
                 current.fetch_sub(1, Ordering::SeqCst);
             });
+        }
+    });
+    addr
+}
+
+/// R75 F6: a server that never frees a slot: every connection is refused
+/// with the cap's error line.
+fn spawn_stuck_full() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let _ = stream.write_all(b"ERR limit too many connections\n");
         }
     });
     addr
@@ -171,6 +191,41 @@ fn a_faithful_server_passes_the_whole_scenario() {
     let report = scenario(&addr, &c).expect("the faithful mock must pass");
     assert!(report.contains("auth enforced"), "{report}");
     assert!(report.contains("4-connection cap"), "{report}");
+}
+
+/// R75 F6: the cap fill right after a close can see the closed socket
+/// still counted. A faithful server that frees a slot 100 ms after the
+/// close must still pass: the fill retries an `ERR limit` refusal for up
+/// to 2 s.
+#[test]
+fn a_slow_release_server_passes_the_cap_check() {
+    let c = cfg();
+    let addr = spawn(Mode::SlowRelease, c.clone());
+    // Warm one connection and close it: its slot frees 100 ms later,
+    // while the fill is already opening the cap's four.
+    drop(auth(&addr, &c).expect("the warm connection"));
+    connection_cap_check(&addr, &c).expect("a faithful slow-release mock must pass");
+}
+
+/// R75 F6: the retry must not turn a stuck cap into a pass. A server that
+/// never frees a slot still fails with the existing refusal message, after
+/// the 2 s retry window.
+#[test]
+fn a_server_that_never_releases_still_fails() {
+    let c = cfg();
+    let addr = spawn_stuck_full();
+    let started = Instant::now();
+    let err = connection_cap_check(&addr, &c).unwrap_err();
+    assert!(
+        err.contains("connection 0 of the first 4 was refused"),
+        "{err}"
+    );
+    assert!(err.contains("too many connections"), "{err}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(2),
+        "gave up after {:?}, before the 2 s retry window",
+        started.elapsed()
+    );
 }
 
 #[test]
