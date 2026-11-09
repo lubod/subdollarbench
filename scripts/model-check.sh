@@ -133,14 +133,35 @@ with open(generation, "w") as f:
 PY
         }
 
-        printf 'tool result: probe-forty-two\n' > "$dir/tool-1.jsonl"
-        printf 'tool result: probe-forty-two\n' > "$dir/tool-2.jsonl"
         export SDB_MODEL_CHECK_TOOL_SESSION_JSON_1="$dir/tool-1.jsonl"
         export SDB_MODEL_CHECK_TOOL_SESSION_JSON_2="$dir/tool-2.jsonl"
-        tool_set() {
-            printf '%s\n' "$1" > "$dir/tool-1.jsonl"
-            printf '%s\n' "$2" > "$dir/tool-2.jsonl"
+        tool_fixture() {
+            local file="$1" result="$2" is_error="$3" include="$4"
+            python3 - "$file" "$result" "$is_error" "$include" <<'PY'
+import json, sys
+path, result, is_error, include = sys.argv[1:5]
+lines = [
+    {"type": "message", "message": {"role": "user", "content": [
+        {"type": "text", "text": "run echo probe-forty-two"}]}},
+    {"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "toolCall", "name": "bash",
+         "arguments": {"command": "echo probe-forty-two"}}]}},
+]
+if include == "1":
+    lines.append({"type": "message", "message": {
+        "role": "toolResult", "toolName": "bash",
+        "isError": is_error == "1",
+        "content": [{"type": "text", "text": result}]}})
+with open(path, "w") as f:
+    for line in lines:
+        f.write(json.dumps(line) + "\n")
+PY
         }
+        tool_set() {
+            tool_fixture "$dir/tool-1.jsonl" "$1" "$2" "$3"
+            tool_fixture "$dir/tool-2.jsonl" "$1" "$2" "$3"
+        }
+        tool_set "probe-forty-two" 0 1
 
         expect_fail() {
             local want="$1" name="$2"
@@ -212,22 +233,21 @@ PY
         echo "[self-test] an exact match passes"
 
         case_name=gmicloud-tool-error
-        tool_set "provider stream ended with an error" \
-            "provider stream ended with an error"
+        tool_set "provider stream ended with an error" 1 1
         expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] a provider tool-call error fails"
 
         case_name=tool-missing-output
-        tool_set "" ""
+        tool_set "" 0 0
         expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] a tool round trip with no command output fails"
 
         case_name=tool-missing-arguments
-        tool_set "missing required arguments" "missing required arguments"
+        tool_set "missing required arguments" 1 1
         expect_fail "tool-call" "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] missing tool arguments fail"
 
-        tool_set "tool result: probe-forty-two" "tool result: probe-forty-two"
+        tool_set "probe-forty-two" 0 1
 
         case_name=unpinned
         fixture "openrouter/z-ai/glm-5.3" "z-ai/glm-5.3-20260101" \
@@ -392,6 +412,30 @@ run_omp() {
         return 1
     fi
     return 0
+}
+
+# R68 F3: the prompt and the tool-call arguments both contain the probe
+# string, so a raw grep is a false positive. Require a successful
+# toolResult message whose text carries the first command's output.
+tool_result_ok() {
+    python3 - "$1" <<'PY'
+import json, sys
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        v = json.loads(line)
+    except Exception:
+        continue
+    m = v.get("message") or {}
+    if m.get("role") != "toolResult" or m.get("isError"):
+        continue
+    text = ""
+    for part in m.get("content") or []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text += part.get("text") or ""
+    if "probe-forty-two" in text:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 if ! run_omp reply "Reply with exactly: ok" "read" "$session_file"; then
@@ -605,7 +649,7 @@ for i in 1 2; do
     tool_log="$work/tool-$i.log"
     output=no
     error=no
-    if grep -q 'probe-forty-two' "$tool_session" "$tool_log" 2>/dev/null; then
+    if tool_result_ok "$tool_session"; then
         output=yes
     fi
     if grep -qE 'provider stream ended with an error|missing required arguments' \
