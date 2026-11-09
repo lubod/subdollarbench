@@ -219,8 +219,12 @@ A round's "done" record lives in its round file, not in
 
 ## Commits
 
-- **Implementer:** `git commit --author="opencode <opencode@localhost>"`;
-  message `RNN <ID>: <what>`, then a body that says why.
+- **Author, both agents:** the operator's identity, `lubod
+  <lubo.drobny@gmail.com>` (operator, 2026-11-09: "both identities the
+  same"). It's set in the repo's git config, which every worktree
+  shares, so a plain `git commit` uses it; don't pass `--author`.
+  Commits made before 2026-11-09 keep their old authors.
+- **Implementer:** message `RNN <ID>: <what>`, then a body that says why.
 - **Reviewer:** commits end with
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Merges use
   `--no-ff` with the message `Merge roundNN: <theme>`.
