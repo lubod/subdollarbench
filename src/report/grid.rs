@@ -808,18 +808,18 @@ fn strip_html(ladder: &[LadderEntry]) -> String {
         .map(|e| {
             // R71 F1 (R70-2): one-letter status classes and a terse title;
             // the legend explains the letters, the square keeps its number.
-            let (cls, short) = match e.status.as_str() {
-                "pass" => ("p", "p"),
-                "lite" => ("l", "l"),
-                "fail" => ("f", "f"),
-                "fault" => ("x", "x"),
-                "skipped" => ("s", "s"),
-                "running" => ("r", "r"),
-                _ => ("n", "n"),
+            let cls = match e.status.as_str() {
+                "pass" => "p",
+                "lite" => "l",
+                "fail" => "f",
+                "fault" => "x",
+                "skipped" => "s",
+                "running" => "r",
+                _ => "n",
             };
             format!(
-                "<span class=\"sq {cls}\" data-t=\"{}\" title=\"t{} {short}\">{}</span>",
-                e.id, e.id, e.id
+                "<span class=\"sq {cls}\" data-t=\"{}\">{}</span>",
+                e.id, e.id
             )
         })
         .collect();
@@ -932,8 +932,9 @@ fn token_cell(c: &CareerCell) -> String {
         fmt_count(t.fresh_input())
     );
     format!(
-        "<span title=\"{}\">out {} · in {} (+{} cached)</span>",
+        "<span title=\"{}\" data-short=\"out {}\">out {} · in {} (+{} cached)</span>",
         esc(&title),
+        fmt_tokens(t.completion),
         fmt_tokens(t.completion),
         fmt_tokens(t.fresh_input()),
         fmt_tokens(t.cached)
@@ -1397,10 +1398,16 @@ fn section_nav() -> &'static str {
 
 /// R70 F5 (R69-7): the expanded career table's 12 columns are named.
 fn career_table_head() -> &'static str {
-    "<thead><tr><th></th><th>Career</th><th>Highest ticket</th><th>Tickets kept green</th><th class=\"num\">Points</th><th class=\"num\">Perf</th><th class=\"num\">Spend</th><th class=\"num\">Pts / $</th><th class=\"num\">Duration</th><th class=\"num\">Turns</th><th>Tokens out</th><th>State</th></tr></thead><tbody>"
+    "<thead><tr><th></th><th>Career</th><th>Tickets</th><th>Highest ticket</th><th>Tickets kept green</th><th class=\"num\">Points</th><th class=\"num\">Perf</th><th class=\"num\">Spend</th><th class=\"num\">Pts / $</th><th class=\"num\">Duration</th><th class=\"num\">Turns</th><th>Tokens out</th><th>State</th></tr></thead><tbody>"
 }
 
-fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class: &str) -> String {
+fn career_row(
+    c: &CareerCell,
+    name: &str,
+    phase_label: Option<&str>,
+    extra_class: &str,
+    model_effort: Option<&str>,
+) -> String {
     let label = phase_label
         .map(|p| format!("<div class=\"mut\">{p}</div>"))
         .unwrap_or_default();
@@ -1411,19 +1418,27 @@ fn career_row(c: &CareerCell, name: &str, phase_label: Option<&str>, extra_class
     };
     let id = esc(&c.campaign_id);
     let fp = esc(c.fingerprints.first().map(String::as_str).unwrap_or("—"));
-    // R70 F2: break the model part at / and -, never the date's hyphens.
-    let name_html = match name.split_once(" · ") {
-        Some((model, rest)) => format!("{} · {}", break_name_html(model), esc(rest)),
-        None => break_name_html(name),
-    };
+    // R72 F2: the model row already names the model and its effort; the
+    // career label is only `career N · date` on one line. The title keeps
+    // the full model id.
+    let compact = name.split_once(" · ").map(|(_, rest)| rest).unwrap_or(name);
+    let label_html = esc(compact);
+    let title = format!("{id} · {fp} · {}", esc(&c.model));
+    let show_effort = model_effort != Some(c.effort.as_str());
+    let notes = [
+        if show_effort {
+            effort_note(&c.effort)
+        } else {
+            String::new()
+        },
+        flags_of(c),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ");
     format!(
-        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-model\">{label}<a href=\"results.html#{id}\" title=\"{id} · {fp}\"><b>{name_html}</b></a>{}<div class=\"mut\">{}</div>{}</td><td class=\"col-highest\">{}</td><td class=\"num col-green\">{}</td><td class=\"num\">{} / {}</td><td class=\"num\">{}</td><td class=\"num\">${:.2}</td><td class=\"num col-ppd\">{}</td><td class=\"num col-duration\">{}</td><td class=\"num col-turns\">{}</td><td class=\"col-tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
-        mark_badge(c),
-        [effort_note(&c.effort), flags_of(c)]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" "),
+        "<tr class=\"{class}\"><td class=\"num\"></td><td class=\"col-career\">{label}<a href=\"results.html#{id}\" title=\"{title}\"><b>{label_html}</b></a><div class=\"mut\">{notes}</div></td><td class=\"col-tickets\">{}</td><td class=\"col-highest\" data-label=\"highest\">{}</td><td class=\"num col-green\" data-label=\"kept\">{}</td><td class=\"num col-points\" data-label=\"points\">{} / {}</td><td class=\"num col-perf\" data-label=\"perf\">{}</td><td class=\"num col-spend\" data-label=\"spend\">${:.2}</td><td class=\"num col-ppd\" data-label=\"pts/$\">{}</td><td class=\"num col-duration\" data-label=\"duration\">{}</td><td class=\"num col-turns\" data-label=\"turns\">{}</td><td class=\"col-tokens\" data-label=\"tokens\">{}</td><td class=\"col-state\">{}</td></tr>",
         strip_html(&c.ladder),
         reached_of(c),
         c.regression_free,
@@ -1485,7 +1500,7 @@ fn model_row(
             .get(&c.campaign_id)
             .map(String::as_str)
             .unwrap_or(&c.campaign_id);
-        inner.push_str(&career_row(c, name, None, ""));
+        inner.push_str(&career_row(c, name, None, "", Some(&g.effort)));
     }
     let word = if g.careers.len() == 1 {
         "career"
@@ -1574,7 +1589,7 @@ fn model_row(
         career_table_head()
     );
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div>{more}</td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{link}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div></td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{link}</td></tr>",
         rank_badge(g, stability),
         swatch(&g.model, colours),
         esc(&g.model),
@@ -1592,6 +1607,10 @@ fn model_row(
         med.max_points as u32,
         perf_badge(med),
         med.cost
+    ));
+    // R72 F1: the careers span the board's six columns in their own row.
+    html.push_str(&format!(
+        "<tr class=\"more-row\"><td colspan=\"6\">{more}</td></tr>"
     ));
 }
 
@@ -2113,8 +2132,26 @@ fn model_colours(cells: &[CareerCell]) -> HashMap<String, &'static str> {
         .collect()
 }
 
+/// R72 F4 (R71-3): equalise the shapes' visual area so no model looks
+/// smaller. The factor scales the nominal radius; a circle is the base.
+fn shape_scale(shape: &str) -> f64 {
+    match shape {
+        "square" => 0.886,
+        "triangle" | "triangle-down" => 1.55,
+        "diamond" => 1.25,
+        "star" => 1.25,
+        "plus" | "cross" => 1.2,
+        "hexagon" => 1.1,
+        "pentagon" => 1.15,
+        "ring" => 1.1,
+        "bar" => 1.3,
+        _ => 1.0,
+    }
+}
+
 /// R71 F3: one SVG marker in the model's shape and colour.
 fn mark_svg(shape: &str, colour: &str, cx: f64, cy: f64, r: f64) -> String {
+    let r = r * shape_scale(shape);
     let poly = |n: usize, rot: f64| -> String {
         (0..n)
             .map(|i| {
@@ -3578,11 +3615,12 @@ mod tests {
         let t = |id: u32| {
             let marker = format!("data-t=\"{id}\"");
             let at = pos(&html, &marker);
+            let start = html[..at].rfind("<span").unwrap();
             let end = html[at..].find("</span>").unwrap() + at;
-            &html[at..end]
+            &html[start..end]
         };
-        assert!(t(0).contains("title=\"t0 p\""));
-        assert!(t(7).contains("title=\"t7 p\""));
+        assert!(t(0).contains("class=\"sq p\"") && t(0).contains("data-t=\"0\""));
+        assert!(t(7).contains("class=\"sq p\""));
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -4142,8 +4180,8 @@ mod tests {
             "no campaign id is visible text: {text}"
         );
         assert!(
-            text.contains("m · career 1 · 2026-10-27"),
-            "the career name is model · career i · date: {text}"
+            text.contains("career 1 · 2026-10-27"),
+            "the career label is career i · date: {text}"
         );
         assert!(
             html.contains("title=\"campaign_c_p4 · ")
@@ -4810,8 +4848,8 @@ mod tests {
         );
         let board = read(&out.join("index.html"));
         assert!(
-            board.contains("title=\"campaign_a1_p4 · fp-a\""),
-            "the board row carries its fingerprint: {board}"
+            board.contains("title=\"campaign_a1_p4 · fp-a · "),
+            "the board row carries its fingerprint and model: {board}"
         );
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["fingerprint_careers"]["fp-a"], 3, "{meta}");
@@ -5323,13 +5361,19 @@ mod tests {
         let start_tag = "<tr class=\"model-row\">";
         let at = pos(&html, start_tag);
         let rest = &html[at..];
-        let details_end =
-            rest.find("</details>").expect("the expanded careers") + "</details>".len();
+        let details_start = rest
+            .find("<details class=\"more\">")
+            .expect("the expanded careers");
+        let details_end = details_start
+            + rest[details_start..]
+                .find("</details>")
+                .expect("the expanded careers")
+            + "</details>".len();
         let cell_at = rest
             .find("<td class=\"col-agree\">")
             .expect("the row agreement cell");
         assert!(
-            cell_at > details_end,
+            cell_at < details_start || cell_at > details_end,
             "the row agreement cell is outside the expanded careers: {rest}"
         );
         let cell = &rest[cell_at..];
@@ -5534,6 +5578,109 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&base);
     }
+    /// R72 F1: the careers sit in a full-width row under the model row,
+    /// with the toggle under the model's name, not inside td.col-model.
+    #[test]
+    fn r72_f1_more_row_full_width() {
+        let (base, runs, out) = fixture("r72more");
+        for (prefix, model) in [("a", "vendor/a"), ("b", "vendor/b")] {
+            for c in 0..2 {
+                career(&runs, &format!("{prefix}{c}"), model, [1.0; 4], [0.01; 4]);
+            }
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let head = &html[pos(&html, "<thead>")..pos(&html, "</thead>")];
+        let columns = head.matches("</th>").count();
+        assert_eq!(columns, 6, "the board has six columns: {head}");
+        for model in ["vendor/a", "vendor/b"] {
+            let row = model_row_html(&html, model);
+            let model_end = pos(row, "</tr>");
+            let model_cell = &row[..model_end];
+            assert!(
+                !model_cell.contains("<details"),
+                "{model}'s details is not inside the model cell: {model_cell}"
+            );
+            let more = &row[pos(row, "<tr class=\"more-row\">")..];
+            assert!(
+                more.contains(&format!("<td colspan=\"{columns}\">")),
+                "{model}'s more row spans every column: {more}"
+            );
+            assert!(
+                more.contains("<table class=\"career-table\">")
+                    && more.contains("<summary>×2 careers ▸</summary>"),
+                "{model}'s career table and toggle are in the more row: {more}"
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R72 F2: the career label drops the model prefix and the matching
+    /// effort badge; the full model id stays in the title.
+    #[test]
+    fn r72_f2_compact_career_label() {
+        let (base, runs, out) = fixture("r72label");
+        let model = "openrouter/vendor/model-a";
+        for c in 0..2 {
+            career(&runs, &format!("c{c}"), model, [1.0; 4], [0.01; 4]);
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let details = &html[pos(&html, "<details class=\"more\">")..];
+        let career = &details[pos(details, "<tr class=\"career-row\">")..];
+        let cell = &career[pos(career, "<td class=\"col-career\">")..];
+        let cell = &cell[..cell.find("</td>").unwrap()];
+        let text = visible_text(cell);
+        assert!(
+            text.contains("career ") && text.contains("2026-10-27"),
+            "the label is career N · date: {text}"
+        );
+        assert!(!text.contains('/'), "the label has no model prefix: {text}");
+        assert!(
+            !text.contains("effort high"),
+            "the matching effort badge is dropped: {text}"
+        );
+        assert!(
+            cell.contains(model),
+            "the full model id is in the title: {cell}"
+        );
+        let css = include_str!("portal_board.css");
+        assert!(
+            css.contains(".career-table .col-career { white-space: nowrap; }"),
+            "the compact label is one line"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R72 F3: under the phone media query the expanded careers are block
+    /// cards with no fixed min-width above 390 px.
+    #[test]
+    fn r72_f3_phone_cards() {
+        let css = include_str!("portal_board.css");
+        let media = &css[css.find("@media (max-width: 700px)").expect("phone rule")..];
+        for rule in [
+            ".career-table { display: block;",
+            ".career-table tr.career-row {",
+            "display: grid;",
+            "min-width: 0;",
+        ] {
+            assert!(
+                media.contains(rule),
+                "the phone cards rule {rule:?} is missing"
+            );
+        }
+        assert!(
+            !media.contains("min-width: 900px") && !media.contains("min-width: 1000px"),
+            "no expansion min-width above 390 px"
+        );
+        assert!(
+            media.contains(
+                ".career-table td.col-tickets .strip { max-width: 190px; flex-wrap: wrap; }"
+            ),
+            "the phone ticket strip wraps in the card"
+        );
+    }
+
     /// R71 F4 (operator): the public pages and grid.json show finished
     /// careers only; the banner keeps the count and names no run.
     #[test]
@@ -6007,8 +6154,13 @@ mod tests {
         let details = &html[pos(&html, "<details class=\"more\">")..];
         let career = &details[pos(details, "<tr class=\"career-row\">")..];
         assert!(
-            career.contains("deepseek/<wbr>deepseek-<wbr>v4.1-<wbr>flash-<wbr>1017"),
-            "the expanded career row name carries break points: {career}"
+            career.contains("title=\"campaign_c_p4 · ")
+                && career.contains("openrouter/deepseek/deepseek-v4.1-flash-1017"),
+            "the compact label keeps the full model in its title: {career}"
+        );
+        assert!(
+            !career.contains("deepseek/<wbr>"),
+            "the compact label has no split model name: {career}"
         );
         let _ = fs::remove_dir_all(&base);
     }
@@ -6110,6 +6262,7 @@ mod tests {
         let head = &table[..table.find("</thead>").expect("a career-table head")];
         for column in [
             "Career",
+            "Tickets",
             "Highest ticket",
             "Tickets kept green",
             "Points",
@@ -6123,7 +6276,11 @@ mod tests {
         ] {
             assert!(head.contains(column), "the head names {column}: {head}");
         }
-        assert_eq!(head.matches("</th>").count(), 12, "twelve columns: {head}");
+        assert_eq!(
+            head.matches("</th>").count(),
+            13,
+            "thirteen columns: {head}"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
