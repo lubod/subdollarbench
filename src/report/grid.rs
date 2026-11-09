@@ -728,6 +728,13 @@ impl ModelGroup {
 }
 
 pub fn model_groups(cells: &[CareerCell]) -> Vec<ModelGroup> {
+    model_groups_for(cells, crate::report::rules::RULES_VERSION)
+}
+
+/// R76 F1/F2: the groups relative to one rules version. The board and
+/// the .46 results page use the current rules; the archived .45 report
+/// treats its own rules as current.
+fn model_groups_for(cells: &[CareerCell], current_rules: &str) -> Vec<ModelGroup> {
     let mut groups: Vec<ModelGroup> = Vec::new();
     for (i, c) in cells.iter().enumerate() {
         if !c.finished {
@@ -746,7 +753,7 @@ pub fn model_groups(cells: &[CareerCell]) -> Vec<ModelGroup> {
                 harness: c.harness.clone(),
                 effort: c.effort.clone(),
                 rules: c.rules.clone(),
-                current: c.key.current_rules,
+                current: c.rules == current_rules,
                 careers: vec![i],
                 best: i,
                 median: i,
@@ -1188,10 +1195,10 @@ fn page_header(
 }
 
 /// R69 F1: the footer both pages share.
-fn footer_html(updated: &str) -> String {
+fn footer_html(updated: &str, rules: &str) -> String {
     format!(
         "<footer class=\"page-foot\"><a href=\"https://github.com/lubod/subdollarbench\">GitHub</a><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">Methodology</a><span>Rules {}</span><span>Updated {}</span></footer>",
-        esc(crate::report::rules::RULES_VERSION),
+        esc(rules),
         esc(updated)
     )
 }
@@ -1379,6 +1386,67 @@ fn summary_cards(
         if groups.len() == 1 { "model" } else { "models" }
     );
     format!("<div class=\"cards\">{top_card}{ppd_card}{cheap_card}{careers}</div>")
+}
+
+/// R76 F1: the .45 models with no complete .46 result yet, one group per
+/// model in board order. A model is complete on the current rules when it
+/// has a finished current-rules career and no unfinished one.
+fn earlier_groups<'a>(cells: &[CareerCell], groups: &'a [ModelGroup]) -> Vec<&'a ModelGroup> {
+    let current = crate::report::rules::RULES_VERSION;
+    let mut done: HashSet<&str> = HashSet::new();
+    let mut unfinished: HashSet<&str> = HashSet::new();
+    for c in cells {
+        if c.rules != current || c.rehearsal || c.smoke {
+            continue;
+        }
+        if c.finished {
+            done.insert(c.model.as_str());
+        } else {
+            unfinished.insert(c.model.as_str());
+        }
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    groups
+        .iter()
+        .filter(|g| g.rules == "2026-10-19.45")
+        .filter(|g| {
+            let model = g.model.as_str();
+            !done.contains(model) || unfinished.contains(model)
+        })
+        .filter(|g| seen.insert(g.model.as_str()))
+        .collect()
+}
+
+/// R76 F1: the earlier-results table, muted and without ranks. It sits
+/// under the current board and disappears when every .45 model has a
+/// complete .46 result.
+fn earlier_section(
+    cells: &[CareerCell],
+    groups: &[ModelGroup],
+    colours: &HashMap<String, &'static str>,
+) -> String {
+    let earlier = earlier_groups(cells, groups);
+    if earlier.is_empty() {
+        return String::new();
+    }
+    let mut rows = String::new();
+    for g in earlier {
+        let c = &cells[g.median];
+        rows.push_str(&format!(
+            "<tr class=\"earlier-row\"><td title=\"{}\">{}<span class=\"mname\">{}</span></td><td class=\"num\">{:.1} / {}</td><td class=\"num\">${:.2} per career</td><td class=\"num\">{} {}</td></tr>",
+            esc(&g.model),
+            swatch(&g.model, colours),
+            model_name_html(&g.model),
+            c.points,
+            c.max_points as u32,
+            c.cost,
+            g.careers.len(),
+            if g.careers.len() == 1 { "career" } else { "careers" }
+        ));
+    }
+    format!(
+        "<section id=\"earlier\" class=\"earlier\"><h2>Earlier results (rules 2026-10-19.45, not comparable)</h2><div class=\"mut\">The prompt gave the reference server's port as the lane's port, so 2.2-23.5% of reference queries were refused; <a href=\"results-45.html\">the full .45 report</a> has the per-model shares.</div><div class=\"wrap\"><table class=\"earlier-table\"><thead><tr><th>Model</th><th class=\"num\">Points (of 76)</th><th class=\"num\">Spend</th><th class=\"num\">Careers</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
+    )
 }
 
 /// R69 F1/F3: a model name with its shared colour square, for a table cell.
@@ -1696,8 +1764,9 @@ fn render_board(cells: &[CareerCell]) -> String {
     if let Some(note) = unranked_note(&marked) {
         h.push_str(&format!("<div class=\"mut note\">{note}</div>"));
     }
+    h.push_str(&earlier_section(cells, &groups, &colours));
     h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Only the current rule set is shown. A career still running is counted in the in-progress banner, never shown as a row; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
-    h.push_str(&footer_html(&now));
+    h.push_str(&footer_html(&now, crate::report::rules::RULES_VERSION));
     h.push_str("</main></body></html>");
     h
 }
@@ -2538,15 +2607,23 @@ fn svg_survival(
 }
 
 fn render_results(cells: &[CareerCell]) -> String {
+    render_results_for(cells, crate::report::rules::RULES_VERSION)
+}
+
+/// R76 F2: the results page for one rules version. The .46 page treats
+/// the current rules as current; the archived .45 report treats .45 as
+/// current, so its charts and ranks show the .45 careers.
+fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
     let labels = career_labels(cells);
-    let groups = model_groups(cells);
+    let groups = model_groups_for(cells, page_rules);
     let colours = model_colours(cells);
     let indices = model_order(cells);
     let current_groups: Vec<&ModelGroup> = groups.iter().filter(|g| g.current).collect();
     let current: Vec<&CareerCell> = cells
         .iter()
-        .filter(|c| c.finished && c.key.current_rules)
+        .filter(|c| c.finished && c.rules == page_rules)
         .collect();
+    let earlier = earlier_groups(cells, &groups);
     // R69 F1: the charts and tables follow the board's model order, so a
     // model keeps its colour and its place on both pages.
     let mut models: Vec<String> = Vec::new();
@@ -2607,20 +2684,11 @@ fn render_results(cells: &[CareerCell]) -> String {
     } else {
         String::new()
     };
-    let rules = current
-        .iter()
-        .map(|c| c.rules.as_str())
-        .find(|r| !r.is_empty())
-        .unwrap_or(crate::report::rules::RULES_VERSION);
+    let rules = page_rules;
     // R75 F5: the .45 board's known issue, from round 74's health records.
-    // The line shows on the .45 page and on any page that still carries a
-    // .45 career, so the old board says what it was.
-    // The fallback (an export with only .45 careers, rendered by a newer
-    // binary) needs current to be empty; a .46 board with .45 history in
-    // the same runs dir must not carry the old board's known issue.
-    let known_issue = if rules == "2026-10-19.45"
-        || (current.is_empty() && cells.iter().any(|c| c.rules == "2026-10-19.45"))
-    {
+    // R76 F2: the line belongs to the archived .45 report; the .46 page
+    // links to it instead of carrying the old board's warning.
+    let known_issue = if page_rules == "2026-10-19.45" {
         "<div class=\"mut note\"><b>Known issue (rules 2026-10-19.45):</b> the stage prompt gave the reference server's port as the lane's port (5580, 5680 or 5780 instead of 5480), so a reference query could be refused. Reference queries refused, from the health records: anthropic/claude-haiku-5.5 3/120 (2.5%), deepseek/deepseek-v4.1-flash-1017 10/283 (3.5%), openai/gpt-6-luna 16/89 (18.0%), openai/gpt-6-luna-pro 23/98 (23.5%), qwen/qwen3.8-flash 6/270 (2.2%), xiaomi/mimo-v2.6-flash 11/424 (2.6%). Fixed in 2026-11-09.46.</div>".to_string()
     } else {
         String::new()
@@ -2801,8 +2869,13 @@ fn render_results(cells: &[CareerCell]) -> String {
         &chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
     ));
     h.push_str(section_nav());
+    let earlier_row = if page_rules != "2026-10-19.45" && !earlier.is_empty() {
+        "<tr><th>Earlier results</th><td><a href=\"results-45.html\">Rules 2026-10-19.45</a> (not comparable; the reference-port known issue)</td></tr>"
+    } else {
+        ""
+    };
     h.push_str(&format!(
-        "<section id=\"measured\" class=\"methodology measured\"><h2>What it measured</h2><div class=\"wrap\"><table class=\"measured-table\"><tbody><tr><th>Rules</th><td>{}</td></tr>{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>cap policy: at list price for runs from .39; each career records its own; $0.99 per phase × 4 phases = ${:.2}; 21 tickets (0-20)</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}{known_issue}</section>",
+        "<section id=\"measured\" class=\"methodology measured\"><h2>What it measured</h2><div class=\"wrap\"><table class=\"measured-table\"><tbody><tr><th>Rules</th><td>{}</td></tr>{earlier_row}{fingerprint_rows}<tr><th>SQLite</th><td>{}</td></tr><tr><th>Sandbox image</th><td><code>{}</code></td></tr><tr><th>Harness / effort</th><td>{}</td></tr><tr><th>Cap</th><td>cap policy: at list price for runs from .39; each career records its own; $0.99 per phase × 4 phases = ${:.2}; 21 tickets (0-20)</td></tr><tr><th>Prices</th><td>{}</td></tr><tr><th>Grid dates</th><td>{} → {}</td></tr><tr><th>Careers</th><td>{}</td></tr><tr><th>Methodology</th><td><a href=\"https://github.com/lubod/subdollarbench/blob/master/docs/PROPOSAL-sdb-sql.md\">docs/PROPOSAL-sdb-sql.md</a></td></tr></tbody></table></div>{fingerprint_note}{known_issue}</section>",
         esc(rules),
         esc(crate::report::rules::sqlite_version()),
         esc(image),
@@ -2921,6 +2994,7 @@ fn render_results(cells: &[CareerCell]) -> String {
     h.push_str("</tbody></table></div></section>");
     h.push_str(&footer_html(
         &chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+        page_rules,
     ));
     h.push_str("</main></body></html>");
     h
@@ -2954,8 +3028,20 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
     let out_dir = Path::new(out);
     fs::create_dir_all(out_dir)
         .with_context(|| format!("create portal dir {}", out_dir.display()))?;
+    let groups = model_groups(&cells);
+    let earlier = earlier_groups(&cells, &groups);
     fs::write(out_dir.join("index.html"), render_board(&cells))?;
     fs::write(out_dir.join("results.html"), render_results(&cells))?;
+    // R76 F2: the archived .45 report lives beside the .46 pages while
+    // the earlier section lists a model; it disappears with the section.
+    if earlier.is_empty() {
+        let _ = fs::remove_file(out_dir.join("results-45.html"));
+    } else {
+        fs::write(
+            out_dir.join("results-45.html"),
+            render_results_for(&cells, "2026-10-19.45"),
+        )?;
+    }
     let mut ranked_rules: Vec<&str> = ranked.iter().map(|c| c.rules.as_str()).collect();
     ranked_rules.sort();
     ranked_rules.dedup();
@@ -2992,13 +3078,14 @@ pub fn export(runs_dir: &str, out: &str) -> Result<PortalSummary> {
         "current_rules": crate::report::rules::RULES_VERSION,
         "ranked_rules": ranked_rules,
         "ranked_models": ranked_models,
+        "earlier_models": earlier.iter().map(|g| g.model.clone()).collect::<Vec<_>>(),
         "fingerprint": fingerprint,
         "ranked_fingerprints": ranked_fingerprints,
         "fingerprint_careers": fingerprint_careers,
         "careers": ranked.len(),
         "ranked": ranked.len(),
         "ranked_rehearsal": ranked.iter().filter(|c| c.rehearsal || c.smoke).count(),
-        "models": model_groups(&cells).iter().map(|g| g.model.clone()).collect::<Vec<_>>(),
+        "models": groups.iter().map(|g| g.model.clone()).collect::<Vec<_>>(),
     });
     fs::write(
         out_dir.join("grid.json"),
@@ -4103,7 +4190,7 @@ mod tests {
             set_phase_rules(&runs, "old", phase, "2026-10-19.45");
         }
         let cells = careers(runs.to_str().unwrap());
-        let html = render_results(&cells);
+        let html = render_results_for(&cells, "2026-10-19.45");
         for needle in [
             "Known issue (rules 2026-10-19.45)",
             "5480",
@@ -4121,11 +4208,17 @@ mod tests {
             );
         }
         export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
-        let exported = read(&out.join("results.html"));
+        let exported = read(&out.join("results-45.html"));
         assert!(
             exported.contains("Known issue (rules 2026-10-19.45)"),
             "{exported}"
         );
+        let current = read(&out.join("results.html"));
+        assert!(
+            !current.contains("Known issue (rules 2026-10-19.45)"),
+            "the .46 page carries the .45 warning: {current}"
+        );
+        assert!(current.contains("href=\"results-45.html\""), "{current}");
         let (base2, runs2, _) = fixture("r75known-current");
         career(&runs2, "new", "m-new", [1.0; 4], [0.01; 4]);
         // A .46 board whose runs dir still holds .45 history: the .45 line
@@ -4141,6 +4234,157 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
         let _ = fs::remove_dir_all(&base2);
+    }
+
+    /// R76 F1: the board lists the .45 models without a complete .46
+    /// result under a muted, unranked "Earlier results" section; the
+    /// cards count the .46 careers only.
+    #[test]
+    fn r76_f1_earlier_section() {
+        let (base, runs, out) = fixture("r76earlier");
+        for i in 0..6 {
+            let prefix = format!("old{i}");
+            career(
+                &runs,
+                &prefix,
+                &format!("oldmodel{i}"),
+                [4.0 + i as f64, 5.0, 6.0, 7.0],
+                [0.01; 4],
+            );
+            for phase in 1..=4 {
+                set_phase_rules(&runs, &prefix, phase, "2026-10-19.45");
+            }
+        }
+        // Two complete .46 models: oldmodel0 (also on .45) and a new one.
+        career(&runs, "new0", "oldmodel0", [6.0; 4], [0.02; 4]);
+        career(&runs, "new1", "newmodel", [7.0; 4], [0.02; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        let start = html
+            .find("Earlier results (rules 2026-10-19.45")
+            .expect("the earlier section");
+        let end = html[start..].find("</section>").unwrap() + start;
+        let section = &html[start..end];
+        assert_eq!(section.matches("earlier-row").count(), 5, "{section}");
+        for i in 1..6 {
+            assert!(
+                section.contains(&format!(">oldmodel{i}<")),
+                "the earlier section misses oldmodel{i}: {section}"
+            );
+        }
+        assert!(
+            !section.contains(">oldmodel0<"),
+            "a complete .46 model is still listed: {section}"
+        );
+        assert!(
+            !section.contains("class=\"rank\""),
+            "the earlier section has a rank number: {section}"
+        );
+        assert!(
+            !section.contains("#1"),
+            "the earlier section has a rank number: {section}"
+        );
+        // The cards count the 2 .46 careers only.
+        assert!(
+            html.contains("2 across 2 models"),
+            "the cards do not count the .46 careers: {html}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R76 F1: with every .45 model complete on .46, the section and the
+    /// archived report are gone.
+    #[test]
+    fn r76_f1_earlier_section_disappears() {
+        let (base, runs, out) = fixture("r76earlierdone");
+        for i in 0..6 {
+            let old = format!("old{i}");
+            career(
+                &runs,
+                &old,
+                &format!("oldmodel{i}"),
+                [4.0 + i as f64, 5.0, 6.0, 7.0],
+                [0.01; 4],
+            );
+            for phase in 1..=4 {
+                set_phase_rules(&runs, &old, phase, "2026-10-19.45");
+            }
+            career(
+                &runs,
+                &format!("new{i}"),
+                &format!("oldmodel{i}"),
+                [5.0; 4],
+                [0.02; 4],
+            );
+        }
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let html = read(&out.join("index.html"));
+        assert!(
+            !html.contains("Earlier results (rules 2026-10-19.45"),
+            "the earlier section outlived the reruns: {html}"
+        );
+        assert!(
+            !out.join("results-45.html").exists(),
+            "the archived report outlived the section"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R76 F2: the export writes the .45 report with its known issue and
+    /// both pages link to it; the archive disappears with the section.
+    #[test]
+    fn r76_f2_archived_report() {
+        let (base, runs, out) = fixture("r76archive");
+        career(&runs, "old", "oldmodel", [1.0; 4], [0.01; 4]);
+        for phase in 1..=4 {
+            set_phase_rules(&runs, "old", phase, "2026-10-19.45");
+        }
+        career(&runs, "new", "newmodel", [2.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        assert!(
+            out.join("results-45.html").is_file(),
+            "the export has no archived .45 report"
+        );
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        assert!(
+            board.contains("href=\"results-45.html\""),
+            "the board does not link the archive: {board}"
+        );
+        assert!(
+            results.contains("href=\"results-45.html\""),
+            "the .46 results page does not link the archive: {results}"
+        );
+        let archived = read(&out.join("results-45.html"));
+        assert!(
+            archived.contains("Known issue (rules 2026-10-19.45)"),
+            "the archive misses the known issue: {archived}"
+        );
+        assert!(
+            archived.contains("openai/gpt-6-luna-pro 23/98 (23.5%)"),
+            "the archive misses the per-model shares: {archived}"
+        );
+        assert!(
+            archived.contains("Rules 2026-10-19.45"),
+            "the archive footer does not name .45: {archived}"
+        );
+        assert!(
+            archived.contains("oldmodel"),
+            "the archive does not show the .45 career: {archived}"
+        );
+        // A complete .46 result for the .45 model removes the section and
+        // the archive.
+        career(&runs, "new-old", "oldmodel", [3.0; 4], [0.01; 4]);
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        assert!(
+            !out.join("results-45.html").exists(),
+            "the archive stayed after the rerun"
+        );
+        assert!(
+            !read(&out.join("index.html")).contains("href=\"results-45.html\""),
+            "the board still links the archive"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// R64 F1 (B1, B2, B3): the header counts ranked careers only, points

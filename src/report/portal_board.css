@@ -376,3 +376,19 @@ section[id] { scroll-margin-top: 72px; }
   .measured-table tr:nth-child(odd) { border-right: 0; }
   .measured .wrap { overflow-x: visible; }
 }
+
+/* R76 F1: the earlier .45 results, muted and unranked. --mut (#9aa4b2)
+   is 7.5:1 on --bg and 6.9:1 on --card, above WCAG AA. */
+.earlier { margin-top: var(--sp-5); }
+.earlier h2 { font-size: var(--fs-md); color: var(--mut); }
+.earlier .mut a { color: var(--mut); text-decoration: underline; }
+.earlier-table { width: 100%; border-collapse: collapse; }
+.earlier-table th, .earlier-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--mut);
+  font-size: var(--fs-sm);
+}
+.earlier-table th { font-weight: 600; }
+.earlier-table .mname { color: var(--mut); }
+.earlier-row .swatch { opacity: 0.75; }
