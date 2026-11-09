@@ -401,6 +401,33 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
             println!("doctor: all green");
         }
 
+        Commands::Health { run_dir, json } => {
+            let dir = std::path::Path::new(&run_dir);
+            let rollup: Option<subdollarbench::campaign::CampaignRollup> =
+                std::fs::read_to_string(dir.join("campaign.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok());
+            let (list, billed) = rollup
+                .map(|r| (r.total_cost_usd, r.billed_usd))
+                .unwrap_or((0.0, 0.0));
+            let health = subdollarbench::campaign::health_for_run_dir(dir, list, billed);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&health)?);
+            } else {
+                println!(
+                    "turns={} tool_errors={} ref={}/{} turn_p50={:.1}s turn_max={:.1}s empty={} billed_ratio={:?}",
+                    health.turns,
+                    health.tool_errors,
+                    health.ref_refused,
+                    health.ref_queries,
+                    health.turn_secs_p50,
+                    health.turn_secs_max,
+                    health.empty_responses,
+                    health.billed_ratio
+                );
+            }
+        }
+
         Commands::Perfscore { workspace, json } => {
             subdollarbench::verifier::sql::perfscore::cli(&workspace, json)?;
         }

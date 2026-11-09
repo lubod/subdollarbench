@@ -471,6 +471,17 @@ pub enum Commands {
         json: bool,
     },
 
+    /// R74 F1: print a phase's health numbers from its live.log
+    Health {
+        /// Campaign/phase directory (the one holding live.log and campaign.json)
+        #[arg(long)]
+        run_dir: String,
+
+        /// Emit raw JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// [maintain] Pre-flight checks: docker, images, API key, ports, leaks (read-only)
     Doctor,
 }
