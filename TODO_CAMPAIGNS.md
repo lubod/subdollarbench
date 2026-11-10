@@ -294,6 +294,12 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     other model keeps 3 lanes (zero rate limits across 100+ phases on
     big providers). Lane count doesn't change points; each run records
     it. Resume script: `runs/grid-resume-v46-ling.sh`.
+  - **Back to 3 lanes** (operator, 2026-11-10 "3 lanes"): on 1 lane
+    the remaining 9 phases would take 36-45 h (ling phases run 1-5 h, up
+    to the 8 h wall cap); round 77 already makes a 429 a retry. The grid
+    holds at the next phase start, then `runs/grid-relane-v46-ling.sh`
+    removes career 0's harness-fault row (backup beside the ledger) and
+    restarts on 3 lanes.
 - ~~Investigate: `ref-sql` drops out~~ (solved by round 74: a prompt
   renderer bug, not an outage).
 - (old note) **Investigate: `ref-sql` drops out during agent sessions** (all
