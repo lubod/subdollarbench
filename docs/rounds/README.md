@@ -75,4 +75,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [74](74.md) | Run health: per-phase health numbers, a live check that stops a bad phase, a canary lane, an audit that gates publishing, the `ref-sql` dropouts fixed, health on the GUI | merged `2fa7f5b` |
 | [75](75.md) | A new rules version: the reference port fixed in the prompt, omp pinned for real, what the candidate sees graded, pins for 10 models, every model reruns | merged `0404736` |
 | [76](76.md) | The earlier `.45` results stay visible beside the new board until each model reruns; publish from 1 complete `.46` model (display only) | merged `0f3ab47` |
-| [77](77.md) | A retried rate limit is not a billing fault (a 429 omp gets past no longer stops the grid); rate limits counted; the grid-end audit sees the export | open |
+| [77](77.md) | A retried rate limit is not a billing fault (a 429 omp gets past no longer stops the grid); rate limits counted; the grid-end audit sees the export | merged `614f4e8` |
