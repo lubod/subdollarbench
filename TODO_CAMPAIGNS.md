@@ -286,6 +286,11 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     429 that omp retried tripped the billing fault (round 77 fixes it).
     Scores so far 0-3 points; turns 190-232 s. Resumes on its ledger
     after round 77 and a $0 rehearsal (operator: "1. then resume ling").
+  - **Lanes** (operator, 2026-11-10: "yes"): ling resumes on **1 lane**
+    (one small provider; ~15-18 h for its remaining ~9 phases); every
+    other model keeps 3 lanes (zero rate limits across 100+ phases on
+    big providers). Lane count doesn't change points; each run records
+    it. Resume script: `runs/grid-resume-v46-ling.sh`.
 - ~~Investigate: `ref-sql` drops out~~ (solved by round 74: a prompt
   renderer bug, not an outage).
 - (old note) **Investigate: `ref-sql` drops out during agent sessions** (all
