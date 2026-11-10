@@ -1063,36 +1063,53 @@ fn test_omp_billing_error_display_prefixes_billing() {
 #[test]
 fn test_classify_billing_error_structured_variants() {
     use crate::sandbox::omp::classify_billing_error as c;
-    assert!(c(r#"{"error":{"code":429}}"#).unwrap().contains("429"));
+    assert!(c(r#"{"error":{"code":429}}"#)
+        .unwrap()
+        .reason()
+        .contains("429"));
     assert!(c(r#"{"error":"payment_required"}"#)
         .unwrap()
+        .reason()
         .contains("402"));
     assert!(c(r#"{"error":"insufficient_credit"}"#)
         .unwrap()
+        .reason()
         .contains("402"));
     assert!(c(r#"{"message":"payment required"}"#)
         .unwrap()
+        .reason()
         .contains("402"));
     assert!(c(r#"{"message":"credit exhausted"}"#)
         .unwrap()
+        .reason()
         .contains("402"));
-    assert!(c(r#"{"message":"out of credit"}"#).unwrap().contains("402"));
+    assert!(c(r#"{"message":"out of credit"}"#)
+        .unwrap()
+        .reason()
+        .contains("402"));
     assert!(c(r#"{"message":"rate limit exceeded"}"#)
         .unwrap()
+        .reason()
         .contains("429"));
     assert!(c(r#"{"message":"too many requests"}"#)
         .unwrap()
+        .reason()
         .contains("429"));
     assert!(c(r#"{"message":"unauthorized api key"}"#)
         .unwrap()
+        .reason()
         .contains("401"));
     assert!(c(r#"{"message":"unauthorized token"}"#)
         .unwrap()
+        .reason()
         .contains("401"));
-    assert!(c("status: 401 bad token").unwrap().contains("401"));
-    assert!(c("unauthorized token supplied").unwrap().contains("401"));
-    assert!(c("status 402").unwrap().contains("402"));
-    assert!(c("HTTP/2 429").unwrap().contains("429"));
+    assert!(c("status: 401 bad token").unwrap().reason().contains("401"));
+    assert!(c("unauthorized token supplied")
+        .unwrap()
+        .reason()
+        .contains("401"));
+    assert!(c("status 402").unwrap().reason().contains("402"));
+    assert!(c("HTTP/2 429").unwrap().reason().contains("429"));
     // Messages that merely mention numbers stay untouched.
     assert!(c(r#"{"message":"done, 401 tests passed"}"#).is_none());
     assert!(c(r#"{"message":""}"#).is_none());

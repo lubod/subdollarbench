@@ -61,7 +61,8 @@ async fn f2_a_provider_billing_fault_stays_fault_and_stops() {
 async fn r65_f2_billing_trip_is_harness_fault() {
     let outage = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
     let reason = crate::sandbox::omp::classify_billing_error(outage)
-        .expect("R65 F1 must classify the outage line");
+        .expect("R65 F1 must classify the outage line")
+        .reason();
     let fault = format!("provider billing/auth: {reason}");
     let lc = fixture_campaign_with_lite();
     let opts = CampaignRunOptions {

@@ -240,10 +240,29 @@ fn is_model_not_found(text: &str) -> bool {
     lower.contains("model") && lower.contains("not found")
 }
 
+/// R77 F1: the verdict for a provider error line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BillingSignal {
+    /// 402/401, or a 429 that ends the session: pause the wave.
+    Fault(&'static str),
+    /// A 429 omp is still retrying (`Retrying (n/m)`, n < m): count it,
+    /// never trip.
+    RateLimited,
+}
+
+impl BillingSignal {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            BillingSignal::Fault(reason) => reason,
+            BillingSignal::RateLimited => "provider rate-limited (HTTP 429), retrying",
+        }
+    }
+}
+
 /// Billing tripwire: classify provider session errors that must pause the
 /// wave instead of scoring a 0% model failure. Matches HTTP billing/auth/
 /// throttle statuses in session JSON or stderr text (402/401/429 + phrases).
-/// Returns a human reason when tripped, else None.
+/// Returns the fault or the transient rate limit, else None.
 /// Structured provider-error match. Bare `401`/`402`/`429` digit tokens
 /// appear routinely in free-form agent output (toolCallIds
 /// `...c3d429b`, line numbers `401:`, token counts `"output":429`), so
@@ -262,7 +281,7 @@ fn is_model_not_found(text: &str) -> bool {
 ///
 /// Callers: session-jsonl lines are parsed as JSON first (structured arm);
 /// raw stderr lines use the text arm (status-line + phrases only).
-pub fn classify_billing_error(text: &str) -> Option<String> {
+pub fn classify_billing_error(text: &str) -> Option<BillingSignal> {
     let low = text.to_lowercase();
     // Structured arm: JSON envelope with numeric error code.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) {
@@ -286,13 +305,15 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             });
         if let Some(c) = code {
             if c == 402 {
-                return Some("provider billing exhausted (HTTP 402)".to_string());
+                return Some(BillingSignal::Fault(
+                    "provider billing exhausted (HTTP 402)",
+                ));
             }
             if c == 401 {
-                return Some("provider auth rejected (HTTP 401)".to_string());
+                return Some(BillingSignal::Fault("provider auth rejected (HTTP 401)"));
             }
             if c == 429 {
-                return Some("provider rate-limited (HTTP 429)".to_string());
+                return Some(rate_limit_signal(&low));
             }
         }
         // Bare error slugs: {"error":"rate_limit_exceeded"} style.
@@ -313,9 +334,11 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
                 .unwrap()
                 .to_lowercase();
             if l.contains("rate_limit") || l.contains("rate limit") {
-                return Some("provider rate-limited (HTTP 429)".to_string());
+                return Some(rate_limit_signal(&low));
             }
-            return Some("provider billing exhausted (HTTP 402)".to_string());
+            return Some(BillingSignal::Fault(
+                "provider billing exhausted (HTTP 402)",
+            ));
         }
         // Phrase match inside error message fields only (not free text).
         let msg = v
@@ -330,7 +353,9 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
                 || msg.contains("credit exhausted")
                 || msg.contains("out of credit")
             {
-                return Some("provider billing exhausted (HTTP 402)".to_string());
+                return Some(BillingSignal::Fault(
+                    "provider billing exhausted (HTTP 402)",
+                ));
             }
             if msg.contains("rate limit")
                 || msg.contains("rate_limit")
@@ -338,12 +363,12 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
                 || msg.contains("rate-limited")
                 || msg.contains("too many requests")
             {
-                return Some("provider rate-limited (HTTP 429)".to_string());
+                return Some(rate_limit_signal(&low));
             }
             if msg.contains("unauthorized")
                 && (msg.contains("key") || msg.contains("token") || msg.contains("auth"))
             {
-                return Some("provider auth rejected (HTTP 401)".to_string());
+                return Some(BillingSignal::Fault("provider auth rejected (HTTP 401)"));
             }
         }
         // R65 F1: OpenRouter's session line carries the outage in
@@ -362,7 +387,9 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
             || provider_msg.contains("can only afford")
             || (provider_msg.contains("more credits") && provider_msg.contains("max_tokens"))
         {
-            return Some("provider billing exhausted (HTTP 402)".to_string());
+            return Some(BillingSignal::Fault(
+                "provider billing exhausted (HTTP 402)",
+            ));
         }
         return None;
     }
@@ -385,7 +412,9 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
         || (low.contains("more credits") && low.contains("max_tokens"));
     let prefixed_402 = low.trim_start().starts_with("402 ") && (openrouter || phrase);
     if status_line || phrase || openrouter || prefixed_402 {
-        return Some("provider billing exhausted (HTTP 402)".to_string());
+        return Some(BillingSignal::Fault(
+            "provider billing exhausted (HTTP 402)",
+        ));
     }
     let auth_line = low.contains("http/1.1 401")
         || low.contains("http/1.0 401")
@@ -396,7 +425,7 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
         || (low.contains("unauthorized")
             && (low.contains("key") || low.contains("token") || low.contains("auth")))
     {
-        return Some("provider auth rejected (HTTP 401)".to_string());
+        return Some(BillingSignal::Fault("provider auth rejected (HTTP 401)"));
     }
     let limit_line = low.contains("http/1.1 429")
         || low.contains("http/1.0 429")
@@ -410,9 +439,28 @@ pub fn classify_billing_error(text: &str) -> Option<String> {
         || low.contains("rate-limited")
         || low.contains("too many requests")
     {
-        return Some("provider rate-limited (HTTP 429)".to_string());
+        return Some(rate_limit_signal(&low));
     }
     None
+}
+
+/// R77 F1: a 429 is transient while omp is still retrying it. The
+/// `Retrying (n/m)` marker tells the two apart; without it, or with the
+/// retries exhausted (n = m), the 429 ended the session and trips.
+fn rate_limit_signal(low: &str) -> BillingSignal {
+    match retry_counts(low) {
+        Some((n, m)) if n > 0 && n < m => BillingSignal::RateLimited,
+        _ => BillingSignal::Fault("provider rate-limited (HTTP 429)"),
+    }
+}
+
+/// The `Retrying (n/m)` marker omp prints around a provider retry.
+fn retry_counts(low: &str) -> Option<(u32, u32)> {
+    let start = low.find("retrying (")? + "retrying (".len();
+    let rest = &low[start..];
+    let end = rest.find(')')?;
+    let (n, m) = rest[..end].split_once('/')?;
+    Some((n.trim().parse().ok()?, m.trim().parse().ok()?))
 }
 
 pub struct TailSessionContext {
@@ -971,7 +1019,10 @@ impl OmpRunner {
                 for line in reader.lines().map_while(Result::ok) {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
-                        if classify_billing_error(trimmed).is_some() {
+                        if matches!(
+                            classify_billing_error(trimmed),
+                            Some(BillingSignal::Fault(_))
+                        ) {
                             billing_tripped_err.store(true, Ordering::SeqCst);
                         }
                         if is_model_not_found(trimmed) {
@@ -1395,10 +1446,12 @@ impl OmpRunner {
                     if line_buf.ends_with('\n') {
                         // Billing tripwire: provider 402/401/429 must pause the
                         // wave, never score a 0% model failure.
-                        if let Some(reason) = crate::sandbox::omp::classify_billing_error(&line_buf)
+                        if let Some(signal) = crate::sandbox::omp::classify_billing_error(&line_buf)
                         {
-                            ctx.billing_tripped.store(true, Ordering::SeqCst);
-                            let _ = ctx.tx.send(format!("[BILLING] {reason}; pausing queue."));
+                            if let BillingSignal::Fault(reason) = signal {
+                                ctx.billing_tripped.store(true, Ordering::SeqCst);
+                                let _ = ctx.tx.send(format!("[BILLING] {reason}; pausing queue."));
+                            }
                         }
                         // Check limits & telemetry in session line
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line_buf.trim())
@@ -2407,7 +2460,7 @@ mod tests;
 
 #[cfg(test)]
 mod billing_tripwire_tests {
-    use super::classify_billing_error;
+    use super::{classify_billing_error, BillingSignal};
 
     #[test]
     fn tripwire_fires_on_billing_signals() {
@@ -2484,20 +2537,76 @@ mod billing_tripwire_tests {
     fn r65_f1_openrouter_402_trips() {
         let line = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
         assert_eq!(
-            classify_billing_error(line).as_deref(),
-            Some("provider billing exhausted (HTTP 402)")
+            classify_billing_error(line),
+            Some(BillingSignal::Fault(
+                "provider billing exhausted (HTTP 402)"
+            ))
         );
         let variant = "402 This request requires more credits, or fewer max_tokens. You requested up to 131072 tokens, but can only afford 47664. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
         assert_eq!(
-            classify_billing_error(variant).as_deref(),
-            Some("provider billing exhausted (HTTP 402)")
+            classify_billing_error(variant),
+            Some(BillingSignal::Fault(
+                "provider billing exhausted (HTTP 402)"
+            ))
         );
         // The real session jsonl shape: the status and message live on the
         // message, not under error.code/error.message.
         let session = r#"{"type":"message","message":{"role":"assistant","content":[],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0},"stopReason":"error","errorStatus":402,"errorId":402,"errorMessage":"402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit"}}"#;
         assert_eq!(
-            classify_billing_error(session).as_deref(),
-            Some("provider billing exhausted (HTTP 402)")
+            classify_billing_error(session),
+            Some(BillingSignal::Fault(
+                "provider billing exhausted (HTTP 402)"
+            ))
         );
+    }
+
+    /// R77 F1: the real ling stderr line is a transient retry, not a
+    /// fault, in both the raw and the live.log shape.
+    #[test]
+    fn r77_f1_retried_429_is_transient() {
+        let line = "Retrying (1/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream. Please retry shortly, or add your own provider key to use your own limits: https://openrouter.ai/workspaces/default/byok";
+        assert_eq!(
+            classify_billing_error(line),
+            Some(BillingSignal::RateLimited)
+        );
+        assert_eq!(
+            classify_billing_error(&format!("[STDERR] {line}")),
+            Some(BillingSignal::RateLimited)
+        );
+    }
+
+    /// R77 F1: exhausted retries and a final 429 still trip; 402/401 do.
+    #[test]
+    fn r77_f1_exhausted_429_trips() {
+        let exhausted = "Retrying (10/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream.";
+        assert_eq!(
+            classify_billing_error(exhausted),
+            Some(BillingSignal::Fault("provider rate-limited (HTTP 429)"))
+        );
+        assert_eq!(
+            classify_billing_error("HTTP/1.1 429 Too Many Requests"),
+            Some(BillingSignal::Fault("provider rate-limited (HTTP 429)"))
+        );
+        assert_eq!(
+            classify_billing_error(r#"{"error":{"code":429,"message":"rate limit exceeded"}}"#),
+            Some(BillingSignal::Fault("provider rate-limited (HTTP 429)"))
+        );
+        assert!(matches!(
+            classify_billing_error("HTTP/1.1 402 Payment Required"),
+            Some(BillingSignal::Fault(_))
+        ));
+        assert!(matches!(
+            classify_billing_error("HTTP/1.1 401 Unauthorized: invalid api key"),
+            Some(BillingSignal::Fault(_))
+        ));
+        // A retry marker never masks a 401 or 402 fault.
+        assert!(matches!(
+            classify_billing_error("Retrying (1/10): 402 Payment Required"),
+            Some(BillingSignal::Fault(_))
+        ));
+        assert!(matches!(
+            classify_billing_error("Retrying (1/10): 401 Unauthorized: invalid api key"),
+            Some(BillingSignal::Fault(_))
+        ));
     }
 }
