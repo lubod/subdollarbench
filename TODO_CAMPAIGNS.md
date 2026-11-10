@@ -286,6 +286,9 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     429 that omp retried tripped the billing fault (round 77 fixes it).
     Scores so far 0-3 points; turns 190-232 s. Resumes on its ledger
     after round 77 and a $0 rehearsal (operator: "1. then resume ling").
+  - **Each model on the operator's approval** (operator, 2026-11-10):
+    nothing chains; after each model the reviewer reports and waits for
+    "start <model>" (AGENTS.md, "Paid cells and services").
   - **Lanes** (operator, 2026-11-10: "yes"): ling resumes on **1 lane**
     (one small provider; ~15-18 h for its remaining ~9 phases); every
     other model keeps 3 lanes (zero rate limits across 100+ phases on

@@ -154,7 +154,11 @@ A round's "done" record lives in its round file, not in
 ## Standing rules
 
 - **Paid cells and services:** paid cells (`scripts/sql-cell.sh`,
-  `campaign run`) need an explicit operator go-ahead. Only the reviewer
+  `campaign run`) need an explicit operator go-ahead.
+  **One model per go-ahead** (operator, 2026-11-10): a grid runs one
+  model, and the next model starts only on the operator's word after
+  the reviewer has reported the previous one. Never arm or chain a
+  second model in advance. Only the reviewer
   restarts the services (`subdollarbench-engine`, `subdollarbench-gui`),
   on request.
 - **While a cell runs:**
