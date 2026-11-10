@@ -415,7 +415,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&health)?);
             } else {
                 println!(
-                    "turns={} tool_errors={} ref={}/{} turn_p50={:.1}s turn_max={:.1}s empty={} billed_ratio={:?}",
+                    "turns={} tool_errors={} ref={}/{} turn_p50={:.1}s turn_max={:.1}s empty={} rate_limited={} billed_ratio={:?}",
                     health.turns,
                     health.tool_errors,
                     health.ref_refused,
@@ -423,6 +423,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                     health.turn_secs_p50,
                     health.turn_secs_max,
                     health.empty_responses,
+                    health.rate_limited,
                     health.billed_ratio
                 );
             }

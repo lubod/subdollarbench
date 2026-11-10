@@ -33,6 +33,9 @@ pub struct PhaseHealth {
     pub turn_secs_p50: f64,
     pub turn_secs_max: f64,
     pub empty_responses: u64,
+    /// R77 F2: the transient 429s omp retried (`Retrying (n/m)`, n < m).
+    #[serde(default)]
+    pub rate_limited: u64,
     /// billed / list. `None` while the phase is live or when either side is
     /// zero/unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,7 +90,7 @@ impl PhaseHealth {
             None => "—".to_string(),
         };
         format!(
-            "{} turns · {} tool errors · ref {}/{} · turn p50 {:.0}s max {:.0}s · {} empty · billed/list {}",
+            "{} turns · {} tool errors · ref {}/{} · turn p50 {:.0}s max {:.0}s · {} empty · {} rate limited · billed/list {}",
             self.turns,
             self.tool_errors,
             self.ref_refused,
@@ -95,6 +98,7 @@ impl PhaseHealth {
             self.turn_secs_p50,
             self.turn_secs_max,
             self.empty_responses,
+            self.rate_limited,
             billed
         )
     }
@@ -179,6 +183,19 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             h.tool_errors += 1;
         }
         let b = body(line);
+        // R77 F2: a transient 429 (omp's retry line with n < m) is
+        // counted; the classifier is the one rule F1 uses. Only lines
+        // with a retry marker can be transient, so the JSON parse in the
+        // classifier is not paid for every log line.
+        if b.starts_with("[STDERR]")
+            && b.contains("Retrying (")
+            && matches!(
+                crate::sandbox::omp::classify_billing_error(b),
+                Some(crate::sandbox::omp::BillingSignal::RateLimited)
+            )
+        {
+            h.rate_limited += 1;
+        }
         if b.starts_with("$ ") {
             ref_block = b.contains("ref-sql");
             ref_refused_in_block = false;

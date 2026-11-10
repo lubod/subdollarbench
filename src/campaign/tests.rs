@@ -61,7 +61,8 @@ async fn f2_a_provider_billing_fault_stays_fault_and_stops() {
 async fn r65_f2_billing_trip_is_harness_fault() {
     let outage = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804. To increase, visit https://openrouter.ai/workspaces/default/keys/REDACTED and adjust the key's total limit";
     let reason = crate::sandbox::omp::classify_billing_error(outage)
-        .expect("R65 F1 must classify the outage line");
+        .expect("R65 F1 must classify the outage line")
+        .reason();
     let fault = format!("provider billing/auth: {reason}");
     let lc = fixture_campaign_with_lite();
     let opts = CampaignRunOptions {
@@ -4547,6 +4548,19 @@ fn r74_f1_health_from_logs() {
     assert_eq!(deep.tool_errors, 0, "deepseek has no provider tool errors");
     assert_eq!(deep.ref_refused, 0, "deepseek has no ref-sql refusals");
     assert_eq!(deep.empty_responses, 0, "deepseek has no empty responses");
+
+    // R77 F2: the ling phase's real transient 429 retry is counted; an
+    // exhausted retry is the fault F1 trips on, not a count.
+    let ling = health_from_live_log("[05:13:13] [STDERR] Retrying (1/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream. Please retry shortly, or add your own provider key to use your own limits: https://openrouter.ai/workspaces/default/byok\n");
+    assert_eq!(
+        ling.rate_limited, 1,
+        "the ling phase's transient 429 is counted"
+    );
+    let exhausted = health_from_live_log("[05:13:13] [STDERR] Retrying (10/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream.\n");
+    assert_eq!(
+        exhausted.rate_limited, 0,
+        "an exhausted retry is the fault, not a count"
+    );
 
     // The billed/list ratio is set by the rollup writer, not the log.
     let mut billed = minimax.clone();

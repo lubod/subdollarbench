@@ -769,10 +769,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                     .or_else(|| v.get("text"))
                                     .and_then(|t| t.as_str())
                                     .unwrap_or(trimmed);
-                                if let Some(reason) = crate::sandbox::omp::classify_billing_error(
-                                    trimmed,
-                                )
-                                .or_else(|| crate::sandbox::omp::classify_billing_error(text))
+                                // R77 F1: a retried 429 is transient; only a
+                                // fault trips the billing stop.
+                                if let Some(crate::sandbox::omp::BillingSignal::Fault(reason)) =
+                                    crate::sandbox::omp::classify_billing_error(trimmed).or_else(
+                                        || crate::sandbox::omp::classify_billing_error(text),
+                                    )
                                 {
                                     let _ = tx_o.send(format!("[BILLING] {}", reason));
                                     billing_o.store(true, Ordering::SeqCst);
@@ -861,7 +863,11 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 tail.remove(0);
                             }
                         }
-                        if let Some(reason) = crate::sandbox::omp::classify_billing_error(trimmed) {
+                        // R77 F1: a retried 429 is transient; only a
+                        // fault trips the billing stop.
+                        if let Some(crate::sandbox::omp::BillingSignal::Fault(reason)) =
+                            crate::sandbox::omp::classify_billing_error(trimmed)
+                        {
                             let _ = tx_e.send(format!("[BILLING] {}", reason));
                             billing_e.store(true, Ordering::SeqCst);
                         }
