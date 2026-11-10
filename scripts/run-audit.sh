@@ -151,7 +151,9 @@ def audit():
 
     # A rerun much worse than an earlier attempt: group the careers by
     # model + start date; the latest group's median career points under
-    # half of an earlier group's. Hidden runs count.
+    # half of an earlier group's. R77 F3: hidden, rehearsal and smoke
+    # runs are not published, so they never enter the comparison (the
+    # same set as the export).
     groups = {}
     for name in sorted(os.listdir(runs_dir)):
         d = os.path.join(runs_dir, name)
@@ -159,6 +161,8 @@ def audit():
             continue
         r = load(os.path.join(d, "campaign.json"))
         if not r or r.get("rehearsal") or r.get("smoke"):
+            continue
+        if os.path.exists(os.path.join(d, ".portal_hidden")):
             continue
         points = (r.get("career") or {}).get("points")
         if points is None:
@@ -246,6 +250,12 @@ def run_self_test():
     mini_new = "campaign_sdb-sql_minimax_20261108_100000_w1"
     write(mini_old, "minimax", 1, 7.0, clean, 7.0, hidden=True)
     write(mini_new, "minimax", 1, 0.0, bad, 0.0)
+    # R77 F3: a model whose runs are all hidden must raise nothing in the
+    # grid-end mode, even though the two dates would look like a bad rerun.
+    hidden_a = "campaign_sdb-sql_allhidden_20261107_100000_w1"
+    hidden_b = "campaign_sdb-sql_allhidden_20261108_100000_w1"
+    write(hidden_a, "allhidden", 1, 9.0, clean, 9.0, hidden=True)
+    write(hidden_b, "allhidden", 1, 1.0, bad, 1.0, hidden=True)
     ids = [mini_new]
     for n, model in enumerate(["anthropic", "deepseek", "google", "openai",
                                "qwen", "xiaomi"]):
@@ -263,14 +273,22 @@ def run_self_test():
     export, runs_dir, waivers = exp, runs, os.path.join(root, "none.txt")
     findings, open_f, _ = audit()
     kinds = {(f["model"], f["kind"]) for f in open_f}
-    want = {("minimax", "tool-errors"), ("minimax", "phase1-zero"),
-            ("minimax", "worse-rerun")}
+    want = {("minimax", "tool-errors"), ("minimax", "phase1-zero")}
     assert want <= kinds, f"missing minimax findings: {kinds}"
+    assert ("minimax", "worse-rerun") not in kinds, (
+        f"a hidden earlier run produced a worse-rerun: {kinds}")
     assert not any(m != "minimax" for m, _ in kinds), f"clean model flagged: {kinds}"
     waivers = waiver
     findings, open_f, waived = audit()
     assert not open_f, f"waivers did not close: {open_f}"
-    assert len(waived) >= 3, f"waivers not printed: {waived}"
+    assert len(waived) >= 2, f"waivers not printed: {waived}"
+    # The grid-end mode (no export): the all-hidden model is not audited.
+    export = ""
+    findings, open_f, _ = audit()
+    assert not any(f["model"] == "allhidden" for f in findings), (
+        f"an all-hidden model was audited: {findings}")
+    assert not any(f["kind"] == "worse-rerun" for f in findings), (
+        f"a hidden run produced a worse-rerun: {findings}")
     print("RESULT: PASS (run-audit self-test)")
 
 if self_test:
