@@ -1099,7 +1099,7 @@ fn mark_badge(c: &CareerCell) -> String {
 /// index is the ranked career's start-time position within its
 /// model/harness/effort/rules group (R64-3/R65 F7); an unranked cell
 /// follows the ranked ones.
-fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
+fn career_labels(cells: &[CareerCell], current_rules: &str) -> HashMap<String, String> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, c) in cells.iter().enumerate() {
         match groups.iter_mut().find(|g| {
@@ -1120,8 +1120,8 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
             let cb = &cells[*b];
             // R67 F3 (R64-3): only a paid career (ranked or unfinished) is
             // numbered; a rehearsal or smoke cell is not.
-            let numbered_a = ca.key.current_rules && !ca.rehearsal && !ca.smoke;
-            let numbered_b = cb.key.current_rules && !cb.rehearsal && !cb.smoke;
+            let numbered_a = ca.rules == current_rules && !ca.rehearsal && !ca.smoke;
+            let numbered_b = cb.rules == current_rules && !cb.rehearsal && !cb.smoke;
             numbered_b
                 .cmp(&numbered_a)
                 .then_with(|| ca.started.cmp(&cb.started))
@@ -1131,7 +1131,7 @@ fn career_labels(cells: &[CareerCell]) -> HashMap<String, String> {
         for idx in g {
             let c = &cells[*idx];
             let date = c.started.get(..10).filter(|d| !d.is_empty()).unwrap_or("—");
-            let label = if c.key.current_rules && !c.rehearsal && !c.smoke {
+            let label = if c.rules == current_rules && !c.rehearsal && !c.smoke {
                 n += 1;
                 format!("{} · career {} · {}", short_model(&c.model), n, date)
             } else if c.rehearsal {
@@ -1704,7 +1704,7 @@ fn render_board(cells: &[CareerCell]) -> String {
         .iter()
         .filter(|c| c.key.current_rules && (c.rehearsal || c.smoke))
         .collect();
-    let labels = career_labels(cells);
+    let labels = career_labels(cells, crate::report::rules::RULES_VERSION);
     let stability = rank_stability(cells, &groups);
     let ranked_cells = || cells.iter().filter(|c| c.finished && c.key.current_rules);
     let scales = DotScales {
@@ -2614,7 +2614,7 @@ fn render_results(cells: &[CareerCell]) -> String {
 /// the current rules as current; the archived .45 report treats .45 as
 /// current, so its charts and ranks show the .45 careers.
 fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
-    let labels = career_labels(cells);
+    let labels = career_labels(cells, page_rules);
     let groups = model_groups_for(cells, page_rules);
     let colours = model_colours(cells);
     let indices = model_order(cells);
@@ -4372,6 +4372,14 @@ mod tests {
             archived.contains("oldmodel"),
             "the archive does not show the .45 career: {archived}"
         );
+        assert!(
+            archived.contains("oldmodel · career 1"),
+            "the archive does not number the .45 career: {archived}"
+        );
+        assert!(
+            !archived.contains("newmodel"),
+            "a .46 model leaked into the archived .45 report: {archived}"
+        );
         // A complete .46 result for the .45 model removes the section and
         // the archive.
         career(&runs, "new-old", "oldmodel", [3.0; 4], [0.01; 4]);
@@ -5290,7 +5298,7 @@ mod tests {
         career(&runs, "reh", "m", [1.0; 4], [0.0; 4]);
         set_mark(&runs, "reh", 4, "rehearsal");
         let cells = careers(runs.to_str().unwrap());
-        let labels = career_labels(&cells);
+        let labels = career_labels(&cells, crate::report::rules::RULES_VERSION);
         for (prefix, n, date) in [
             ("p1", 1, "2026-11-04"),
             ("p2", 2, "2026-11-05"),
