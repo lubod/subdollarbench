@@ -282,6 +282,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
   qwen. Model 1 (ling) is armed (`runs/grid-arm-v46-ling.sh`): after the
   bar on `c18f72a19608`, a $0 rehearsal, then 3 careers. The model
   checks expire 2026-11-16; re-run them for the models after that.
+  - **Ling stopped 2026-11-10 06:36 CET** after 4 phases: one transient
+    429 that omp retried tripped the billing fault (round 77 fixes it).
+    Scores so far 0-3 points; turns 190-232 s. Resumes on its ledger
+    after round 77 and a $0 rehearsal (operator: "1. then resume ling").
 - ~~Investigate: `ref-sql` drops out~~ (solved by round 74: a prompt
   renderer bug, not an outage).
 - (old note) **Investigate: `ref-sql` drops out during agent sessions** (all
