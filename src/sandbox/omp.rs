@@ -1446,12 +1446,11 @@ impl OmpRunner {
                     if line_buf.ends_with('\n') {
                         // Billing tripwire: provider 402/401/429 must pause the
                         // wave, never score a 0% model failure.
-                        if let Some(signal) = crate::sandbox::omp::classify_billing_error(&line_buf)
+                        if let Some(BillingSignal::Fault(reason)) =
+                            crate::sandbox::omp::classify_billing_error(&line_buf)
                         {
-                            if let BillingSignal::Fault(reason) = signal {
-                                ctx.billing_tripped.store(true, Ordering::SeqCst);
-                                let _ = ctx.tx.send(format!("[BILLING] {reason}; pausing queue."));
-                            }
+                            ctx.billing_tripped.store(true, Ordering::SeqCst);
+                            let _ = ctx.tx.send(format!("[BILLING] {reason}; pausing queue."));
                         }
                         // Check limits & telemetry in session line
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line_buf.trim())
