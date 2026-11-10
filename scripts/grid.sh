@@ -527,7 +527,7 @@ live_check() {
     local model="$1" worker="$2" phase="$3" cell_pid="$4" marker="$5" out="$6"
     local tag="${model//\//_}"; tag="${tag//:/_}"
     local poll="${SDB_GRID_HEALTH_POLL:-120}"
-    local dir="" vals turns errors empty p50 refr refq
+    local dir="" vals turns errors empty p50 refr refq rate_limited
     while kill -0 "$cell_pid" 2>/dev/null; do
         if [[ -z "$dir" ]]; then
             dir="$(find "$RUNS" -maxdepth 1 -type d -name "campaign_sdb-sql_${tag}_*_w${worker}" -newer "$marker" -print -quit 2>/dev/null || true)"
@@ -541,11 +541,12 @@ except Exception:
     raise SystemExit(1)
 print(int(h.get("turns") or 0), int(h.get("tool_errors") or 0),
       int(h.get("empty_responses") or 0), float(h.get("turn_secs_p50") or 0),
-      int(h.get("ref_refused") or 0), int(h.get("ref_queries") or 0))
+      int(h.get("ref_refused") or 0), int(h.get("ref_queries") or 0),
+      int(h.get("rate_limited") or 0))
 PY
 )" || vals=""
             if [[ -n "$vals" ]]; then
-                read -r turns errors empty p50 refr refq <<< "$vals"
+                read -r turns errors empty p50 refr refq rate_limited <<< "$vals"
                 if (( turns >= 20 && errors >= 5 )) \
                     && awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'; then
                     printf '%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" > "$out"
@@ -570,6 +571,10 @@ PY
                 fi
                 if (( refq > 0 )) && awk -v r="$refr" -v q="$refq" 'BEGIN { exit !(100 * r / q > 10) }'; then
                     log "live health warning: worker $worker phase $phase ref-sql ${refr}/${refq} refused"
+                fi
+                # R77 F2: transient 429s warn above 10; they never stop.
+                if (( rate_limited > 10 )); then
+                    log "live health warning: worker $worker phase $phase $rate_limited rate limits"
                 fi
             fi
         fi
@@ -1860,11 +1865,13 @@ EOF
     SDB_GRID_TRACE="$scenario/trace.tsv"
     export SDB_GRID_TRACE
     export SDB_FAKE_PREFIX=f2b
-    export SDB_FAKE_HEALTH='{"turns":100,"tool_errors":0,"ref_queries":10,"ref_refused":0,"turn_secs_p50":10.0,"turn_secs_max":40.0,"empty_responses":0,"billed_ratio":1.0}'
+    export SDB_FAKE_HEALTH='{"turns":100,"tool_errors":0,"ref_queries":10,"ref_refused":0,"turn_secs_p50":10.0,"turn_secs_max":40.0,"empty_responses":0,"rate_limited":11,"billed_ratio":1.0}'
     export SDB_FAKE_LIVE_SLEEP=1
     export SDB_GRID_HEALTH_POLL=0.1
     load_careers "$CAREERS_FILE"
-    run_grid || { echo "a clean live health failed the grid"; exit 1; }
+    out="$(run_grid 2>&1)" || { echo "a clean live health failed the grid: $out"; exit 1; }
+    grep -q '11 rate limits' <<<"$out" || {
+        echo "the live check did not warn about 11 rate limits: $out"; exit 1; }
     stop="$(awk -F'\t' 'NR > 1 { print $8 }' "$LEDGER")"
     [[ "$stop" == "ok" ]] || { echo "a clean live health wrote '$stop'"; exit 1; }
     if find "$runs" -maxdepth 2 -name .live_stop -print -quit | grep -q .; then

@@ -4549,6 +4549,19 @@ fn r74_f1_health_from_logs() {
     assert_eq!(deep.ref_refused, 0, "deepseek has no ref-sql refusals");
     assert_eq!(deep.empty_responses, 0, "deepseek has no empty responses");
 
+    // R77 F2: the ling phase's real transient 429 retry is counted; an
+    // exhausted retry is the fault F1 trips on, not a count.
+    let ling = health_from_live_log("[05:13:13] [STDERR] Retrying (1/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream. Please retry shortly, or add your own provider key to use your own limits: https://openrouter.ai/workspaces/default/byok\n");
+    assert_eq!(
+        ling.rate_limited, 1,
+        "the ling phase's transient 429 is counted"
+    );
+    let exhausted = health_from_live_log("[05:13:13] [STDERR] Retrying (10/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream.\n");
+    assert_eq!(
+        exhausted.rate_limited, 0,
+        "an exhausted retry is the fault, not a count"
+    );
+
     // The billed/list ratio is set by the rollup writer, not the log.
     let mut billed = minimax.clone();
     billed.billed_ratio = Some(1.1);
