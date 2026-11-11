@@ -4578,6 +4578,20 @@ fn r79_f2_health_reads_opencode_log() {
         oc.turn_secs_p50 > 0.0 && oc.turn_secs_max >= oc.turn_secs_p50,
         "opencode turn times: {oc:?}"
     );
+    assert_eq!(
+        oc.empty_responses, 0,
+        "a healthy opencode session has no empty turns"
+    );
     assert_eq!(oc.ref_queries, 1, "opencode ref-sql queries");
     assert_eq!(oc.ref_refused, 0, "opencode ref-sql refusals");
+
+    // R79-1: a truly empty turn (a step with no response and no tool) is
+    // counted once, at its end.
+    let empty = health_from_live_log(
+        "[10:00:00] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 200, Budget: $0.99\n\
+         [10:00:01] [LIVE] Turn 1 started\n\
+         [10:00:05] [TELEMETRY] turn=1 max_turns=200 spent=0.000000 tokens=0\n",
+    );
+    assert_eq!(empty.turns, 1, "the empty turn is a turn");
+    assert_eq!(empty.empty_responses, 1, "the empty turn is counted");
 }

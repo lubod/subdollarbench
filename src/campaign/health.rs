@@ -143,6 +143,11 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
     let mut h = PhaseHealth::default();
     let mut session_start: Option<u64> = None;
     let mut last_turn: Option<u64> = None;
+    // R79-1: the opencode turn start (the [LIVE] marker) and the last
+    // response/tool clock; a turn is judged at its end ([TELEMETRY] or
+    // the log end), never at its start.
+    let mut turn_start: Option<u64> = None;
+    let mut last_event: Option<u64> = None;
     let mut deltas: Vec<f64> = Vec::new();
     let mut ref_block = false;
     let mut ref_refused_in_block = false;
@@ -167,6 +172,8 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         if line.contains("[LIVE] Agent initialized") {
             session_start = clock(line);
             last_turn = None;
+            turn_start = None;
+            last_event = None;
             ref_block = false;
             ref_refused_in_block = false;
             has_response = false;
@@ -175,18 +182,22 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         }
         if line.contains("[LIVE] Turn ") && line.contains(" started") {
             h.turns += 1;
-            let now = clock(line).or(last_turn).or(session_start);
-            if let (Some(prev), Some(now)) = (last_turn.or(session_start), now) {
-                deltas.push(((now + 86_400 - prev) % 86_400) as f64);
-            }
-            last_turn = now;
-            if !has_response && !has_tool {
-                h.empty_responses += 1;
-            }
+            turn_start = clock(line);
             has_response = false;
             has_tool = false;
             ref_block = false;
             ref_refused_in_block = false;
+            continue;
+        }
+        // R79-1: the opencode step's end judges the turn and its time.
+        if line.contains("[TELEMETRY] turn=") {
+            if let Some(start) = turn_start.take() {
+                let now = clock(line).or(last_event).unwrap_or(start);
+                deltas.push(((now + 86_400 - start) % 86_400) as f64);
+                if !has_response && !has_tool {
+                    h.empty_responses += 1;
+                }
+            }
             continue;
         }
         if line.contains("[BENCH-POLICY] turn=") {
@@ -241,7 +252,9 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             || b.starts_with("[BENCH-EVENT]")
         {
             has_response = true;
+            last_event = clock(line).or(last_event);
         } else if b.starts_with("[ACTION]") {
+            last_event = clock(line).or(last_event);
             has_tool = true;
             // R79 F2: the opencode `[ACTION] {tool} {json}` line carries the
             // tool command and its result. The omp `[ACTION]` line has no
@@ -278,6 +291,15 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         }
     }
 
+    // R79-1: a last turn with no [TELEMETRY] is judged at the log end,
+    // with the last response/tool as its end.
+    if let Some(start) = turn_start {
+        let now = last_event.unwrap_or(start);
+        deltas.push(((now + 86_400 - start) % 86_400) as f64);
+        if !has_response && !has_tool {
+            h.empty_responses += 1;
+        }
+    }
     h.turn_secs_max = deltas.iter().copied().fold(0.0, f64::max);
     h.turn_secs_p50 = median(deltas);
     h
