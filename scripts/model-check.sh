@@ -56,6 +56,13 @@ record_path() {
     printf '%s/model-check-%s%s.txt' "$(record_dir)" "$prefix" "$(model_slug "$1")"
 }
 
+# R79-18: a settled canned usage series for the self-test: six equal
+# reads, the 30 s settle window at the live 5 s interval.
+settled_series() {
+    local v="$1"
+    printf '%s,%s,%s,%s,%s,%s' "$v" "$v" "$v" "$v" "$v" "$v"
+}
+
 # R79-4: the per-run opencode config content: the model's effort variants
 # and the snapshot provider pin (the same shape the runner sends). The pin
 # is per model: a provider-wide body would pin opencode's title model too.
@@ -398,7 +405,8 @@ PY
             local name="$1" rc=0 rec
             rec="$(oc_record "$name")"
             out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
-                SDB_MODEL_CHECK_USAGE_BEFORE=0 SDB_MODEL_CHECK_USAGE_AFTER=0.000015 \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+                SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.000015)" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
                 "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
             [[ "$rc" -eq 0 ]] || {
@@ -423,10 +431,12 @@ PY
                 cat "$rec" >&2; exit 1; }
         }
         expect_fail_oc() {
-            local db="$1" want="$2" name="$3" rc=0 rec
+            local db="$1" want="$2" name="$3" series="${4:-}" rc=0 rec
             rec="$(oc_record "$name")"
+            [[ -n "$series" ]] || series="$(settled_series "${OC_BILL-0.000015}")"
             out="$(SDB_MODEL_CHECK_OPENCODE_DB="$db" \
-                SDB_MODEL_CHECK_USAGE_BEFORE=0 SDB_MODEL_CHECK_USAGE_AFTER="${OC_BILL-0.000015}" \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+                SDB_MODEL_CHECK_USAGE_AFTER="$series" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
                 "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
             [[ "$rc" -ne 0 ]] || {
@@ -489,6 +499,31 @@ JSON
             "the OpenRouter usage lags or the run was not billed" \
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] a positive run with a \$0 bill fails"
+
+        case_name=opencode-settle
+        out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+            SDB_MODEL_CHECK_USAGE_AFTER="0,0,0.000005,0,0,0.000015,0.000015,0.000015,0.000015,0.000015,0.000015" \
+            SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+            "$ROOT/scripts/model-check.sh" --harness opencode \
+            "openrouter/openai/gpt-6-luna-pro" 2>&1)" || rc=$?
+        [[ "$rc" -eq 0 ]] || {
+            echo "[self-test] the settling series was refused: $out" >&2; exit 1; }
+        grep -q 'usage:    settled after 11 reads' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the settling series did not record 11 reads" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        grep -q 'bill:     \$0.00001500' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the settling series did not use the settled bill" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        echo "[self-test] a rise-fall usage series passes with its settled value"
+
+        case_name=opencode-settle-never
+        never="$(python3 -c 'print(",".join(["0","0.000015"] * 18))')"
+        expect_fail_oc "$dir/oc-pass.db" "usage not settled after 36 reads" \
+            "openrouter/openai/gpt-6-luna-pro" "$never"
+        echo "[self-test] a usage series that never settles fails"
 
         case_name=opencode-negative-pass
         SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=0 \
@@ -816,26 +851,75 @@ opencode_check() {
             exit 1
         fi
     fi
+    # R79-18: the usage counter is not monotonic (stale reads can fall
+    # back) and a session's generations land at different times, so a
+    # single rise is not the bill. Poll until the delta is unchanged for
+    # 30 s (six reads in a row) within the 180 s bound; the record names
+    # the read count. A series that never settles fails.
+    local usage_settled=0 usage_reads=0 usage_last=""
+    local -a usage_deltas=()
+    usage_delta() {
+        python3 -c 'import sys; print("%.10f" % max(0.0, float(sys.argv[2]) - float(sys.argv[1])))' \
+            "$usage_before" "$1"
+    }
+    usage_settles() {
+        local n=${#usage_deltas[@]} first i
+        [[ "$n" -ge 6 ]] || return 1
+        first="${usage_deltas[$((n - 6))]}"
+        # A $0 delta is the lag (or a genuine $0 bill, which R79-16
+        # fails); it must not settle the poll.
+        python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) > 0 else 1)' \
+            "$first" || return 1
+        for ((i = n - 5; i < n; i++)); do
+            [[ "${usage_deltas[$i]}" == "$first" ]] || return 1
+        done
+        return 0
+    }
     if [[ -n "${SDB_MODEL_CHECK_USAGE_AFTER:-}" ]]; then
-        usage_after="$SDB_MODEL_CHECK_USAGE_AFTER"
-    else
-        # R79-5a: the usage figure can lag; poll for up to 180 s (the
-        # fourth review saw a $0 bill after the 60 s window).
-        usage_after=""
-        for _ in $(seq 1 36); do
-            usage_after="$(usage_query)" || usage_after=""
-            if [[ -n "$usage_after" ]] && python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[2]) > float(sys.argv[1]) else 1)' "$usage_before" "$usage_after"; then
+        # The self-test's canned comma-separated series; no sleeps.
+        local value
+        local -a usage_series
+        IFS=',' read -r -a usage_series <<<"$SDB_MODEL_CHECK_USAGE_AFTER"
+        for value in "${usage_series[@]}"; do
+            value="${value// /}"
+            [[ -n "$value" ]] || continue
+            usage_reads=$((usage_reads + 1))
+            usage_last="$value"
+            usage_deltas+=("$(usage_delta "$value")")
+            if usage_settles; then
+                usage_settled=1
                 break
+            fi
+        done
+    else
+        local value
+        for _ in $(seq 1 36); do
+            value="$(usage_query)" || value=""
+            if [[ -n "$value" ]]; then
+                usage_reads=$((usage_reads + 1))
+                usage_last="$value"
+                usage_deltas+=("$(usage_delta "$value")")
+                if usage_settles; then
+                    usage_settled=1
+                    break
+                fi
             fi
             sleep 5
         done
     fi
-    if [[ -z "$usage_after" ]]; then
+    if [[ "$usage_reads" -eq 0 || -z "$usage_last" ]]; then
         echo "[model-check] FATAL: cannot read the OpenRouter key usage after the run" >&2
         exit 1
     fi
+    usage_after="$usage_last"
     bill="$(python3 -c 'import sys; print(max(0.0, float(sys.argv[2]) - float(sys.argv[1])))' \
         "$usage_before" "$usage_after")"
+    local usage_note
+    if [[ "$usage_settled" == "1" ]]; then
+        usage_note="settled after $usage_reads reads (delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+    else
+        usage_note="not settled after $usage_reads reads (last delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+    fi
     # R79-4: the negative probe. A wrong pin must be refused by
     # OpenRouter's routing at $0 (no inference is billed); if the wrong-pin
     # run succeeds, opencode did not forward the pin and the positive run
@@ -1015,6 +1099,14 @@ PY
             reasons="$neg_line"
         fi
     fi
+    if [[ "$usage_settled" != "1" ]]; then
+        ok=0
+        if [[ -n "$reasons" ]]; then
+            reasons="$reasons; usage $usage_note"
+        else
+            reasons="usage $usage_note"
+        fi
+    fi
     {
         echo "model:    $id"
         echo "sent:     $sent"
@@ -1026,6 +1118,7 @@ PY
             echo "provider: $provider (no pin sent)"
         fi
         echo "bill:     \$$bill (OpenRouter key usage; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"); snapshot \$$expected, ratio $ratio)"
+        echo "usage:    $usage_note"
         echo "tokens:   $tokens_line (opencode session)"
         echo "session:  $raw_row (session_v2)"
         echo "tool-calls: $(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d tool part(s)" % len(v["tools"]))' "$verdict")"
