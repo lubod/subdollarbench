@@ -192,20 +192,39 @@ fn r79_f3_opencode_cost_matches_bill() {
     assert_eq!(stats.completion_tokens, 44);
 }
 
-/// R79 F2: the opencode harness's billing signals: a 402 trips at once,
-/// a retried 429 is transient (counted, not a fault), and the structured
-/// rate-limit event keeps its resume path.
+/// R79 F2: the opencode harness's billing signals, read from the lines
+/// the local stub made opencode print: the 402 trips at once, the
+/// exhausted 429 is a fault (not a count), and the broken stream is not a
+/// billing fault at all.
 #[test]
 fn r79_f2_opencode_billing_signals() {
-    let text = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804.";
-    assert!(matches!(
-        crate::sandbox::omp::classify_billing_error(text),
-        Some(crate::sandbox::omp::BillingSignal::Fault(_))
-    ));
-    let retry = "Retrying (1/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream.";
+    fn log_json(fixture: &str) -> String {
+        fixture
+            .lines()
+            .find_map(|line| line.split_once("[LOG] ").map(|(_, json)| json.to_string()))
+            .expect("the fixture has a [LOG] line")
+    }
+    for (name, fixture) in [
+        (
+            "402",
+            include_str!("../../campaign/fixtures/health/opencode-402.txt"),
+        ),
+        (
+            "exhausted 429",
+            include_str!("../../campaign/fixtures/health/opencode-exhausted.txt"),
+        ),
+    ] {
+        assert!(
+            OpenCodeRunner::error_event_billing_reason(&log_json(fixture)).is_some(),
+            "{name} must be a billing fault"
+        );
+    }
     assert_eq!(
-        crate::sandbox::omp::classify_billing_error(retry),
-        Some(crate::sandbox::omp::BillingSignal::RateLimited)
+        OpenCodeRunner::error_event_billing_reason(&log_json(include_str!(
+            "../../campaign/fixtures/health/opencode-stream_error.txt"
+        ))),
+        None,
+        "a broken stream is a tool error, not a billing fault"
     );
     let event = ev(r#"{"error":{"type":"provider.billing","message":"insufficient credits"}}"#);
     assert!(OpenCodeRunner::provider_auth_billing_reason(&event).is_some());
@@ -224,14 +243,12 @@ fn r79_f4_opencode_config_pins_the_provider() {
     assert_eq!(
         cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["body"]["provider"]
             ["only"][0],
-        "novita",
-        "the model body must carry the pin: {cfg}"
+        "novita"
     );
     assert_eq!(
         cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["body"]["provider"]
             ["order"][0],
-        "novita",
-        "the model body must carry the pin order: {cfg}"
+        "novita"
     );
     assert!(
         cfg["providers"]["openrouter"]["body"].is_null(),

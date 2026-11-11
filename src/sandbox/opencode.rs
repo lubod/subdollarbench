@@ -262,6 +262,15 @@ impl OpenCodeRunner {
         config.to_string()
     }
 
+    /// R79-2: the billing signal of an opencode error event: the 402
+    /// quota and the exhausted 429 are faults; a broken stream is not.
+    fn error_event_billing_reason(line: &str) -> Option<String> {
+        match crate::sandbox::omp::classify_billing_error(line) {
+            Some(crate::sandbox::omp::BillingSignal::Fault(reason)) => Some(reason.to_string()),
+            _ => None,
+        }
+    }
+
     /// Client-side variant-resolution failure: instant, zero-spend, retryable
     /// without the suffix (prose-only effort = today's behavior). Real shape
     /// captured from a live probe — distinct from rate-limit (429 shapes)
@@ -878,6 +887,15 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                     rate_o.store(true, Ordering::SeqCst);
                                 }
                                 if let Some(reason) = Self::provider_auth_billing_reason(&v) {
+                                    let _ = tx_o.send(format!("[BILLING] {reason}"));
+                                    billing_o.store(true, Ordering::SeqCst);
+                                }
+                                // R79-2: the opencode error events (the
+                                // provider.quota 402 and the exhausted
+                                // provider.rate-limit 429) go through the
+                                // shared classifier; a stream error stays a
+                                // tool error, not a billing fault.
+                                if let Some(reason) = Self::error_event_billing_reason(trimmed) {
                                     let _ = tx_o.send(format!("[BILLING] {reason}"));
                                     billing_o.store(true, Ordering::SeqCst);
                                 }

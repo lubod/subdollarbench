@@ -4595,3 +4595,40 @@ fn r79_f2_health_reads_opencode_log() {
     assert_eq!(empty.turns, 1, "the empty turn is a turn");
     assert_eq!(empty.empty_responses, 1, "the empty turn is counted");
 }
+
+/// R79-2: the local stub's captured opencode lines. The stub answered
+/// 429-then-200, 429-always, 402 and a broken stream; the counters read
+/// what opencode actually printed.
+#[test]
+fn r79_f2_health_reads_opencode_stub_lines() {
+    // A successful 429 retry is invisible: one Turn line, one answer.
+    let retry = health_from_live_log(include_str!("fixtures/health/opencode-retry.txt"));
+    assert_eq!(retry.turns, 1, "the successful retry is one turn");
+    assert_eq!(
+        retry.rate_limited, 0,
+        "opencode does not print the successful retry; nothing to count"
+    );
+    assert_eq!(retry.empty_responses, 0, "the retried turn answered");
+
+    // An exhausted 429 prints one Turn per attempt and the final error.
+    let exhausted = health_from_live_log(include_str!("fixtures/health/opencode-exhausted.txt"));
+    assert_eq!(exhausted.turns, 10, "ten attempts");
+    assert_eq!(
+        exhausted.rate_limited, 9,
+        "nine retries before the exhausted 429"
+    );
+
+    // A broken stream retries too, but it is a tool error, not a 429.
+    let stream = health_from_live_log(include_str!("fixtures/health/opencode-stream_error.txt"));
+    assert_eq!(stream.turns, 10, "ten stream attempts");
+    assert_eq!(stream.tool_errors, 1, "the stream error is one tool error");
+    assert_eq!(stream.rate_limited, 0, "a stream retry is not a rate limit");
+
+    // A tool turn is not an empty turn; the plain answer has no Turn line.
+    let tool = health_from_live_log(include_str!("fixtures/health/opencode-tool.txt"));
+    assert_eq!(tool.turns, 1, "the tool turn");
+    assert_eq!(tool.empty_responses, 0, "a tool turn is not empty");
+    let ok = health_from_live_log(include_str!("fixtures/health/opencode-ok.txt"));
+    assert_eq!(ok.turns, 0, "a plain answer has no [LIVE] Turn line");
+    assert_eq!(ok.empty_responses, 0, "a plain answer is not an empty turn");
+}

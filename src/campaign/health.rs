@@ -153,6 +153,11 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
     let mut ref_refused_in_block = false;
     let mut has_response = false;
     let mut has_tool = false;
+    // R79-2: opencode's extra step_starts are retried requests. They are
+    // counted as rate-limited retries only when the run also ends in a
+    // 429; a stream-error retry is a tool error, not a rate limit.
+    let mut retries: u64 = 0;
+    let mut saw_429 = false;
 
     for line in text.lines() {
         if line.contains("[BENCH-POLICY] active maxTurns=") {
@@ -181,6 +186,11 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             continue;
         }
         if line.contains("[LIVE] Turn ") && line.contains(" started") {
+            if turn_start.is_some() {
+                // R79-2: opencode's extra step_start is a retried
+                // request; count the retry and drop the open turn.
+                retries += 1;
+            }
             h.turns += 1;
             turn_start = clock(line);
             has_response = false;
@@ -218,8 +228,15 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         }
         if line.contains("provider stream ended with an error")
             || line.contains("Upstream error from")
+            || (line.contains("\"type\":\"error\"")
+                && (line.contains("provider.stream")
+                    || line.contains("stream broke")
+                    || line.contains("stream ended")))
         {
             h.tool_errors += 1;
+        }
+        if line.contains("\"status\":429") || line.contains("provider.rate-limit") {
+            saw_429 = true;
         }
         let b = body(line);
         // R77 F2: a transient 429 (omp's retry line with n < m) is
@@ -299,6 +316,9 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         if !has_response && !has_tool {
             h.empty_responses += 1;
         }
+    }
+    if saw_429 {
+        h.rate_limited += retries;
     }
     h.turn_secs_max = deltas.iter().copied().fold(0.0, f64::max);
     h.turn_secs_p50 = median(deltas);
