@@ -294,6 +294,12 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     safe), the comparison, the `.47` round (one bar), then one rerun of
     every model. Round 78 (language and coverage columns) follows.
     Ling's `.46` phases will be void.
+    Operator, 2026-11-11, for `.47`: the bare `python3` stays in the
+    sandbox for test scripts; **3 careers** per model stay; no minimum
+    speed in the model check; the harness comparison runs **deepseek
+    only** (1 career per harness, off-peak); the model line-up is
+    unchanged for now. The second campaign and a video channel wait for
+    a stable `.47` board.
     Ling's grid was killed on the operator's word (2026-11-11 "kill
     ling"): 7 phases in the ledger, 2 cancelled in flight and hidden.
   - **Each model on the operator's approval** (operator, 2026-11-10):
