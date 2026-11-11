@@ -667,10 +667,16 @@ opencode_check() {
     if [[ -z "$db" ]]; then
         mkdir -p "$run_dir/ws" "$run_dir/cfg" "$run_dir/data"
         local cfg_json
-        cfg_json="$(python3 - "$id" <<'PY'
+        cfg_json="$(python3 - "$id" "$pin" <<'PY'
 import json, sys
-print(json.dumps({"providers": {"openrouter": {"models": {sys.argv[1]: {
-    "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}}}))
+model_id, pin = sys.argv[1], sys.argv[2]
+entry = {"variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}
+# R79-4: the pinned upstream endpoint, sent through the opencode
+# OpenRouter provider options (the pin's slug before any /variant).
+slug = pin.split("/")[0] if pin else ""
+if slug:
+    entry["options"] = {"provider": {"only": [slug], "order": [slug]}}
+print(json.dumps({"providers": {"openrouter": {"models": {model_id: entry}}}}))
 PY
 )"
         set +e
