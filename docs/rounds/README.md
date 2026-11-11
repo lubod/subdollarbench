@@ -78,3 +78,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [77](77.md) | A retried rate limit is not a billing fault (a 429 omp gets past no longer stops the grid); rate limits counted; the grid-end audit sees the export | merged `614f4e8` |
 | [78](78.md) | The board shows each career's language and test coverage; parked display findings (display only) | draft |
 | [79](79.md) | The opencode candidate harness is fit for a graded comparison: no host mounts, health and faults, the model check, hidden comparison cells | open |
+| [80](80.md) | A narration voice cloned from the operator's own recording: the reading text, the recording check, resumable narration, a pronunciation list (outside the graded code) | draft |
