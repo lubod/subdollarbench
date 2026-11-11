@@ -234,26 +234,32 @@ impl OpenCodeRunner {
         // options (`provider.only`/`order`), the same endpoint the omp
         // check pins. This one function builds the per-trial config the
         // unit test reads.
-        let mut entry = serde_json::json!({
-            "variants": [
-                {"id": "low", "settings": {"reasoning": {"effort": "low"}}},
-                {"id": "high", "settings": {"reasoning": {"effort": "high"}}},
-                {"id": "max", "settings": {"reasoning": {"effort": "max"}}}
-            ]
+        let mut config = serde_json::json!({
+            "providers": {
+                "openrouter": {
+                    "models": {
+                        model_bare: {
+                            "variants": [
+                                {"id": "low", "settings": {"reasoning": {"effort": "low"}}},
+                                {"id": "high", "settings": {"reasoning": {"effort": "high"}}},
+                                {"id": "max", "settings": {"reasoning": {"effort": "max"}}}
+                            ]
+                        }
+                    }
+                }
+            }
         });
+        // R79-4: the pin goes in the model's request body. opencode
+        // 2.0.24 ignores the model `options` shape and a provider-wide
+        // `body` would pin the title model too; the per-model body is
+        // the shape it forwards (proved at $0 on the free tier: a wrong
+        // pin is refused by OpenRouter's routing, the right one runs).
         if let Some(pin) = crate::cost::calculator::provider_for_model(model_bare) {
-            entry["options"] = serde_json::json!({
+            config["providers"]["openrouter"]["models"][model_bare]["body"] = serde_json::json!({
                 "provider": {"only": [pin], "order": [pin]}
             });
         }
-        serde_json::json!({
-            "providers": {
-                "openrouter": {
-                    "models": { model_bare: entry }
-                }
-            }
-        })
-        .to_string()
+        config.to_string()
     }
 
     /// Client-side variant-resolution failure: instant, zero-spend, retryable

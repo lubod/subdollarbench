@@ -222,22 +222,28 @@ fn r79_f4_opencode_config_pins_the_provider() {
     ))
     .unwrap();
     assert_eq!(
-        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["options"]
-            ["provider"]["only"][0],
-        "novita"
+        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["body"]["provider"]
+            ["only"][0],
+        "novita",
+        "the model body must carry the pin: {cfg}"
     );
     assert_eq!(
-        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["options"]
-            ["provider"]["order"][0],
-        "novita"
+        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["body"]["provider"]
+            ["order"][0],
+        "novita",
+        "the model body must carry the pin order: {cfg}"
+    );
+    assert!(
+        cfg["providers"]["openrouter"]["body"].is_null(),
+        "the pin must not be provider-wide (it would pin the title model): {cfg}"
     );
     let none: serde_json::Value = serde_json::from_str(&OpenCodeRunner::variant_config_json(
         "google/gemini-2.5-flash",
     ))
     .unwrap();
     assert!(
-        none["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"]["options"].is_null(),
-        "an unpinned model must carry no provider options: {none}"
+        none["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"]["body"].is_null(),
+        "an unpinned model must carry no provider body: {none}"
     );
 }
 

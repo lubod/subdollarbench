@@ -57,15 +57,18 @@ record_path() {
 }
 
 # R79-4: the per-run opencode config content: the model's effort variants
-# and the snapshot provider pin (the same shape the runner sends).
+# and the snapshot provider pin (the same shape the runner sends). The pin
+# is per model: a provider-wide body would pin opencode's title model too.
 opencode_config_json() {
     python3 - "$1" "$2" <<'PY'
 import json, sys
 model_id, pin = sys.argv[1], sys.argv[2]
-entry = {"variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}
+cfg = {"providers": {"openrouter": {"models": {model_id: {
+    "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}}}
 if pin:
-    entry["options"] = {"provider": {"only": [pin], "order": [pin]}}
-print(json.dumps({"providers": {"openrouter": {"models": {model_id: entry}}}}))
+    cfg["providers"]["openrouter"]["models"][model_id]["body"] = {
+        "provider": {"only": [pin], "order": [pin]}}
+print(json.dumps(cfg))
 PY
 }
 
@@ -390,6 +393,9 @@ PY
             grep -q 'provider: openrouter (sent pin: openai)' "$rec" || {
                 echo "[self-test] opencode $name did not record the sent pin" >&2
                 cat "$rec" >&2; exit 1; }
+            grep -q 'negative: pin novita refused by OpenRouter' "$rec" || {
+                echo "[self-test] opencode $name did not record the negative probe" >&2
+                cat "$rec" >&2; exit 1; }
         }
         expect_fail_oc() {
             local db="$1" want="$2" name="$3" rc=0 rec
@@ -409,6 +415,14 @@ PY
         }
 
         case_name=opencode-pass
+        cat > "$dir/negative-refused.json" <<'JSON'
+{"type":"error","error":{"type":"provider.invalid-request","message":"No allowed providers are available for the selected model. Providers serving openai/gpt-6-luna-pro-20260922: openai, but your request's provider.only preference permits only: novita.","status":404}}
+JSON
+        cat > "$dir/negative-other.json" <<'JSON'
+{"type":"error","error":{"type":"provider.rate-limit","message":"rate limited","status":429}}
+JSON
+        export SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=1
+        export SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS="$dir/negative-refused.json"
         make_oc_db "$dir/oc-pass.db" openrouter 0.000015
         expect_pass_oc "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode session passes"
@@ -435,18 +449,36 @@ PY
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode bill below the floor fails"
 
+        case_name=opencode-negative-pass
+        SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=0 \
+            expect_fail_oc "$dir/oc-pass.db" "negative: pin novita was served" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a wrong pin that is served fails the opencode check"
+
+        case_name=opencode-negative-other
+        SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=1 \
+            SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS="$dir/negative-other.json" \
+            expect_fail_oc "$dir/oc-pass.db" "inconclusive" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a negative probe with another error is inconclusive"
+
         case_name=opencode-pin
         cfg="$(opencode_config_json "openai/gpt-6-luna-pro" "openai")"
-        grep -q '"only": \["openai"\]' <<<"$cfg" || {
-            echo "[self-test] the opencode config misses the pin: $cfg" >&2
-            exit 1
-        }
+        python3 - "$cfg" <<'PY' || { echo "[self-test] the opencode config misses the per-model pin: $cfg" >&2; exit 1; }
+import json, sys
+cfg = json.loads(sys.argv[1])
+body = cfg["providers"]["openrouter"]["models"]["openai/gpt-6-luna-pro"]["body"]
+assert body == {"provider": {"only": ["openai"], "order": ["openai"]}}, cfg
+assert "body" not in cfg["providers"]["openrouter"], cfg
+PY
         cfg="$(opencode_config_json "google/gemini-2.5-flash" "")"
-        if grep -q '"only"' <<<"$cfg"; then
-            echo "[self-test] an unpinned opencode config carries a pin: $cfg" >&2
-            exit 1
-        fi
-        echo "[self-test] the opencode config carries the pin"
+        python3 - "$cfg" <<'PY' || { echo "[self-test] an unpinned opencode config carries a pin: $cfg" >&2; exit 1; }
+import json, sys
+cfg = json.loads(sys.argv[1])
+assert "body" not in cfg["providers"]["openrouter"], cfg
+assert "body" not in cfg["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"], cfg
+PY
+        echo "[self-test] the opencode config carries the per-model pin"
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
             echo "[self-test] the slug is not z-ai-glm-5.3" >&2; exit 1; }
@@ -759,6 +791,50 @@ opencode_check() {
     fi
     bill="$(python3 -c 'import sys; print(max(0.0, float(sys.argv[2]) - float(sys.argv[1])))' \
         "$usage_before" "$usage_after")"
+    # R79-4: the negative probe. A wrong pin must be refused by
+    # OpenRouter's routing at $0 (no inference is billed); if the wrong-pin
+    # run succeeds, opencode did not forward the pin and the positive run
+    # proves nothing. A negative run that fails for another reason is
+    # inconclusive, not a pass.
+    local wrong_pin="novita" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
+    if [[ "$pin" == "novita" ]]; then
+        wrong_pin="baidu"
+    fi
+    if [[ -z "$pin" ]]; then
+        neg_line="negative: no pin (skipped)"
+    else
+        if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC:-}" ]]; then
+            neg_rc="$SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC"
+            if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS:-}" ]]; then
+                neg_events="$SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS"
+            fi
+        else
+            local neg_cfg
+            neg_cfg="$(opencode_config_json "$id" "$wrong_pin")"
+            set +e
+            timeout 300 docker run --rm --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
+                -v "$run_dir/ws:/workspace" \
+                -v "$run_dir/cfg:/home/ubuntu/.config/opencode" \
+                -v "$run_dir/data:/home/ubuntu/.local/share/opencode" \
+                -w /workspace -e HOME=/home/ubuntu -e PI_NO_PTY=1 \
+                -e OPENROUTER_API_KEY="$key" -e OPENCODE_CONFIG_CONTENT="$neg_cfg" \
+                subdollar-sandbox opencode run --standalone --format json \
+                --session "ses_model_check_neg_$(model_slug "$model")_$$" \
+                -m "openrouter/$id" --auto -- "Reply with exactly: ok" \
+                > "$neg_events" 2> "$work/opencode-negative.log"
+            neg_rc=$?
+            set -e
+        fi
+        if [[ "$neg_rc" -eq 0 ]]; then
+            neg_line="negative: pin $wrong_pin was served (opencode did not forward the pin)"
+        elif grep -q "No allowed providers are available" "$neg_events" 2>/dev/null \
+            && grep -q "permits only: $wrong_pin" "$neg_events" 2>/dev/null; then
+            neg_ok=1
+            neg_line="negative: pin $wrong_pin refused by OpenRouter's routing (exit $neg_rc)"
+        else
+            neg_line="negative: pin $wrong_pin was inconclusive (exit $neg_rc; no routing refusal)"
+        fi
+    fi
     local verdict
     verdict="$(python3 - "$db" "$id" "$rate_prompt" "$rate_cache_read" \
         "$rate_cache_write" "$rate_completion" "$bill" <<'PY'
@@ -862,6 +938,14 @@ PY
     tokens_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d fresh, %d cached, %d completion, %d cache write" % (v["tokens_fresh"], v["tokens_cached"], v["tokens_completion"], v["tokens_write"]))' "$verdict")"
     raw_row="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("input %d, output %d, reasoning %d, cache read %d, cache write %d, cost %.8f" % (v["tokens_input"], v["tokens_output"], v["tokens_reasoning"], v["tokens_cached"], v["tokens_write"], v["session_cost"]))' "$verdict")"
     reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])["reasons"]))' "$verdict")"
+    if [[ -n "$pin" && "$neg_ok" != "1" ]]; then
+        ok=0
+        if [[ -n "$reasons" ]]; then
+            reasons="$reasons; $neg_line"
+        else
+            reasons="$neg_line"
+        fi
+    fi
     {
         echo "model:    $id"
         echo "sent:     $sent"
@@ -875,6 +959,7 @@ PY
         echo "tokens:   $tokens_line (opencode session)"
         echo "session:  $raw_row (session_v2)"
         echo "tool-calls: $(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d tool part(s)" % len(v["tools"]))' "$verdict")"
+        echo "$neg_line"
         echo "time:     $time_utc"
         echo "image:    $image"
         if [[ "$ok" == "1" ]]; then
