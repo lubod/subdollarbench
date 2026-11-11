@@ -97,6 +97,13 @@ fn r79_f1_run_dir_holds_no_key() {
     let workdir = base.join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
     let key = "sk-r79-sentinel-key";
+    // The key reaches the container through the -e env only; no mount arg
+    // may carry it.
+    let args = OpenCodeRunner::opencode_mount_args(&workdir);
+    assert!(
+        !args.iter().any(|a| a.contains(key)),
+        "a mount arg carries the key: {args:?}"
+    );
     {
         let dirs = RunDirs::new(&workdir);
         assert!(dirs.config.starts_with(&base), "config outside the run dir");
@@ -130,22 +137,20 @@ fn r79_f1_host_sessions_invisible() {
     let base = r79_temp_dir("live");
     let workdir = base.join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
-    let (config, data) = OpenCodeRunner::prepare_run_dirs(&workdir);
-    let status = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "--entrypoint",
-            "/bin/bash",
-            "-v",
-            &format!("{}:/home/ubuntu/.config/opencode", config.display()),
-            "-v",
-            &format!("{}:/home/ubuntu/.local/share/opencode", data.display()),
-            "subdollar-sandbox",
-            "-c",
-            "test ! -r /home/ubuntu/.local/share/opencode/sdb-r79-sentinel",
-        ])
-        .status();
+    let _dirs = OpenCodeRunner::prepare_run_dirs(&workdir);
+    // The production mount args: on the old code these are the host dirs,
+    // and the sentinel below is readable.
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--entrypoint".to_string(),
+        "/bin/bash".to_string(),
+    ];
+    args.extend(OpenCodeRunner::opencode_mount_args(&workdir));
+    args.push("subdollar-sandbox".to_string());
+    args.push("-c".to_string());
+    args.push("test ! -r /home/ubuntu/.local/share/opencode/sdb-r79-sentinel".to_string());
+    let status = std::process::Command::new("docker").args(&args).status();
     let _ = std::fs::remove_file(&sentinel);
     let _ = std::fs::remove_dir_all(&base);
     assert!(
