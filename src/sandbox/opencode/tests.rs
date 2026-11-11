@@ -213,6 +213,34 @@ fn r79_f2_opencode_billing_signals() {
     assert!(OpenCodeRunner::is_rate_limit_event(&rate, ""));
 }
 
+/// R79-4: the per-trial config carries the snapshot provider pin (the
+/// same endpoint the omp check sends), and none for an unpinned model.
+#[test]
+fn r79_f4_opencode_config_pins_the_provider() {
+    let cfg: serde_json::Value = serde_json::from_str(&OpenCodeRunner::variant_config_json(
+        "inclusionai/ling-3.1-flash",
+    ))
+    .unwrap();
+    assert_eq!(
+        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["options"]
+            ["provider"]["only"][0],
+        "novita"
+    );
+    assert_eq!(
+        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["options"]
+            ["provider"]["order"][0],
+        "novita"
+    );
+    let none: serde_json::Value = serde_json::from_str(&OpenCodeRunner::variant_config_json(
+        "google/gemini-2.5-flash",
+    ))
+    .unwrap();
+    assert!(
+        none["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"]["options"].is_null(),
+        "an unpinned model must carry no provider options: {none}"
+    );
+}
+
 fn all_live_tasks() -> Vec<crate::config::TaskType> {
     use crate::config::TaskType;
     vec![TaskType::Sql]

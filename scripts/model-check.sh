@@ -56,6 +56,19 @@ record_path() {
     printf '%s/model-check-%s%s.txt' "$(record_dir)" "$prefix" "$(model_slug "$1")"
 }
 
+# R79-4: the per-run opencode config content: the model's effort variants
+# and the snapshot provider pin (the same shape the runner sends).
+opencode_config_json() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+model_id, pin = sys.argv[1], sys.argv[2]
+entry = {"variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}
+if pin:
+    entry["options"] = {"provider": {"only": [pin], "order": [pin]}}
+print(json.dumps({"providers": {"openrouter": {"models": {model_id: entry}}}}))
+PY
+}
+
 usage() {
     sed -n '1,32p' "$0" >&2
     exit 2
@@ -371,12 +384,18 @@ PY
             grep -q 'tool-calls: 1 tool part(s)' "$rec" || {
                 echo "[self-test] opencode $name did not record the tool part" >&2
                 cat "$rec" >&2; exit 1; }
+            grep -q 'session:  input 100, output 10, reasoning 0, cache read 0, cache write 0' "$rec" || {
+                echo "[self-test] opencode $name did not record the raw session row" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'provider: openrouter (sent pin: openai)' "$rec" || {
+                echo "[self-test] opencode $name did not record the sent pin" >&2
+                cat "$rec" >&2; exit 1; }
         }
         expect_fail_oc() {
             local db="$1" want="$2" name="$3" rc=0 rec
             rec="$(oc_record "$name")"
             out="$(SDB_MODEL_CHECK_OPENCODE_DB="$db" \
-                SDB_MODEL_CHECK_USAGE_BEFORE=0 SDB_MODEL_CHECK_USAGE_AFTER="${OC_BILL:-0.000015}" \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 SDB_MODEL_CHECK_USAGE_AFTER="${OC_BILL-0.000015}" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
                 "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
             [[ "$rc" -ne 0 ]] || {
@@ -405,6 +424,29 @@ PY
         OC_BILL=0.000030 expect_fail_oc "$dir/oc-bill.db" "bill" \
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode 2x bill fails"
+
+        case_name=opencode-lag
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage lags" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode zero usage delta fails"
+
+        case_name=opencode-floor
+        OC_BILL=0.000001 expect_fail_oc "$dir/oc-pass.db" "floor" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode bill below the floor fails"
+
+        case_name=opencode-pin
+        cfg="$(opencode_config_json "openai/gpt-6-luna-pro" "openai")"
+        grep -q '"only": \["openai"\]' <<<"$cfg" || {
+            echo "[self-test] the opencode config misses the pin: $cfg" >&2
+            exit 1
+        }
+        cfg="$(opencode_config_json "google/gemini-2.5-flash" "")"
+        if grep -q '"only"' <<<"$cfg"; then
+            echo "[self-test] an unpinned opencode config carries a pin: $cfg" >&2
+            exit 1
+        fi
+        echo "[self-test] the opencode config carries the pin"
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
             echo "[self-test] the slug is not z-ai-glm-5.3" >&2; exit 1; }
@@ -667,18 +709,7 @@ opencode_check() {
     if [[ -z "$db" ]]; then
         mkdir -p "$run_dir/ws" "$run_dir/cfg" "$run_dir/data"
         local cfg_json
-        cfg_json="$(python3 - "$id" "$pin" <<'PY'
-import json, sys
-model_id, pin = sys.argv[1], sys.argv[2]
-entry = {"variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}
-# R79-4: the pinned upstream endpoint, sent through the opencode
-# OpenRouter provider options (the pin's slug before any /variant).
-slug = pin.split("/")[0] if pin else ""
-if slug:
-    entry["options"] = {"provider": {"only": [slug], "order": [slug]}}
-print(json.dumps({"providers": {"openrouter": {"models": {model_id: entry}}}}))
-PY
-)"
+        cfg_json="$(opencode_config_json "$id" "$pin")"
         set +e
         timeout 300 docker run --rm --name "sdb-model-check-oc-$(model_slug "$model")-$$" \
             -v "$run_dir/ws:/workspace" \
@@ -712,7 +743,15 @@ PY
     if [[ -n "${SDB_MODEL_CHECK_USAGE_AFTER:-}" ]]; then
         usage_after="$SDB_MODEL_CHECK_USAGE_AFTER"
     else
-        usage_after="$(usage_query)" || usage_after=""
+        # R79-5a: the usage figure can lag; poll for up to 60 s.
+        usage_after=""
+        for _ in $(seq 1 12); do
+            usage_after="$(usage_query)" || usage_after=""
+            if [[ -n "$usage_after" ]] && python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[2]) > float(sys.argv[1]) else 1)' "$usage_before" "$usage_after"; then
+                break
+            fi
+            sleep 5
+        done
     fi
     if [[ -z "$usage_after" ]]; then
         echo "[model-check] FATAL: cannot read the OpenRouter key usage after the run" >&2
@@ -784,9 +823,14 @@ ratio = None
 bill_ok = None
 if expected > 0:
     ratio = bill / expected
-    bill_ok = ratio <= 1.25
+    # R79-5a: a zero delta or a bill below the floor is the lagging usage,
+    # not a cheap call.
+    bill_ok = ratio <= 1.25 and ratio >= 0.1
     if not bill_ok:
-        reasons.append("bill $%.8f is %.2fx the snapshot $%.8f" % (bill, ratio, expected))
+        if ratio < 0.1:
+            reasons.append("bill $%.8f is %.3fx the snapshot $%.8f, below the 0.1x floor (the OpenRouter usage lags?)" % (bill, ratio, expected))
+        else:
+            reasons.append("bill $%.8f is %.2fx the snapshot $%.8f" % (bill, ratio, expected))
 tool_ok = any(
     t["status"] in ("completed", "success") and "probe-forty-two" in t["text"]
     for t in tools)
@@ -799,6 +843,7 @@ print(json.dumps({
     "session_cost": session_cost,
     "expected": expected, "ratio": ratio, "bill_ok": bill_ok,
     "tokens_fresh": tokens_fresh, "tokens_input": tokens_input,
+    "tokens_output": tokens_output, "tokens_reasoning": tokens_reasoning,
     "tokens_cached": tokens_cached,
     "tokens_completion": completion, "tokens_write": tokens_write,
     "tools": tools, "tool_ok": tool_ok, "outcome": outcome,
@@ -815,14 +860,20 @@ PY
     expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["expected"])' "$verdict")"
     ratio="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("" if v["ratio"] is None else "%.3f" % v["ratio"])' "$verdict")"
     tokens_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d fresh, %d cached, %d completion, %d cache write" % (v["tokens_fresh"], v["tokens_cached"], v["tokens_completion"], v["tokens_write"]))' "$verdict")"
+    raw_row="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("input %d, output %d, reasoning %d, cache read %d, cache write %d, cost %.8f" % (v["tokens_input"], v["tokens_output"], v["tokens_reasoning"], v["tokens_cached"], v["tokens_write"], v["session_cost"]))' "$verdict")"
     reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])["reasons"]))' "$verdict")"
     {
         echo "model:    $id"
         echo "sent:     $sent"
         echo "served:   $served"
-        echo "provider: $provider (pin: openrouter)"
+        if [[ -n "$pin" ]]; then
+            echo "provider: $provider (sent pin: $pin)"
+        else
+            echo "provider: $provider (no pin sent)"
+        fi
         echo "bill:     \$$bill (OpenRouter key usage; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"); snapshot \$$expected, ratio $ratio)"
         echo "tokens:   $tokens_line (opencode session)"
+        echo "session:  $raw_row (session_v2)"
         echo "tool-calls: $(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d tool part(s)" % len(v["tools"]))' "$verdict")"
         echo "time:     $time_utc"
         echo "image:    $image"

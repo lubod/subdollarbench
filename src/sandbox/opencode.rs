@@ -230,18 +230,26 @@ impl OpenCodeRunner {
     /// = OpenRouter's native reasoning parameter). Env-passed so no config
     /// files pollute the candidate workspace.
     fn variant_config_json(model_bare: &str) -> String {
+        // R79-4: the snapshot pin, sent through the OpenRouter provider
+        // options (`provider.only`/`order`), the same endpoint the omp
+        // check pins. This one function builds the per-trial config the
+        // unit test reads.
+        let mut entry = serde_json::json!({
+            "variants": [
+                {"id": "low", "settings": {"reasoning": {"effort": "low"}}},
+                {"id": "high", "settings": {"reasoning": {"effort": "high"}}},
+                {"id": "max", "settings": {"reasoning": {"effort": "max"}}}
+            ]
+        });
+        if let Some(pin) = crate::cost::calculator::provider_for_model(model_bare) {
+            entry["options"] = serde_json::json!({
+                "provider": {"only": [pin], "order": [pin]}
+            });
+        }
         serde_json::json!({
             "providers": {
                 "openrouter": {
-                    "models": {
-                        model_bare: {
-                            "variants": [
-                                {"id": "low", "settings": {"reasoning": {"effort": "low"}}},
-                                {"id": "high", "settings": {"reasoning": {"effort": "high"}}},
-                                {"id": "max", "settings": {"reasoning": {"effort": "max"}}}
-                            ]
-                        }
-                    }
+                    "models": { model_bare: entry }
                 }
             }
         })
