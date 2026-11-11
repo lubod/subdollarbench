@@ -30,6 +30,7 @@
 #   SDB_MODEL_CHECK_GENERATION_JSON   a canned generation response
 #   SDB_MODEL_CHECK_MODELS_JSON       a canned /api/v1/models response
 #   SDB_MODEL_CHECK_OPENCODE_DB       a canned opencode session db
+#   SDB_MODEL_CHECK_USAGE_BEFORE/AFTER the OpenRouter key usage around a run
 #   SDB_ENV_FILE                      where to read OPENROUTER_API_KEY
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -359,6 +360,7 @@ PY
             local name="$1" rc=0 rec
             rec="$(oc_record "$name")"
             out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 SDB_MODEL_CHECK_USAGE_AFTER=0.000015 \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
                 "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
             [[ "$rc" -eq 0 ]] || {
@@ -374,6 +376,7 @@ PY
             local db="$1" want="$2" name="$3" rc=0 rec
             rec="$(oc_record "$name")"
             out="$(SDB_MODEL_CHECK_OPENCODE_DB="$db" \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 SDB_MODEL_CHECK_USAGE_AFTER="${OC_BILL:-0.000015}" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
                 "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
             [[ "$rc" -ne 0 ]] || {
@@ -399,7 +402,7 @@ PY
 
         case_name=opencode-bill
         make_oc_db "$dir/oc-bill.db" openrouter 0.000030
-        expect_fail_oc "$dir/oc-bill.db" "bill" \
+        OC_BILL=0.000030 expect_fail_oc "$dir/oc-bill.db" "bill" \
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode 2x bill fails"
 
@@ -639,10 +642,28 @@ PY
 # used, the session cost and tokens, and the tool parts. One tool-prompt
 # run through the sandbox's opencode is the round trip; the db is the
 # evidence. The record is model-check-opencode-<slug>.txt.
+# R79-5: the bill is OpenRouter's key-usage delta around the run, never
+# opencode's own session cost.
+usage_query() {
+    curl -sS https://openrouter.ai/api/v1/auth/key \
+        -H "Authorization: Bearer $key" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("data",{}).get("usage") or 0)'
+}
+
 opencode_check() {
     local db="${SDB_MODEL_CHECK_OPENCODE_DB:-}" run_dir="$work/opencode"
     local events="$work/opencode-events.json" log="$work/opencode.log" rc=0
+    local usage_before usage_after bill
     local oc_tool_prompt='Use the shell tool twice: first run `echo probe-forty-two`, then run `ls -1 /etc | head -3`. Then reply with the output of the first command.'
+    if [[ -n "${SDB_MODEL_CHECK_USAGE_BEFORE:-}" ]]; then
+        usage_before="$SDB_MODEL_CHECK_USAGE_BEFORE"
+    else
+        usage_before="$(usage_query)" || usage_before=""
+    fi
+    if [[ -z "$usage_before" ]]; then
+        echo "[model-check] FATAL: cannot read the OpenRouter key usage before the run" >&2
+        exit 1
+    fi
     if [[ -z "$db" ]]; then
         mkdir -p "$run_dir/ws" "$run_dir/cfg" "$run_dir/data"
         local cfg_json
@@ -682,13 +703,25 @@ PY
             exit 1
         fi
     fi
+    if [[ -n "${SDB_MODEL_CHECK_USAGE_AFTER:-}" ]]; then
+        usage_after="$SDB_MODEL_CHECK_USAGE_AFTER"
+    else
+        usage_after="$(usage_query)" || usage_after=""
+    fi
+    if [[ -z "$usage_after" ]]; then
+        echo "[model-check] FATAL: cannot read the OpenRouter key usage after the run" >&2
+        exit 1
+    fi
+    bill="$(python3 -c 'import sys; print(max(0.0, float(sys.argv[2]) - float(sys.argv[1])))' \
+        "$usage_before" "$usage_after")"
     local verdict
     verdict="$(python3 - "$db" "$id" "$rate_prompt" "$rate_cache_read" \
-        "$rate_cache_write" "$rate_completion" <<'PY'
+        "$rate_cache_write" "$rate_completion" "$bill" <<'PY'
 import json, sqlite3, sys
 
 (db, model_id, rate_prompt, rate_cache_read, rate_cache_write,
- rate_completion) = sys.argv[1:7]
+ rate_completion, bill_arg) = sys.argv[1:8]
+bill = float(bill_arg)
 con = sqlite3.connect(db)
 row = con.execute(
     "select model, cost, tokens_input, tokens_output, tokens_reasoning, "
@@ -700,7 +733,7 @@ if not row:
 model = json.loads(row[0] or "{}")
 served = model.get("id") or ""
 provider = model.get("providerID") or ""
-bill = float(row[1] or 0.0)
+session_cost = float(row[1] or 0.0)
 tokens_input = int(row[2] or 0)
 tokens_output = int(row[3] or 0)
 tokens_reasoning = int(row[4] or 0)
@@ -732,9 +765,9 @@ if served.lower() != model_id.lower():
 if provider != "openrouter":
     reasons.append("provider %s, want openrouter" % (provider or "(none)"))
 completion = tokens_output + tokens_reasoning
-# session_v2.tokens_input is the total input (cache reads included); the
-# snapshot's prompt rate applies to the fresh part only.
-tokens_fresh = max(0, tokens_input - tokens_cached - tokens_write)
+# R79-5: opencode's session_v2.tokens_input is the fresh input; the
+# cached tokens are reported apart (the step's input 125, cache read 5312).
+tokens_fresh = tokens_input
 expected = (
     tokens_fresh * float(rate_prompt)
     + tokens_cached * float(rate_cache_read)
@@ -757,6 +790,7 @@ if outcome and outcome != "succeeded":
     reasons.append("session outcome %s" % outcome)
 print(json.dumps({
     "sent": sent, "served": served, "provider": provider, "bill": bill,
+    "session_cost": session_cost,
     "expected": expected, "ratio": ratio, "bill_ok": bill_ok,
     "tokens_fresh": tokens_fresh, "tokens_input": tokens_input,
     "tokens_cached": tokens_cached,
@@ -781,7 +815,7 @@ PY
         echo "sent:     $sent"
         echo "served:   $served"
         echo "provider: $provider (pin: openrouter)"
-        echo "bill:     \$$bill (snapshot \$$expected, ratio $ratio)"
+        echo "bill:     \$$bill (OpenRouter key usage; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"); snapshot \$$expected, ratio $ratio)"
         echo "tokens:   $tokens_line (opencode session)"
         echo "tool-calls: $(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d tool part(s)" % len(v["tools"]))' "$verdict")"
         echo "time:     $time_utc"
