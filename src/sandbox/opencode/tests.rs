@@ -21,6 +21,139 @@ fn assert_agents_ports_clean(content: &str, base: u16, task: &str, worker: u8) {
     }
 }
 
+fn r79_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "r79-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn r79_walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// R79 F1: the container mounts the per-run opencode dirs, never the
+/// host's `~/.config/opencode` or `~/.local/share/opencode`.
+#[test]
+fn r79_f1_no_host_opencode_mount() {
+    let base = r79_temp_dir("mount");
+    let workdir = base.join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let args = OpenCodeRunner::opencode_mount_args(&workdir);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
+    let host_cfg = PathBuf::from(&home).join(".config/opencode");
+    let host_data = PathBuf::from(&home).join(".local/share/opencode");
+    let mut mounts = 0;
+    for a in &args {
+        if a.starts_with('-') {
+            continue;
+        }
+        let host = PathBuf::from(a.split(':').next().unwrap_or(""));
+        assert!(
+            !host.starts_with(&host_cfg),
+            "the host config dir is mounted: {a}"
+        );
+        assert!(
+            !host.starts_with(&host_data),
+            "the host data dir is mounted: {a}"
+        );
+        assert!(
+            host.starts_with(&base),
+            "an opencode mount is outside the run dir: {a}"
+        );
+        mounts += 1;
+    }
+    assert_eq!(mounts, 2, "the config and data mounts: {args:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R79 F1: the per-run dirs are inside the run dir, hold no key, and are
+/// removed when the run ends.
+#[test]
+fn r79_f1_run_dir_holds_no_key() {
+    let base = r79_temp_dir("nokey");
+    let workdir = base.join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let key = "sk-r79-sentinel-key";
+    {
+        let dirs = RunDirs::new(&workdir);
+        assert!(dirs.config.starts_with(&base), "config outside the run dir");
+        assert!(dirs.data.starts_with(&base), "data outside the run dir");
+        std::fs::write(workdir.join("main.go"), "package main\n").unwrap();
+        for path in r79_walk(&base) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(key),
+                "the key reached a run-dir file: {}",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        !base.join("opencode-config").exists() && !base.join("opencode-data").exists(),
+        "the per-run opencode dirs survived the run"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R79 F1 (live, Docker): a sentinel in the host's opencode data dir is
+/// not readable from the candidate's container through the per-run mount.
+#[test]
+fn r79_f1_host_sessions_invisible() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
+    let host_data = PathBuf::from(&home).join(".local/share/opencode");
+    std::fs::create_dir_all(&host_data).unwrap();
+    let sentinel = host_data.join("sdb-r79-sentinel");
+    std::fs::write(&sentinel, "host-session\n").unwrap();
+    let base = r79_temp_dir("live");
+    let workdir = base.join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let (config, data) = OpenCodeRunner::prepare_run_dirs(&workdir);
+    let status = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/bash",
+            "-v",
+            &format!("{}:/home/ubuntu/.config/opencode", config.display()),
+            "-v",
+            &format!("{}:/home/ubuntu/.local/share/opencode", data.display()),
+            "subdollar-sandbox",
+            "-c",
+            "test ! -r /home/ubuntu/.local/share/opencode/sdb-r79-sentinel",
+        ])
+        .status();
+    let _ = std::fs::remove_file(&sentinel);
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(
+        status.map(|s| s.success()).unwrap_or(false),
+        "the host's opencode session sentinel was readable from the container"
+    );
+}
+
 fn all_live_tasks() -> Vec<crate::config::TaskType> {
     use crate::config::TaskType;
     vec![TaskType::Sql]
