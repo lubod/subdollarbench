@@ -179,7 +179,7 @@ fn r79_f3_opencode_cost_matches_bill() {
     let bill = 5.9373e-05;
     let ratio = bill / expected;
     assert!(
-        ratio <= 1.25 && ratio >= 0.8,
+        (0.8..=1.25).contains(&ratio),
         "bill {bill} vs snapshot {expected}: {ratio}"
     );
     assert_eq!(stats.prompt_tokens, 125);
