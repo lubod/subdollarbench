@@ -883,7 +883,8 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                             .to_string(),
                                     );
                                 }
-                                if Self::is_rate_limit_event(&v, trimmed) {
+                                let rate_event = Self::is_rate_limit_event(&v, trimmed);
+                                if rate_event {
                                     rate_o.store(true, Ordering::SeqCst);
                                 }
                                 if let Some(reason) = Self::provider_auth_billing_reason(&v) {
@@ -894,10 +895,17 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                 // provider.quota 402 and the exhausted
                                 // provider.rate-limit 429) go through the
                                 // shared classifier; a stream error stays a
-                                // tool error, not a billing fault.
-                                if let Some(reason) = Self::error_event_billing_reason(trimmed) {
-                                    let _ = tx_o.send(format!("[BILLING] {reason}"));
-                                    billing_o.store(true, Ordering::SeqCst);
+                                // tool error, not a billing fault. A 429
+                                // stays on the resume/backoff path (the
+                                // exhausted case is the throttle arm's
+                                // OmpBillingError), so the classifier must
+                                // not pre-empt it.
+                                if !rate_event {
+                                    if let Some(reason) = Self::error_event_billing_reason(trimmed)
+                                    {
+                                        let _ = tx_o.send(format!("[BILLING] {reason}"));
+                                        billing_o.store(true, Ordering::SeqCst);
+                                    }
                                 }
                                 let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
                             }
