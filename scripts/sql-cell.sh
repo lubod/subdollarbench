@@ -43,6 +43,12 @@ cell_gate() {
                 return 1 ;;
         esac
     done < <(printf '%s\n' "$status" | sed -n 's/^?? //p')
+    # R79 F4: the opencode harness is smoke-only until a later round; a
+    # comparison run is a smoke or rehearsal cell, never an official one.
+    if [[ "${HARNESS:-omp}" == "opencode" && "$smoke" != "1" && "$rehearsal" != "1" ]]; then
+        echo "[cell] FATAL: the opencode harness is smoke-only; an official cell needs a later round" >&2
+        return 1
+    fi
     if [[ "$rehearsal" == "1" ]]; then
         # R54 F2: a $0 real launch; no flake record and no API key.
         CELL_FLAKE_RESULT="REHEARSAL"
@@ -177,6 +183,18 @@ self_test() {
     cell_gate "$repo" 0.5 0 || {
         echo '[self-test] a cured-failure PASS was refused' >&2; return 1; }
     echo '[self-test] pass record allowed'
+
+    # 6b) R79 F4: an official opencode cell is refused; a smoke one is not.
+    HARNESS=opencode
+    out="$(cell_gate "$repo" 0.5 0 2>&1)" && {
+        echo '[self-test] an official opencode cell was accepted' >&2; return 1; }
+    grep -q 'opencode harness is smoke-only' <<<"$out" || {
+        echo "[self-test] the opencode refusal did not say why: $out" >&2; return 1; }
+    echo '[self-test] official opencode cell refused'
+    ( export HARNESS=opencode; cell_gate "$repo" 0.5 1 >/dev/null 2>&1 ) || {
+        echo '[self-test] an opencode smoke cell was refused' >&2; return 1; }
+    echo '[self-test] opencode smoke cell allowed'
+    HARNESS=omp
 
     # 6) SMOKE with no record is allowed and says so.
     rm -f "$record" "$rehearsal_record"
@@ -437,6 +455,7 @@ d = {
     "phase_complete": False,
     "rehearsal": False,
     "smoke": False,
+    "harness": os.environ.get("SDB_CELL_HARNESS") or "omp",
     "error": "no rollup line",
 }
 m = re.search(r"^rollup: (.+)$", text, re.M)
