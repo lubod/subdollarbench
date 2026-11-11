@@ -348,22 +348,44 @@ PY
         # R79 F3: the opencode harness's check reads the opencode session
         # db. The canned db carries the session_v2 row and the tool part.
         make_oc_db() {
-            python3 - "$1" "$2" "$3" <<'PY'
+            local path="$1" provider="$2" cost="$3"
+            local tokens_input="${4:-100}" tokens_output="${5:-10}"
+            python3 - "$path" "$provider" "$cost" "$tokens_input" "$tokens_output" <<'PY'
 import json, sqlite3, sys
-path, provider, cost = sys.argv[1], sys.argv[2], float(sys.argv[3])
+path, provider, cost, tokens_input, tokens_output = sys.argv[1:6]
 con = sqlite3.connect(path)
 con.execute(
-    "create table session_v2(model text, cost real, tokens_input integer, "
-    "tokens_output integer, tokens_reasoning integer, tokens_cache_read integer, "
-    "tokens_cache_write integer, idle_outcome text, time_created integer)")
-con.execute("create table session_message(type text, data text)")
+    "create table session_v2(id text primary key, model text, cost real, "
+    "tokens_input integer, tokens_output integer, tokens_reasoning integer, "
+    "tokens_cache_read integer, tokens_cache_write integer, idle_outcome text, "
+    "time_created integer)")
+con.execute("create table session_message(session_id text, type text, data text)")
 model = json.dumps({"id": "openai/gpt-6-luna-pro", "providerID": provider})
-con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?)",
-            (model, cost, 100, 10, 0, 0, 0, "succeeded", 1))
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_selftest_positive", model, float(cost), int(tokens_input),
+             int(tokens_output), 0, 0, 0, "succeeded", 1))
 tool = json.dumps({"content": [{"type": "tool", "name": "shell",
     "state": {"status": "completed",
               "content": [{"type": "text", "text": "probe-forty-two\n"}]}}]})
-con.execute("insert into session_message values ('assistant', ?)", (tool,))
+con.execute("insert into session_message values (?, 'assistant', ?)",
+            ("ses_selftest_positive", tool))
+con.commit()
+con.close()
+PY
+        }
+        add_failed_session() {
+            python3 - "$1" <<'PY'
+import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+model = json.dumps({"id": "openai/gpt-6-luna-pro", "providerID": "openrouter"})
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_selftest_failed", model, 0.0, 0, 0, 0, 0, 0,
+             "failed", 2))
+tool = json.dumps({"content": [{"type": "tool", "name": "shell",
+    "state": {"status": "failed",
+              "content": [{"type": "text", "text": "wrong-session\n"}]}}]})
+con.execute("insert into session_message values (?, 'assistant', ?)",
+            ("ses_selftest_failed", tool))
 con.commit()
 con.close()
 PY
@@ -392,6 +414,9 @@ PY
                 cat "$rec" >&2; exit 1; }
             grep -q 'provider: openrouter (sent pin: openai)' "$rec" || {
                 echo "[self-test] opencode $name did not record the sent pin" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'session-id: ses_selftest_positive' "$rec" || {
+                echo "[self-test] opencode $name did not record the positive session id" >&2
                 cat "$rec" >&2; exit 1; }
             grep -q 'negative: pin novita refused by OpenRouter' "$rec" || {
                 echo "[self-test] opencode $name did not record the negative probe" >&2
@@ -423,9 +448,13 @@ JSON
 JSON
         export SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=1
         export SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS="$dir/negative-refused.json"
+        export SDB_MODEL_CHECK_OPENCODE_SESSION_ID="ses_selftest_positive"
         make_oc_db "$dir/oc-pass.db" openrouter 0.000015
+        # R79-15: a later, failed session in the same db must not be the
+        # one the verdict reads.
+        add_failed_session "$dir/oc-pass.db"
         expect_pass_oc "openrouter/openai/gpt-6-luna-pro"
-        echo "[self-test] an opencode session passes"
+        echo "[self-test] an opencode session passes (a later failed session is ignored)"
 
         case_name=opencode-provider
         make_oc_db "$dir/oc-provider.db" Other 0.000015
@@ -448,6 +477,18 @@ JSON
         OC_BILL=0.000001 expect_fail_oc "$dir/oc-pass.db" "floor" \
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode bill below the floor fails"
+
+        case_name=opencode-zero-tokens
+        make_oc_db "$dir/oc-zero-tokens.db" openrouter 0.000015 0 0
+        expect_fail_oc "$dir/oc-zero-tokens.db" "the positive session has 0 tokens" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a positive session with 0 tokens fails"
+
+        case_name=opencode-zero-bill
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" \
+            "the OpenRouter usage lags or the run was not billed" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a positive run with a \$0 bill fails"
 
         case_name=opencode-negative-pass
         SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=0 \
@@ -728,6 +769,9 @@ opencode_check() {
     local db="${SDB_MODEL_CHECK_OPENCODE_DB:-}" run_dir="$work/opencode"
     local events="$work/opencode-events.json" log="$work/opencode.log" rc=0
     local usage_before usage_after bill
+    # R79-15: the positive session has its own id and data dir; the
+    # negative probe must never write into the db the verdict reads.
+    local session_id="${SDB_MODEL_CHECK_OPENCODE_SESSION_ID:-ses_model_check_$(model_slug "$model")_$$}"
     local oc_tool_prompt='Use the shell tool twice: first run `echo probe-forty-two`, then run `ls -1 /etc | head -3`. Then reply with the output of the first command.'
     if [[ -n "${SDB_MODEL_CHECK_USAGE_BEFORE:-}" ]]; then
         usage_before="$SDB_MODEL_CHECK_USAGE_BEFORE"
@@ -750,7 +794,7 @@ opencode_check() {
             -w /workspace -e HOME=/home/ubuntu -e PI_NO_PTY=1 \
             -e OPENROUTER_API_KEY="$key" -e OPENCODE_CONFIG_CONTENT="$cfg_json" \
             subdollar-sandbox opencode run --standalone --format json \
-            --session "ses_model_check_$(model_slug "$model")_$$" \
+            --session "$session_id" \
             -m "openrouter/$id" --auto -- "$oc_tool_prompt" \
             > "$events" 2> "$log"
         rc=$?
@@ -775,9 +819,10 @@ opencode_check() {
     if [[ -n "${SDB_MODEL_CHECK_USAGE_AFTER:-}" ]]; then
         usage_after="$SDB_MODEL_CHECK_USAGE_AFTER"
     else
-        # R79-5a: the usage figure can lag; poll for up to 60 s.
+        # R79-5a: the usage figure can lag; poll for up to 180 s (the
+        # fourth review saw a $0 bill after the 60 s window).
         usage_after=""
-        for _ in $(seq 1 12); do
+        for _ in $(seq 1 36); do
             usage_after="$(usage_query)" || usage_after=""
             if [[ -n "$usage_after" ]] && python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[2]) > float(sys.argv[1]) else 1)' "$usage_before" "$usage_after"; then
                 break
@@ -797,6 +842,7 @@ opencode_check() {
     # proves nothing. A negative run that fails for another reason is
     # inconclusive, not a pass.
     local wrong_pin="novita" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
+    local neg_dir="$work/opencode-negative"
     if [[ "$pin" == "novita" ]]; then
         wrong_pin="baidu"
     fi
@@ -810,12 +856,13 @@ opencode_check() {
             fi
         else
             local neg_cfg
+            mkdir -p "$neg_dir/ws" "$neg_dir/cfg" "$neg_dir/data"
             neg_cfg="$(opencode_config_json "$id" "$wrong_pin")"
             set +e
             timeout 300 docker run --rm --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
-                -v "$run_dir/ws:/workspace" \
-                -v "$run_dir/cfg:/home/ubuntu/.config/opencode" \
-                -v "$run_dir/data:/home/ubuntu/.local/share/opencode" \
+                -v "$neg_dir/ws:/workspace" \
+                -v "$neg_dir/cfg:/home/ubuntu/.config/opencode" \
+                -v "$neg_dir/data:/home/ubuntu/.local/share/opencode" \
                 -w /workspace -e HOME=/home/ubuntu -e PI_NO_PTY=1 \
                 -e OPENROUTER_API_KEY="$key" -e OPENCODE_CONFIG_CONTENT="$neg_cfg" \
                 subdollar-sandbox opencode run --standalone --format json \
@@ -837,19 +884,28 @@ opencode_check() {
     fi
     local verdict
     verdict="$(python3 - "$db" "$id" "$rate_prompt" "$rate_cache_read" \
-        "$rate_cache_write" "$rate_completion" "$bill" <<'PY'
+        "$rate_cache_write" "$rate_completion" "$bill" "$session_id" <<'PY'
 import json, sqlite3, sys
 
 (db, model_id, rate_prompt, rate_cache_read, rate_cache_write,
- rate_completion, bill_arg) = sys.argv[1:8]
+ rate_completion, bill_arg, session_id) = sys.argv[1:9]
 bill = float(bill_arg)
 con = sqlite3.connect(db)
 row = con.execute(
     "select model, cost, tokens_input, tokens_output, tokens_reasoning, "
     "tokens_cache_read, tokens_cache_write, idle_outcome "
-    "from session_v2 order by time_created desc limit 1").fetchone()
+    "from session_v2 where id = ?", (session_id,)).fetchone()
 if not row:
-    print(json.dumps({"error": "session_v2 is empty"}))
+    print(json.dumps({
+        "sent": "openrouter/" + model_id, "served": "", "provider": "",
+        "bill": bill, "session_cost": 0.0, "expected": 0.0, "ratio": None,
+        "bill_ok": None, "tokens_fresh": 0, "tokens_input": 0,
+        "tokens_output": 0, "tokens_reasoning": 0, "tokens_cached": 0,
+        "tokens_completion": 0, "tokens_write": 0, "tools": [],
+        "tool_ok": False, "outcome": "",
+        "reasons": ["the positive session %s is not in session_v2" % session_id],
+        "ok": False,
+    }))
     raise SystemExit(0)
 model = json.loads(row[0] or "{}")
 served = model.get("id") or ""
@@ -862,7 +918,9 @@ tokens_cached = int(row[5] or 0)
 tokens_write = int(row[6] or 0)
 outcome = row[7] or ""
 tools = []
-for (data,) in con.execute("select data from session_message where type='assistant'"):
+for (data,) in con.execute(
+        "select data from session_message where type='assistant' and session_id = ?",
+        (session_id,)):
     try:
         d = json.loads(data or "{}")
     except Exception:
@@ -886,6 +944,17 @@ if served.lower() != model_id.lower():
 if provider != "openrouter":
     reasons.append("provider %s, want openrouter" % (provider or "(none)"))
 completion = tokens_output + tokens_reasoning
+# R79-16: a positive run with no tokens or a $0 bill is not a pass; the
+# outcome check alone would hide it.
+total_tokens = (
+    tokens_input + tokens_output + tokens_reasoning + tokens_cached + tokens_write
+)
+if total_tokens == 0:
+    reasons.append("the positive session has 0 tokens")
+if bill <= 0:
+    reasons.append(
+        "bill $%.8f is $0 (the OpenRouter usage lags or the run was not billed)"
+        % bill)
 # R79-5: opencode's session_v2.tokens_input is the fresh input; the
 # cached tokens are reported apart (the step's input 125, cache read 5312).
 tokens_fresh = tokens_input
@@ -950,6 +1019,7 @@ PY
         echo "model:    $id"
         echo "sent:     $sent"
         echo "served:   $served"
+        echo "session-id: $session_id"
         if [[ -n "$pin" ]]; then
             echo "provider: $provider (sent pin: $pin)"
         else
