@@ -4567,3 +4567,17 @@ fn r74_f1_health_from_logs() {
     billed.billed_ratio = Some(1.1);
     assert_eq!(billed.billed_ratio, Some(1.1));
 }
+
+/// R79 F2: the recorded opencode session (2026-11-11, ling-3.1-flash, the
+/// ref-sql shell probe) yields turns, turn times and the ref-sql query.
+#[test]
+fn r79_f2_health_reads_opencode_log() {
+    let oc = health_from_live_log(include_str!("fixtures/health/opencode-20261111.txt"));
+    assert_eq!(oc.turns, 2, "opencode turns");
+    assert!(
+        oc.turn_secs_p50 > 0.0 && oc.turn_secs_max >= oc.turn_secs_p50,
+        "opencode turn times: {oc:?}"
+    );
+    assert_eq!(oc.ref_queries, 1, "opencode ref-sql queries");
+    assert_eq!(oc.ref_refused, 0, "opencode ref-sql refusals");
+}

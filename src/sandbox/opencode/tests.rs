@@ -154,6 +154,60 @@ fn r79_f1_host_sessions_invisible() {
     );
 }
 
+/// R79 F3: the harness's opencode cost for the real 2026-11-11 probe
+/// session (ling-3.1-flash, the ref-sql tool run) matches the snapshot
+/// formula the bill is based on within 1.25x.
+#[test]
+fn r79_f3_opencode_cost_matches_bill() {
+    // The probe's second step: input 125, cache read 5312, output 3,
+    // reasoning 41; the opencode session recorded $5.9373e-05.
+    let tokens = serde_json::json!({
+        "input": 125,
+        "output": 3,
+        "reasoning": 41,
+        "cache": {"read": 5312, "write": 0}
+    });
+    let mut stats = OmpSessionStats::default();
+    let cost = OpenCodeRunner::add_step(&mut stats, &tokens, "inclusionai/ling-3.1-flash");
+    let expected = crate::cost::ModelPricing::for_model("inclusionai/ling-3.1-flash")
+        .compute_cost_with_cache_and_write(125, 5312, 44, 0)
+        .total_cost_usd;
+    assert!(
+        (cost - expected).abs() < 1e-12,
+        "harness {cost} vs snapshot {expected}"
+    );
+    let bill = 5.9373e-05;
+    let ratio = bill / expected;
+    assert!(
+        ratio <= 1.25 && ratio >= 0.8,
+        "bill {bill} vs snapshot {expected}: {ratio}"
+    );
+    assert_eq!(stats.prompt_tokens, 125);
+    assert_eq!(stats.cached_tokens, 5312);
+    assert_eq!(stats.completion_tokens, 44);
+}
+
+/// R79 F2: the opencode harness's billing signals: a 402 trips at once,
+/// a retried 429 is transient (counted, not a fault), and the structured
+/// rate-limit event keeps its resume path.
+#[test]
+fn r79_f2_opencode_billing_signals() {
+    let text = "402 This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 44804.";
+    assert!(matches!(
+        crate::sandbox::omp::classify_billing_error(text),
+        Some(crate::sandbox::omp::BillingSignal::Fault(_))
+    ));
+    let retry = "Retrying (1/10): 429 Provider returned error retry-after-ms=5000 inclusionai/ling-3.1-flash is temporarily rate-limited upstream.";
+    assert_eq!(
+        crate::sandbox::omp::classify_billing_error(retry),
+        Some(crate::sandbox::omp::BillingSignal::RateLimited)
+    );
+    let event = ev(r#"{"error":{"type":"provider.billing","message":"insufficient credits"}}"#);
+    assert!(OpenCodeRunner::provider_auth_billing_reason(&event).is_some());
+    let rate = ev(r#"{"error":{"type":"provider.rate-limit","status":429}}"#);
+    assert!(OpenCodeRunner::is_rate_limit_event(&rate, ""));
+}
+
 fn all_live_tasks() -> Vec<crate::config::TaskType> {
     use crate::config::TaskType;
     vec![TaskType::Sql]

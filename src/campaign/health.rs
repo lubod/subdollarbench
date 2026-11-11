@@ -161,6 +161,34 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             has_tool = false;
             continue;
         }
+        // R79 F2: the opencode runner's session markers. A new session
+        // starts at `[LIVE] Agent initialized`; each `[LIVE] Turn N
+        // started` is one turn (the omp `[BENCH-POLICY] turn=` shape).
+        if line.contains("[LIVE] Agent initialized") {
+            session_start = clock(line);
+            last_turn = None;
+            ref_block = false;
+            ref_refused_in_block = false;
+            has_response = false;
+            has_tool = false;
+            continue;
+        }
+        if line.contains("[LIVE] Turn ") && line.contains(" started") {
+            h.turns += 1;
+            let now = clock(line).or(last_turn).or(session_start);
+            if let (Some(prev), Some(now)) = (last_turn.or(session_start), now) {
+                deltas.push(((now + 86_400 - prev) % 86_400) as f64);
+            }
+            last_turn = now;
+            if !has_response && !has_tool {
+                h.empty_responses += 1;
+            }
+            has_response = false;
+            has_tool = false;
+            ref_block = false;
+            ref_refused_in_block = false;
+            continue;
+        }
         if line.contains("[BENCH-POLICY] turn=") {
             h.turns += 1;
             let now = clock(line).or(last_turn).or(session_start);
@@ -215,6 +243,38 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             has_response = true;
         } else if b.starts_with("[ACTION]") {
             has_tool = true;
+            // R79 F2: the opencode `[ACTION] {tool} {json}` line carries the
+            // tool command and its result. The omp `[ACTION]` line has no
+            // JSON; the parse simply does nothing there.
+            if let Some(idx) = b.find('{') {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&b[idx..]) {
+                    let command = v
+                        .pointer("/part/state/input/command")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    let output = v
+                        .pointer("/part/state/output")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    let mut content = String::new();
+                    if let Some(items) = v.pointer("/part/state/content").and_then(|c| c.as_array())
+                    {
+                        for item in items {
+                            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                content.push_str(t);
+                            }
+                        }
+                    }
+                    if command.contains("ref-sql") {
+                        h.ref_queries += 1;
+                        if output.contains("Connection refused")
+                            || content.contains("Connection refused")
+                        {
+                            h.ref_refused += 1;
+                        }
+                    }
+                }
+            }
         }
     }
 

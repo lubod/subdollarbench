@@ -891,6 +891,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                         if trimmed.is_empty() {
                             continue;
                         }
+                        // R79 F2: the health counter reads the opencode
+                        // stderr too (a retried 429 is counted, not a fault).
+                        let _ = tx_e.send(format!("[STDERR] {}", trimmed));
                         {
                             let mut tail = tail_e.lock().unwrap();
                             tail.push(trimmed.to_string());
