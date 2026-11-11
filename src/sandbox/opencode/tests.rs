@@ -21,6 +21,249 @@ fn assert_agents_ports_clean(content: &str, base: u16, task: &str, worker: u8) {
     }
 }
 
+fn r79_temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "r79-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn r79_walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// R79 F1: the container mounts the per-run opencode dirs, never the
+/// host's `~/.config/opencode` or `~/.local/share/opencode`.
+#[test]
+fn r79_f1_no_host_opencode_mount() {
+    let base = r79_temp_dir("mount");
+    let workdir = base.join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let args = OpenCodeRunner::opencode_mount_args(&workdir);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
+    let host_cfg = PathBuf::from(&home).join(".config/opencode");
+    let host_data = PathBuf::from(&home).join(".local/share/opencode");
+    let mut mounts = 0;
+    for a in &args {
+        if a.starts_with('-') {
+            continue;
+        }
+        let host = PathBuf::from(a.split(':').next().unwrap_or(""));
+        assert!(
+            !host.starts_with(&host_cfg),
+            "the host config dir is mounted: {a}"
+        );
+        assert!(
+            !host.starts_with(&host_data),
+            "the host data dir is mounted: {a}"
+        );
+        assert!(
+            host.starts_with(&base),
+            "an opencode mount is outside the run dir: {a}"
+        );
+        mounts += 1;
+    }
+    assert_eq!(mounts, 2, "the config and data mounts: {args:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R79 F1: the per-run dirs are inside the run dir, hold no key, and are
+/// removed when the run ends.
+#[test]
+fn r79_f1_run_dir_holds_no_key() {
+    let base = r79_temp_dir("nokey");
+    let workdir = base.join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let key = "sk-r79-sentinel-key";
+    // The key reaches the container through the -e env only; no mount arg
+    // may carry it.
+    let args = OpenCodeRunner::opencode_mount_args(&workdir);
+    assert!(
+        !args.iter().any(|a| a.contains(key)),
+        "a mount arg carries the key: {args:?}"
+    );
+    {
+        let dirs = RunDirs::new(&workdir);
+        assert!(dirs.config.starts_with(&base), "config outside the run dir");
+        assert!(dirs.data.starts_with(&base), "data outside the run dir");
+        std::fs::write(workdir.join("main.go"), "package main\n").unwrap();
+        for path in r79_walk(&base) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains(key),
+                "the key reached a run-dir file: {}",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        !base.join("opencode-config").exists() && !base.join("opencode-data").exists(),
+        "the per-run opencode dirs survived the run"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R79 F1 (live, Docker): a sentinel in the host's opencode data dir is
+/// not readable from the candidate's container through the per-run mount.
+#[test]
+fn r79_f1_host_sessions_invisible() {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
+    let host_data = PathBuf::from(&home).join(".local/share/opencode");
+    std::fs::create_dir_all(&host_data).unwrap();
+    let sentinel = host_data.join("sdb-r79-sentinel");
+    std::fs::write(&sentinel, "host-session\n").unwrap();
+    let base = r79_temp_dir("live");
+    let workdir = base.join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let _dirs = OpenCodeRunner::prepare_run_dirs(&workdir);
+    // The production mount args: on the old code these are the host dirs,
+    // and the sentinel below is readable.
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--entrypoint".to_string(),
+        "/bin/bash".to_string(),
+    ];
+    args.extend(OpenCodeRunner::opencode_mount_args(&workdir));
+    args.push("subdollar-sandbox".to_string());
+    args.push("-c".to_string());
+    args.push("test ! -r /home/ubuntu/.local/share/opencode/sdb-r79-sentinel".to_string());
+    let status = std::process::Command::new("docker").args(&args).status();
+    let _ = std::fs::remove_file(&sentinel);
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(
+        status.map(|s| s.success()).unwrap_or(false),
+        "the host's opencode session sentinel was readable from the container"
+    );
+}
+
+/// R79 F3: the harness's opencode cost for the real 2026-11-11 probe
+/// session (ling-3.1-flash, the ref-sql tool run) matches the snapshot
+/// formula the bill is based on within 1.25x.
+#[test]
+fn r79_f3_opencode_cost_matches_bill() {
+    // The probe's second step: input 125, cache read 5312, output 3,
+    // reasoning 41; the opencode session recorded $5.9373e-05.
+    let tokens = serde_json::json!({
+        "input": 125,
+        "output": 3,
+        "reasoning": 41,
+        "cache": {"read": 5312, "write": 0}
+    });
+    let mut stats = OmpSessionStats::default();
+    let cost = OpenCodeRunner::add_step(&mut stats, &tokens, "inclusionai/ling-3.1-flash");
+    let expected = crate::cost::ModelPricing::for_model("inclusionai/ling-3.1-flash")
+        .compute_cost_with_cache_and_write(125, 5312, 44, 0)
+        .total_cost_usd;
+    assert!(
+        (cost - expected).abs() < 1e-12,
+        "harness {cost} vs snapshot {expected}"
+    );
+    let bill = 5.9373e-05;
+    let ratio = bill / expected;
+    assert!(
+        (0.8..=1.25).contains(&ratio),
+        "bill {bill} vs snapshot {expected}: {ratio}"
+    );
+    assert_eq!(stats.prompt_tokens, 125);
+    assert_eq!(stats.cached_tokens, 5312);
+    assert_eq!(stats.completion_tokens, 44);
+}
+
+/// R79 F2: the opencode harness's billing signals, read from the lines
+/// the local stub made opencode print: the 402 trips at once, the
+/// exhausted 429 is a fault (not a count), and the broken stream is not a
+/// billing fault at all.
+#[test]
+fn r79_f2_opencode_billing_signals() {
+    fn log_json(fixture: &str) -> String {
+        fixture
+            .lines()
+            .find_map(|line| line.split_once("[LOG] ").map(|(_, json)| json.to_string()))
+            .expect("the fixture has a [LOG] line")
+    }
+    for (name, fixture) in [
+        (
+            "402",
+            include_str!("../../campaign/fixtures/health/opencode-402.txt"),
+        ),
+        (
+            "exhausted 429",
+            include_str!("../../campaign/fixtures/health/opencode-exhausted.txt"),
+        ),
+    ] {
+        assert!(
+            OpenCodeRunner::error_event_billing_reason(&log_json(fixture)).is_some(),
+            "{name} must be a billing fault"
+        );
+    }
+    assert_eq!(
+        OpenCodeRunner::error_event_billing_reason(&log_json(include_str!(
+            "../../campaign/fixtures/health/opencode-stream_error.txt"
+        ))),
+        None,
+        "a broken stream is a tool error, not a billing fault"
+    );
+    let event = ev(r#"{"error":{"type":"provider.billing","message":"insufficient credits"}}"#);
+    assert!(OpenCodeRunner::provider_auth_billing_reason(&event).is_some());
+    let rate = ev(r#"{"error":{"type":"provider.rate-limit","status":429}}"#);
+    assert!(OpenCodeRunner::is_rate_limit_event(&rate, ""));
+}
+
+/// R79-4: the per-trial config carries the snapshot provider pin (the
+/// same endpoint the omp check sends), and none for an unpinned model.
+#[test]
+fn r79_f4_opencode_config_pins_the_provider() {
+    let cfg: serde_json::Value = serde_json::from_str(&OpenCodeRunner::variant_config_json(
+        "inclusionai/ling-3.1-flash",
+    ))
+    .unwrap();
+    assert_eq!(
+        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["body"]["provider"]
+            ["only"][0],
+        "novita"
+    );
+    assert_eq!(
+        cfg["providers"]["openrouter"]["models"]["inclusionai/ling-3.1-flash"]["body"]["provider"]
+            ["order"][0],
+        "novita"
+    );
+    assert!(
+        cfg["providers"]["openrouter"]["body"].is_null(),
+        "the pin must not be provider-wide (it would pin the title model): {cfg}"
+    );
+    let none: serde_json::Value = serde_json::from_str(&OpenCodeRunner::variant_config_json(
+        "google/gemini-2.5-flash",
+    ))
+    .unwrap();
+    assert!(
+        none["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"]["body"].is_null(),
+        "an unpinned model must carry no provider body: {none}"
+    );
+}
+
 fn all_live_tasks() -> Vec<crate::config::TaskType> {
     use crate::config::TaskType;
     vec![TaskType::Sql]

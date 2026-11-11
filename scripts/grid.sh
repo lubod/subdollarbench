@@ -46,6 +46,7 @@ REHEARSAL=0
 DRY_RUN=0
 WORKER_BASE=1
 MAX_PHASE=4
+HARNESS="${SDB_GRID_HARNESS:-omp}"
 BUDGET_SET=0
 LEDGER_SET=0
 STOP_SET=0
@@ -58,6 +59,7 @@ usage: grid.sh --careers <file> --lanes <n> [--cap <usd>] [--budget <usd>]
                [--wall <min>] [--ledger <file>] [--hold <file>] [--stop <file>]
                [--cell <path>] [--dry-run] [--max-phase <n>]
        grid.sh --rehearsal --careers <file> --lanes <n> [--cap <usd>]
+               [--harness omp|opencode]
        grid.sh --self-test [--real]
 EOF
     exit 2
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --self-test) SELF_TEST=1; shift ;;
         --real) REAL=1; shift ;;
         --rehearsal) REHEARSAL=1; shift ;;
+        --harness) HARNESS="$2"; shift 2 ;;
         --max-phase) MAX_PHASE="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) log "unknown argument: $1"; usage ;;
@@ -145,9 +148,9 @@ ledger_add() {
     local points="$6" cost="$7" stop="$8" token="$9"
     (
         flock 200
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$career" "$model" "$phase" "$worker" "$id" "$points" "$cost" \
-            "$stop" "$(date -u +%FT%TZ)" >> "$LEDGER"
+            "$stop" "$(date -u +%FT%TZ)" "$HARNESS" >> "$LEDGER"
         if [[ -n "$token" ]]; then rm -f "$token"; fi
     ) 200>>"$LEDGER.lock"
 }
@@ -589,6 +592,7 @@ run_cell() {
     SDB_CELL_CHAIN="$chain" \
     SDB_CELL_WORKER="$worker" \
     SDB_CELL_REHEARSAL="$REHEARSAL" \
+    SDB_CELL_HARNESS="$HARNESS" \
     SDB_CONCURRENT_CELLS="$LANES" \
     SDB_CELL_RESULT="$result" \
         "$CELL" "$model" "$PHASE_BUDGET" "$PHASE_WALL"
@@ -805,7 +809,7 @@ run_grid() {
     mkdir -p "$RUNNING_DIR"
     rm -f "$STOP"
     if [[ ! -f "$LEDGER" ]]; then
-        printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$LEDGER"
+        printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\n' > "$LEDGER"
     fi
     local pids=() lane
     local rc=0
@@ -1028,7 +1032,7 @@ EOF
     SDB_FAKE_SLEEP_ALL=1
     SDB_FAKE_SLEEP=1
     export SDB_GRID_TRACE SDB_FAKE_COST SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
-    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$LEDGER"
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\n' > "$LEDGER"
     load_careers "$CAREERS_FILE"
     run_grid
     rows=$(($(wc -l < "$LEDGER") - 1))
@@ -1054,7 +1058,7 @@ EOF
     STOP="$scenario/stop"
     SDB_GRID_TRACE="$scenario/trace.tsv"
     export SDB_GRID_TRACE
-    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$LEDGER"
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\n' > "$LEDGER"
     printf '0\tc1\t1\t1\tfake-c0-c1-p1\t10\t0.1\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
     printf '0\tc1\t2\t1\tfake-c0-c1-p2\t10\t0.1\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
     printf '1\tc1\t1\t2\tfake-c1-c1-p1\t10\t0.1\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
@@ -1082,7 +1086,7 @@ EOF
     STOP="$scenario/stop"
     SDB_GRID_TRACE="$scenario/trace.tsv"
     export SDB_GRID_TRACE
-    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\n' > "$LEDGER"
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\n' > "$LEDGER"
     printf '0\tc1\t1\t1\tfake-c0-c1-p1\t10\t0.1\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
     printf '1\tc1\t1\t1\tfake-c1-c1-p1\t10\t0.1\tok\t2026-10-29T00:00:00Z\n' >> "$LEDGER"
     printf '1\tc1\t2\t1\tfake-c1-c1-p2\t10\t0.1\tover wall\t2026-10-29T00:00:00Z\n' >> "$LEDGER"

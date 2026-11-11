@@ -1,0 +1,5 @@
+[14:47:55] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[14:47:55] [LIVE] Turn 1 started
+[14:47:55] [ACTION] bash {"type":"tool_use","timestamp":1794408475710,"sessionID":"ses_capture_tool","part":{"partID":"prt_1cb146c33001X0agUnxtOoRDis","sessionID":"ses_capture_tool","messageID":"msg_1cb146c0f001L5Ovn8ZaVlluLn","type":"tool","id":"call_stub_1","tool":"bash","state":{"status":"error","input":{"command":"echo probe-forty-two"},"error":"No tool named \"bash\" is currently available. Please use a tool from the available tool list.","metadata":{"providerCall":{"executed":false},"providerResult":{"executed":false},"rawInput":"{\"command\":\"echo probe-forty-two\"}"},"time":{"start":1794408475699,"end":1794408475710}}}}
+[14:47:55] [TELEMETRY] turn=1 max_turns=0 spent=0.000000 tokens=11
+[14:47:55] [RESPONSE] probe-forty-two

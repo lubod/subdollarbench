@@ -230,7 +230,11 @@ impl OpenCodeRunner {
     /// = OpenRouter's native reasoning parameter). Env-passed so no config
     /// files pollute the candidate workspace.
     fn variant_config_json(model_bare: &str) -> String {
-        serde_json::json!({
+        // R79-4: the snapshot pin, sent through the OpenRouter provider
+        // options (`provider.only`/`order`), the same endpoint the omp
+        // check pins. This one function builds the per-trial config the
+        // unit test reads.
+        let mut config = serde_json::json!({
             "providers": {
                 "openrouter": {
                     "models": {
@@ -244,8 +248,27 @@ impl OpenCodeRunner {
                     }
                 }
             }
-        })
-        .to_string()
+        });
+        // R79-4: the pin goes in the model's request body. opencode
+        // 2.0.24 ignores the model `options` shape and a provider-wide
+        // `body` would pin the title model too; the per-model body is
+        // the shape it forwards (proved at $0 on the free tier: a wrong
+        // pin is refused by OpenRouter's routing, the right one runs).
+        if let Some(pin) = crate::cost::calculator::provider_for_model(model_bare) {
+            config["providers"]["openrouter"]["models"][model_bare]["body"] = serde_json::json!({
+                "provider": {"only": [pin], "order": [pin]}
+            });
+        }
+        config.to_string()
+    }
+
+    /// R79-2: the billing signal of an opencode error event: the 402
+    /// quota and the exhausted 429 are faults; a broken stream is not.
+    fn error_event_billing_reason(line: &str) -> Option<String> {
+        match crate::sandbox::omp::classify_billing_error(line) {
+            Some(crate::sandbox::omp::BillingSignal::Fault(reason)) => Some(reason.to_string()),
+            _ => None,
+        }
     }
 
     /// Client-side variant-resolution failure: instant, zero-spend, retryable
@@ -348,16 +371,36 @@ impl OpenCodeRunner {
         )
     }
 
-    /// Host dirs holding stored Console auth (opencode.db) + config.
-    /// Mounted into the sandbox like OMP's `~/.omp` mount. Per-run
-    /// `--session` ids keep concurrent runs apart in the shared db.
-    fn host_opencode_dirs() -> (PathBuf, PathBuf) {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ubuntu".to_string());
-        let base = PathBuf::from(home);
+    /// R79 F1: the per-run config and data dirs, inside the run dir (the
+    /// workspace's parent), never the host's home. The host's
+    /// `~/.config/opencode` and `~/.local/share/opencode` hold the
+    /// implementer's sessions and global config; a candidate must never
+    /// see them.
+    fn run_opencode_dirs(workdir: &std::path::Path) -> (PathBuf, PathBuf) {
+        let run_dir = workdir.parent().unwrap_or(workdir);
         (
-            base.join(".config/opencode"),
-            base.join(".local/share/opencode"),
+            run_dir.join("opencode-config"),
+            run_dir.join("opencode-data"),
         )
+    }
+
+    fn prepare_run_dirs(workdir: &std::path::Path) -> (PathBuf, PathBuf) {
+        let (config, data) = Self::run_opencode_dirs(workdir);
+        let _ = std::fs::create_dir_all(&config);
+        let _ = std::fs::create_dir_all(&data);
+        (config, data)
+    }
+
+    /// The two `-v` args: the per-run dirs at the container's opencode
+    /// paths. No path under the host's home appears here.
+    fn opencode_mount_args(workdir: &std::path::Path) -> Vec<String> {
+        let (config, data) = Self::run_opencode_dirs(workdir);
+        vec![
+            "-v".to_string(),
+            format!("{}:/home/ubuntu/.config/opencode", config.display()),
+            "-v".to_string(),
+            format!("{}:/home/ubuntu/.local/share/opencode", data.display()),
+        ]
     }
 
     fn write_agents_md(
@@ -375,6 +418,27 @@ impl OpenCodeRunner {
             .replace("{{EFFORT}}", effort);
         let content = crate::config::template_ports_for_worker(&content, port, worker);
         let _ = std::fs::write(workdir.join("AGENTS.md"), content);
+    }
+}
+
+/// R79 F1: the per-run opencode dirs, removed when the run ends (every
+/// return path, including errors and a cancelled trial).
+struct RunDirs {
+    config: PathBuf,
+    data: PathBuf,
+}
+
+impl RunDirs {
+    fn new(workdir: &std::path::Path) -> Self {
+        let (config, data) = OpenCodeRunner::prepare_run_dirs(workdir);
+        Self { config, data }
+    }
+}
+
+impl Drop for RunDirs {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.config);
+        let _ = std::fs::remove_dir_all(&self.data);
     }
 }
 
@@ -443,6 +507,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 std::fs::Permissions::from_mode(0o755),
             );
         }
+        // R79 F1: fresh per-run config/data dirs; the guard removes them
+        // when the run ends, so no session or key survives in the run dir.
+        let _run_dirs = RunDirs::new(&canonical_workdir);
 
         // Same task text + entrypoint contract as OMP (shared helper).
         let (base_port, base_cmd, raw_guidance) = OmpRunner::task_guidance(spec.task, prompt);
@@ -521,19 +588,10 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .arg("/workspace")
                 .arg("-e")
                 .arg("HOME=/home/ubuntu");
-            // Stored Console auth (opencode.db) + config, mirroring OMP's
-            // `~/.omp` mount. Unique `--session` per run keeps trials apart.
-            let (cfg_dir, data_dir) = Self::host_opencode_dirs();
-            let _ = std::fs::create_dir_all(&cfg_dir);
-            let _ = std::fs::create_dir_all(&data_dir);
-            cmd.arg("-v").arg(format!(
-                "{}:/home/ubuntu/.config/opencode",
-                cfg_dir.display()
-            ));
-            cmd.arg("-v").arg(format!(
-                "{}:/home/ubuntu/.local/share/opencode",
-                data_dir.display()
-            ));
+            // R79 F1: per-run config/data dirs inside the run dir; the
+            // host's opencode dirs (sessions, plugins) are never mounted.
+            // The key reaches the session through the environment only.
+            cmd.args(Self::opencode_mount_args(&canonical_workdir));
 
             if let Some(net) = network {
                 cmd.arg("--network").arg(net);
@@ -825,12 +883,29 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                                             .to_string(),
                                     );
                                 }
-                                if Self::is_rate_limit_event(&v, trimmed) {
+                                let rate_event = Self::is_rate_limit_event(&v, trimmed);
+                                if rate_event {
                                     rate_o.store(true, Ordering::SeqCst);
                                 }
                                 if let Some(reason) = Self::provider_auth_billing_reason(&v) {
                                     let _ = tx_o.send(format!("[BILLING] {reason}"));
                                     billing_o.store(true, Ordering::SeqCst);
+                                }
+                                // R79-2: the opencode error events (the
+                                // provider.quota 402 and the exhausted
+                                // provider.rate-limit 429) go through the
+                                // shared classifier; a stream error stays a
+                                // tool error, not a billing fault. A 429
+                                // stays on the resume/backoff path (the
+                                // exhausted case is the throttle arm's
+                                // OmpBillingError), so the classifier must
+                                // not pre-empt it.
+                                if !rate_event {
+                                    if let Some(reason) = Self::error_event_billing_reason(trimmed)
+                                    {
+                                        let _ = tx_o.send(format!("[BILLING] {reason}"));
+                                        billing_o.store(true, Ordering::SeqCst);
+                                    }
                                 }
                                 let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
                             }
@@ -856,6 +931,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                         if trimmed.is_empty() {
                             continue;
                         }
+                        // R79 F2: the health counter reads the opencode
+                        // stderr too (a retried 429 is counted, not a fault).
+                        let _ = tx_e.send(format!("[STDERR] {}", trimmed));
                         {
                             let mut tail = tail_e.lock().unwrap();
                             tail.push(trimmed.to_string());

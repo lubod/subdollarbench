@@ -1,0 +1,12 @@
+[14:46:32] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[14:46:32] [LIVE] Turn 1 started
+[14:46:34] [LIVE] Turn 2 started
+[14:46:38] [LIVE] Turn 3 started
+[14:46:46] [LIVE] Turn 4 started
+[14:46:57] [LIVE] Turn 5 started
+[14:47:05] [LIVE] Turn 6 started
+[14:47:13] [LIVE] Turn 7 started
+[14:47:24] [LIVE] Turn 8 started
+[14:47:33] [LIVE] Turn 9 started
+[14:47:42] [LIVE] Turn 10 started
+[14:47:54] [LOG] {"type":"error","timestamp":1794408474582,"sessionID":"ses_capture_stream_error","error":{"type":"provider.unknown","message":"upstream stream broke","status":200,"response":{"body":"{\"error\": {\"message\": \"upstream stream broke\", \"type\": \"provider.stream\"}}"}}}
