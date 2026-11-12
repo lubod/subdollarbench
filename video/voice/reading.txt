@@ -1,0 +1,10 @@
+I gave a group of artificial intelligence models a small budget and one job. They had to build a working database server from an empty folder, with no libraries to help them. Every query they answered was checked against a trusted reference. The results were surprising. Some models finished quickly. Others broke their own work and never recovered. This is the story of what one dollar can buy.
+
+---
+
+Recording instructions
+---------------------
+Please read only the paragraph above, from "I gave" to "can buy".
+Find a quiet room and use a normal speaking pace. Record one take.
+Any format ffmpeg reads is fine (WAV preferred). Keep it between
+10 and 60 seconds.
