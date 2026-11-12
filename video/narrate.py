@@ -359,6 +359,22 @@ def run_self_test():
         joined_words = " ".join(c["text"] for c in chunks).split()
         assert joined_words == source_words, (joined_words, source_words)
 
+        # A long sentence between two short ones: its chunks stay its
+        # own, never merged with the neighbours.
+        mixed = (
+            "Short before. When the answers differ, even by a single row, "
+            "in a single query, on a single ticket, the ticket fails, the "
+            "points are lost, and the model has to decide whether to spend "
+            "what is left of its dollar fixing the bug or moving on. Short "
+            "after."
+        )
+        mixed_chunks = chunk_text(mixed)
+        long_chunks = [c["text"] for c in mixed_chunks if "answers differ" in c["text"]]
+        assert long_chunks, mixed_chunks
+        assert all(
+            "Short before." not in t and "Short after." not in t
+            for t in long_chunks), mixed_chunks
+
         # The lexicon: whole words, amounts and decimals as rules.
         spoken = apply_lexicon("$0.99 and 65.0 and 76")
         assert "ninety-nine cents" in spoken, spoken
