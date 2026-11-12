@@ -14,3 +14,7 @@ bench.db-*
 # dash pattern above, so `git add -A` re-added them and one carried an
 # OpenRouter key into an unpushed commit (2026-10-14 incident, purged).
 bench.db.bak-*
+
+# Python bytecode from the video scripts
+__pycache__/
+*.pyc
