@@ -1,0 +1,13 @@
+[14:48:32] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[14:48:32] [LIVE] Turn 1 started
+[14:48:34] [LIVE] Turn 2 started
+[14:48:38] [LIVE] Turn 3 started
+[14:48:47] [LIVE] Turn 4 started
+[14:48:55] [LIVE] Turn 5 started
+[14:49:04] [LIVE] Turn 6 started
+[14:49:16] [LIVE] Turn 7 started
+[14:49:27] [LIVE] Turn 8 started
+[14:49:38] [LIVE] Turn 9 started
+[14:49:46] [LIVE] Turn 10 started
+[14:49:57] [LOG] {"type":"error","timestamp":1794408597003,"sessionID":"ses_capture_exhausted","error":{"type":"provider.rate-limit","message":"rate limited","status":429,"response":{"body":"{\"error\":{\"message\":\"rate limited\",\"code\":429}}"}}}
+[14:49:57] [BILLING] provider rate-limited (HTTP 429)

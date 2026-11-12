@@ -1,0 +1,12 @@
+[08:52:32] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 200, Budget: $0.99
+[08:52:32] [LIVE] Turn 1 started
+[08:52:43] [ACTION] shell {"type":"tool_use","timestamp":1794387163585,"sessionID":"ses_r79probe","part":{"partID":"prt_1c9cf10e7001PScZnyAUKEc1M7","sessionID":"ses_r79probe","messageID":"msg_1c9cf0626001BVUzHTB7Svecab","type":"tool","id":"call_fd878423b0e045b8bb4784f3","tool":"shell","state":{"status":"completed","input":{"command":"printf 'SELECT 1\\n' | nc ref-sql 5480"},"output":"nc: getaddrinfo for host \"ref-sql\" port 5480: Temporary failure in name resolution\n","title":"shell","metadata":{"metadata":{"status":"completed","truncated":false,"exit":1},"content":[{"type":"text","text":"nc: getaddrinfo for host \"ref-sql\" port 5480: Temporary failure in name resolution\n"},{"type":"text","text":"Exited with code 1"}],"providerCall":{"executed":false},"providerResult":{"executed":false},"rawInput":"{\"command\": \"printf 'SELECT 1\\\\n' | nc ref-sql 5480\"}"},"time":{"start":1794387153127,"end":1794387163585}}}}
+[08:52:43] [TELEMETRY] turn=1 max_turns=200 spent=0.000000 tokens=5389
+[08:52:45] [LIVE] Turn 2 started
+[08:52:47] [RESPONSE] I ran the command, and here is the output:
+
+```
+nc: getaddrinfo for host "ref-sql" port 5480: Temporary failure in name resolution
+```
+
+The command failed because the hostname `ref-sql` could not be resolved by DNS (exit code 1). This suggests the hostname isn't available in the current network environment, or a DNS resolver configuration is missing.

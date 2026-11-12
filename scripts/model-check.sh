@@ -9,9 +9,9 @@
 # native token counts (prompt, cached, completion and cache writes) with
 # all four snapshot rates.
 #
-# Usage: scripts/model-check.sh <model>
-#        scripts/model-check.sh --slug <model>
-#        scripts/model-check.sh --record <model>
+# Usage: scripts/model-check.sh [--harness omp|opencode] <model>
+#        scripts/model-check.sh [--harness omp|opencode] --slug <model>
+#        scripts/model-check.sh [--harness omp|opencode] --record <model>
 #        scripts/model-check.sh --self-test
 #
 # <model> is a cell model name (`openrouter/z-ai/glm-5.3`) or a snapshot id
@@ -29,6 +29,8 @@
 #   SDB_MODEL_CHECK_SESSION_JSON      a canned omp session file
 #   SDB_MODEL_CHECK_GENERATION_JSON   a canned generation response
 #   SDB_MODEL_CHECK_MODELS_JSON       a canned /api/v1/models response
+#   SDB_MODEL_CHECK_OPENCODE_DB       a canned opencode session db
+#   SDB_MODEL_CHECK_USAGE_BEFORE/AFTER the OpenRouter key usage around a run
 #   SDB_ENV_FILE                      where to read OPENROUTER_API_KEY
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,7 +51,32 @@ record_dir() {
 }
 
 record_path() {
-    printf '%s/model-check-%s.txt' "$(record_dir)" "$(model_slug "$1")"
+    local prefix=""
+    [[ "${harness:-omp}" == "opencode" ]] && prefix="opencode-"
+    printf '%s/model-check-%s%s.txt' "$(record_dir)" "$prefix" "$(model_slug "$1")"
+}
+
+# R79-18: a settled canned usage series for the self-test: six equal
+# reads, the 30 s settle window at the live 5 s interval.
+settled_series() {
+    local v="$1"
+    printf '%s,%s,%s,%s,%s,%s' "$v" "$v" "$v" "$v" "$v" "$v"
+}
+
+# R79-4: the per-run opencode config content: the model's effort variants
+# and the snapshot provider pin (the same shape the runner sends). The pin
+# is per model: a provider-wide body would pin opencode's title model too.
+opencode_config_json() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+model_id, pin = sys.argv[1], sys.argv[2]
+cfg = {"providers": {"openrouter": {"models": {model_id: {
+    "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}}}
+if pin:
+    cfg["providers"]["openrouter"]["models"][model_id]["body"] = {
+        "provider": {"only": [pin], "order": [pin]}}
+print(json.dumps(cfg))
+PY
 }
 
 usage() {
@@ -59,9 +86,13 @@ usage() {
 
 mode=check
 model=""
+harness="${SDB_MODEL_CHECK_HARNESS:-omp}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --self-test) mode=self-test; shift ;;
+        --harness)
+            [[ $# -ge 2 ]] || { echo "[model-check] --harness needs omp|opencode" >&2; exit 2; }
+            harness="$2"; shift 2 ;;
         --slug)
             [[ $# -ge 2 ]] || { echo "[model-check] --slug needs a model" >&2; exit 2; }
             mode=slug; model="$2"; shift 2 ;;
@@ -76,6 +107,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$harness" in
+    omp|opencode) ;;
+    *) echo "[model-check] --harness must be omp or opencode" >&2; exit 2 ;;
+esac
 case "$mode" in
     slug) model_slug "$model"; echo; exit 0 ;;
     record) record_path "$model"; echo; exit 0 ;;
@@ -317,6 +352,210 @@ PY
             exit 1; }
         echo "[self-test] an unpinned model passes with the checks marked skipped"
 
+        # R79 F3: the opencode harness's check reads the opencode session
+        # db. The canned db carries the session_v2 row and the tool part.
+        make_oc_db() {
+            local path="$1" provider="$2" cost="$3"
+            local tokens_input="${4:-100}" tokens_output="${5:-10}"
+            python3 - "$path" "$provider" "$cost" "$tokens_input" "$tokens_output" <<'PY'
+import json, sqlite3, sys
+path, provider, cost, tokens_input, tokens_output = sys.argv[1:6]
+con = sqlite3.connect(path)
+con.execute(
+    "create table session_v2(id text primary key, model text, cost real, "
+    "tokens_input integer, tokens_output integer, tokens_reasoning integer, "
+    "tokens_cache_read integer, tokens_cache_write integer, idle_outcome text, "
+    "time_created integer)")
+con.execute("create table session_message(session_id text, type text, data text)")
+model = json.dumps({"id": "openai/gpt-6-luna-pro", "providerID": provider})
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_selftest_positive", model, float(cost), int(tokens_input),
+             int(tokens_output), 0, 0, 0, "succeeded", 1))
+tool = json.dumps({"content": [{"type": "tool", "name": "shell",
+    "state": {"status": "completed",
+              "content": [{"type": "text", "text": "probe-forty-two\n"}]}}]})
+con.execute("insert into session_message values (?, 'assistant', ?)",
+            ("ses_selftest_positive", tool))
+con.commit()
+con.close()
+PY
+        }
+        add_failed_session() {
+            python3 - "$1" <<'PY'
+import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+model = json.dumps({"id": "openai/gpt-6-luna-pro", "providerID": "openrouter"})
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_selftest_failed", model, 0.0, 0, 0, 0, 0, 0,
+             "failed", 2))
+tool = json.dumps({"content": [{"type": "tool", "name": "shell",
+    "state": {"status": "failed",
+              "content": [{"type": "text", "text": "wrong-session\n"}]}}]})
+con.execute("insert into session_message values (?, 'assistant', ?)",
+            ("ses_selftest_failed", tool))
+con.commit()
+con.close()
+PY
+        }
+        oc_record() {
+            printf '%s/model-check-opencode-%s.txt' "$SDB_MODEL_CHECK_DIR" \
+                "$(model_slug "$1")"
+        }
+        expect_pass_oc() {
+            local name="$1" rc=0 rec
+            rec="$(oc_record "$name")"
+            out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+                SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.000015)" \
+                SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+                "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
+            [[ "$rc" -eq 0 ]] || {
+                echo "[self-test] opencode $name was refused: $out" >&2; exit 1; }
+            grep -q '^RESULT: PASS$' "$rec" || {
+                echo "[self-test] opencode $name wrote no PASS" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'tool-calls: 1 tool part(s)' "$rec" || {
+                echo "[self-test] opencode $name did not record the tool part" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'session:  input 100, output 10, reasoning 0, cache read 0, cache write 0' "$rec" || {
+                echo "[self-test] opencode $name did not record the raw session row" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'provider: openrouter (sent pin: openai)' "$rec" || {
+                echo "[self-test] opencode $name did not record the sent pin" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'session-id: ses_selftest_positive' "$rec" || {
+                echo "[self-test] opencode $name did not record the positive session id" >&2
+                cat "$rec" >&2; exit 1; }
+            grep -q 'negative: pin novita refused by OpenRouter' "$rec" || {
+                echo "[self-test] opencode $name did not record the negative probe" >&2
+                cat "$rec" >&2; exit 1; }
+        }
+        expect_fail_oc() {
+            local db="$1" want="$2" name="$3" series="${4:-}" rc=0 rec
+            rec="$(oc_record "$name")"
+            [[ -n "$series" ]] || series="$(settled_series "${OC_BILL-0.000015}")"
+            out="$(SDB_MODEL_CHECK_OPENCODE_DB="$db" \
+                SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+                SDB_MODEL_CHECK_USAGE_AFTER="$series" \
+                SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+                "$ROOT/scripts/model-check.sh" --harness opencode "$name" 2>&1)" || rc=$?
+            [[ "$rc" -ne 0 ]] || {
+                echo "[self-test] opencode $case_name passed unexpectedly: $out" >&2
+                exit 1; }
+            grep -q "RESULT: FAIL" "$rec" || {
+                echo "[self-test] opencode $case_name wrote no FAIL" >&2; exit 1; }
+            grep -q "$want" "$rec" || {
+                echo "[self-test] opencode $case_name failed for the wrong reason" >&2
+                cat "$rec" >&2; exit 1; }
+        }
+
+        case_name=opencode-pass
+        cat > "$dir/negative-refused.json" <<'JSON'
+{"type":"error","error":{"type":"provider.invalid-request","message":"No allowed providers are available for the selected model. Providers serving openai/gpt-6-luna-pro-20260922: openai, but your request's provider.only preference permits only: novita.","status":404}}
+JSON
+        cat > "$dir/negative-other.json" <<'JSON'
+{"type":"error","error":{"type":"provider.rate-limit","message":"rate limited","status":429}}
+JSON
+        export SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=1
+        export SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS="$dir/negative-refused.json"
+        export SDB_MODEL_CHECK_OPENCODE_SESSION_ID="ses_selftest_positive"
+        make_oc_db "$dir/oc-pass.db" openrouter 0.000015
+        # R79-15: a later, failed session in the same db must not be the
+        # one the verdict reads.
+        add_failed_session "$dir/oc-pass.db"
+        expect_pass_oc "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode session passes (a later failed session is ignored)"
+
+        case_name=opencode-provider
+        make_oc_db "$dir/oc-provider.db" Other 0.000015
+        expect_fail_oc "$dir/oc-provider.db" "provider Other" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode wrong provider fails"
+
+        case_name=opencode-bill
+        make_oc_db "$dir/oc-bill.db" openrouter 0.000030
+        OC_BILL=0.000030 expect_fail_oc "$dir/oc-bill.db" "bill" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode 2x bill fails"
+
+        case_name=opencode-lag
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage lags" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode zero usage delta fails"
+
+        case_name=opencode-floor
+        OC_BILL=0.000001 expect_fail_oc "$dir/oc-pass.db" "floor" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] an opencode bill below the floor fails"
+
+        case_name=opencode-zero-tokens
+        make_oc_db "$dir/oc-zero-tokens.db" openrouter 0.000015 0 0
+        expect_fail_oc "$dir/oc-zero-tokens.db" "the positive session has 0 tokens" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a positive session with 0 tokens fails"
+
+        case_name=opencode-zero-bill
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" \
+            "the OpenRouter usage lags or the run was not billed" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a positive run with a \$0 bill fails"
+
+        case_name=opencode-settle
+        out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+            SDB_MODEL_CHECK_USAGE_AFTER="0,0,0.000005,0,0,0.000015,0.000015,0.000015,0.000015,0.000015,0.000015" \
+            SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+            "$ROOT/scripts/model-check.sh" --harness opencode \
+            "openrouter/openai/gpt-6-luna-pro" 2>&1)" || rc=$?
+        [[ "$rc" -eq 0 ]] || {
+            echo "[self-test] the settling series was refused: $out" >&2; exit 1; }
+        grep -q 'usage:    settled after 11 reads' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the settling series did not record 11 reads" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        grep -q 'bill:     \$0.00001500' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the settling series did not use the settled bill" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        echo "[self-test] a rise-fall usage series passes with its settled value"
+
+        case_name=opencode-settle-never
+        never="$(python3 -c 'print(",".join(["0","0.000015"] * 18))')"
+        expect_fail_oc "$dir/oc-pass.db" "usage not settled after 36 reads" \
+            "openrouter/openai/gpt-6-luna-pro" "$never"
+        echo "[self-test] a usage series that never settles fails"
+
+        case_name=opencode-negative-pass
+        SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=0 \
+            expect_fail_oc "$dir/oc-pass.db" "negative: pin novita was served" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a wrong pin that is served fails the opencode check"
+
+        case_name=opencode-negative-other
+        SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC=1 \
+            SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS="$dir/negative-other.json" \
+            expect_fail_oc "$dir/oc-pass.db" "inconclusive" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a negative probe with another error is inconclusive"
+
+        case_name=opencode-pin
+        cfg="$(opencode_config_json "openai/gpt-6-luna-pro" "openai")"
+        python3 - "$cfg" <<'PY' || { echo "[self-test] the opencode config misses the per-model pin: $cfg" >&2; exit 1; }
+import json, sys
+cfg = json.loads(sys.argv[1])
+body = cfg["providers"]["openrouter"]["models"]["openai/gpt-6-luna-pro"]["body"]
+assert body == {"provider": {"only": ["openai"], "order": ["openai"]}}, cfg
+assert "body" not in cfg["providers"]["openrouter"], cfg
+PY
+        cfg="$(opencode_config_json "google/gemini-2.5-flash" "")"
+        python3 - "$cfg" <<'PY' || { echo "[self-test] an unpinned opencode config carries a pin: $cfg" >&2; exit 1; }
+import json, sys
+cfg = json.loads(sys.argv[1])
+assert "body" not in cfg["providers"]["openrouter"], cfg
+assert "body" not in cfg["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"], cfg
+PY
+        echo "[self-test] the opencode config carries the per-model pin"
+
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
             echo "[self-test] the slug is not z-ai-glm-5.3" >&2; exit 1; }
         [[ "$("$ROOT/scripts/model-check.sh" --record openrouter/z-ai/glm-5.3)" == \
@@ -547,6 +786,364 @@ for line in open(sys.argv[1], errors="replace"):
 raise SystemExit(1)
 PY
 }
+
+# R79 F3: the opencode harness check. The opencode CLI's session db
+# (session_v2 + session_message) records the model id/provider the harness
+# used, the session cost and tokens, and the tool parts. One tool-prompt
+# run through the sandbox's opencode is the round trip; the db is the
+# evidence. The record is model-check-opencode-<slug>.txt.
+# R79-5: the bill is OpenRouter's key-usage delta around the run, never
+# opencode's own session cost.
+usage_query() {
+    curl -sS https://openrouter.ai/api/v1/auth/key \
+        -H "Authorization: Bearer $key" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("data",{}).get("usage") or 0)'
+}
+
+opencode_check() {
+    local db="${SDB_MODEL_CHECK_OPENCODE_DB:-}" run_dir="$work/opencode"
+    local events="$work/opencode-events.json" log="$work/opencode.log" rc=0
+    local usage_before usage_after bill
+    # R79-15: the positive session has its own id and data dir; the
+    # negative probe must never write into the db the verdict reads.
+    local session_id="${SDB_MODEL_CHECK_OPENCODE_SESSION_ID:-ses_model_check_$(model_slug "$model")_$$}"
+    local oc_tool_prompt='Use the shell tool twice: first run `echo probe-forty-two`, then run `ls -1 /etc | head -3`. Then reply with the output of the first command.'
+    if [[ -n "${SDB_MODEL_CHECK_USAGE_BEFORE:-}" ]]; then
+        usage_before="$SDB_MODEL_CHECK_USAGE_BEFORE"
+    else
+        usage_before="$(usage_query)" || usage_before=""
+    fi
+    if [[ -z "$usage_before" ]]; then
+        echo "[model-check] FATAL: cannot read the OpenRouter key usage before the run" >&2
+        exit 1
+    fi
+    if [[ -z "$db" ]]; then
+        mkdir -p "$run_dir/ws" "$run_dir/cfg" "$run_dir/data"
+        local cfg_json
+        cfg_json="$(opencode_config_json "$id" "$pin")"
+        set +e
+        timeout 300 docker run --rm --name "sdb-model-check-oc-$(model_slug "$model")-$$" \
+            -v "$run_dir/ws:/workspace" \
+            -v "$run_dir/cfg:/home/ubuntu/.config/opencode" \
+            -v "$run_dir/data:/home/ubuntu/.local/share/opencode" \
+            -w /workspace -e HOME=/home/ubuntu -e PI_NO_PTY=1 \
+            -e OPENROUTER_API_KEY="$key" -e OPENCODE_CONFIG_CONTENT="$cfg_json" \
+            subdollar-sandbox opencode run --standalone --format json \
+            --session "$session_id" \
+            -m "openrouter/$id" --auto -- "$oc_tool_prompt" \
+            > "$events" 2> "$log"
+        rc=$?
+        set -e
+        db="$run_dir/data/opencode.db"
+        if [[ "$rc" -ne 0 || ! -s "$db" ]]; then
+            {
+                echo "model:    $id"
+                echo "sent:     openrouter/$id"
+                echo "served:   (opencode failed)"
+                echo "provider: (not queried)"
+                echo "bill:     (not queried)"
+                echo "time:     $time_utc"
+                echo "image:    $image"
+                echo "RESULT: FAIL (opencode exit $rc; no session db)"
+            } > "$record"
+            echo "[model-check] FATAL: opencode exit $rc; no session db ($record)" >&2
+            tail -n 20 "$log" >&2 || true
+            exit 1
+        fi
+    fi
+    # R79-18: the usage counter is not monotonic (stale reads can fall
+    # back) and a session's generations land at different times, so a
+    # single rise is not the bill. Poll until the delta is unchanged for
+    # 30 s (six reads in a row) within the 180 s bound; the record names
+    # the read count. A series that never settles fails.
+    local usage_settled=0 usage_reads=0 usage_last=""
+    local -a usage_deltas=()
+    usage_delta() {
+        python3 -c 'import sys; print("%.10f" % max(0.0, float(sys.argv[2]) - float(sys.argv[1])))' \
+            "$usage_before" "$1"
+    }
+    usage_settles() {
+        local n=${#usage_deltas[@]} first i
+        [[ "$n" -ge 6 ]] || return 1
+        first="${usage_deltas[$((n - 6))]}"
+        # A $0 delta is the lag (or a genuine $0 bill, which R79-16
+        # fails); it must not settle the poll.
+        python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) > 0 else 1)' \
+            "$first" || return 1
+        for ((i = n - 5; i < n; i++)); do
+            [[ "${usage_deltas[$i]}" == "$first" ]] || return 1
+        done
+        return 0
+    }
+    if [[ -n "${SDB_MODEL_CHECK_USAGE_AFTER:-}" ]]; then
+        # The self-test's canned comma-separated series; no sleeps.
+        local value
+        local -a usage_series
+        IFS=',' read -r -a usage_series <<<"$SDB_MODEL_CHECK_USAGE_AFTER"
+        for value in "${usage_series[@]}"; do
+            value="${value// /}"
+            [[ -n "$value" ]] || continue
+            usage_reads=$((usage_reads + 1))
+            usage_last="$value"
+            usage_deltas+=("$(usage_delta "$value")")
+            if usage_settles; then
+                usage_settled=1
+                break
+            fi
+        done
+    else
+        local value
+        for _ in $(seq 1 36); do
+            value="$(usage_query)" || value=""
+            if [[ -n "$value" ]]; then
+                usage_reads=$((usage_reads + 1))
+                usage_last="$value"
+                usage_deltas+=("$(usage_delta "$value")")
+                if usage_settles; then
+                    usage_settled=1
+                    break
+                fi
+            fi
+            sleep 5
+        done
+    fi
+    if [[ "$usage_reads" -eq 0 || -z "$usage_last" ]]; then
+        echo "[model-check] FATAL: cannot read the OpenRouter key usage after the run" >&2
+        exit 1
+    fi
+    usage_after="$usage_last"
+    bill="$(python3 -c 'import sys; print(max(0.0, float(sys.argv[2]) - float(sys.argv[1])))' \
+        "$usage_before" "$usage_after")"
+    local usage_note
+    if [[ "$usage_settled" == "1" ]]; then
+        usage_note="settled after $usage_reads reads (delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+    else
+        usage_note="not settled after $usage_reads reads (last delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+    fi
+    # R79-4: the negative probe. A wrong pin must be refused by
+    # OpenRouter's routing at $0 (no inference is billed); if the wrong-pin
+    # run succeeds, opencode did not forward the pin and the positive run
+    # proves nothing. A negative run that fails for another reason is
+    # inconclusive, not a pass.
+    local wrong_pin="novita" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
+    local neg_dir="$work/opencode-negative"
+    if [[ "$pin" == "novita" ]]; then
+        wrong_pin="baidu"
+    fi
+    if [[ -z "$pin" ]]; then
+        neg_line="negative: no pin (skipped)"
+    else
+        if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC:-}" ]]; then
+            neg_rc="$SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC"
+            if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS:-}" ]]; then
+                neg_events="$SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS"
+            fi
+        else
+            local neg_cfg
+            mkdir -p "$neg_dir/ws" "$neg_dir/cfg" "$neg_dir/data"
+            neg_cfg="$(opencode_config_json "$id" "$wrong_pin")"
+            set +e
+            timeout 300 docker run --rm --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
+                -v "$neg_dir/ws:/workspace" \
+                -v "$neg_dir/cfg:/home/ubuntu/.config/opencode" \
+                -v "$neg_dir/data:/home/ubuntu/.local/share/opencode" \
+                -w /workspace -e HOME=/home/ubuntu -e PI_NO_PTY=1 \
+                -e OPENROUTER_API_KEY="$key" -e OPENCODE_CONFIG_CONTENT="$neg_cfg" \
+                subdollar-sandbox opencode run --standalone --format json \
+                --session "ses_model_check_neg_$(model_slug "$model")_$$" \
+                -m "openrouter/$id" --auto -- "Reply with exactly: ok" \
+                > "$neg_events" 2> "$work/opencode-negative.log"
+            neg_rc=$?
+            set -e
+        fi
+        if [[ "$neg_rc" -eq 0 ]]; then
+            neg_line="negative: pin $wrong_pin was served (opencode did not forward the pin)"
+        elif grep -q "No allowed providers are available" "$neg_events" 2>/dev/null \
+            && grep -q "permits only: $wrong_pin" "$neg_events" 2>/dev/null; then
+            neg_ok=1
+            neg_line="negative: pin $wrong_pin refused by OpenRouter's routing (exit $neg_rc)"
+        else
+            neg_line="negative: pin $wrong_pin was inconclusive (exit $neg_rc; no routing refusal)"
+        fi
+    fi
+    local verdict
+    verdict="$(python3 - "$db" "$id" "$rate_prompt" "$rate_cache_read" \
+        "$rate_cache_write" "$rate_completion" "$bill" "$session_id" <<'PY'
+import json, sqlite3, sys
+
+(db, model_id, rate_prompt, rate_cache_read, rate_cache_write,
+ rate_completion, bill_arg, session_id) = sys.argv[1:9]
+bill = float(bill_arg)
+con = sqlite3.connect(db)
+row = con.execute(
+    "select model, cost, tokens_input, tokens_output, tokens_reasoning, "
+    "tokens_cache_read, tokens_cache_write, idle_outcome "
+    "from session_v2 where id = ?", (session_id,)).fetchone()
+if not row:
+    print(json.dumps({
+        "sent": "openrouter/" + model_id, "served": "", "provider": "",
+        "bill": bill, "session_cost": 0.0, "expected": 0.0, "ratio": None,
+        "bill_ok": None, "tokens_fresh": 0, "tokens_input": 0,
+        "tokens_output": 0, "tokens_reasoning": 0, "tokens_cached": 0,
+        "tokens_completion": 0, "tokens_write": 0, "tools": [],
+        "tool_ok": False, "outcome": "",
+        "reasons": ["the positive session %s is not in session_v2" % session_id],
+        "ok": False,
+    }))
+    raise SystemExit(0)
+model = json.loads(row[0] or "{}")
+served = model.get("id") or ""
+provider = model.get("providerID") or ""
+session_cost = float(row[1] or 0.0)
+tokens_input = int(row[2] or 0)
+tokens_output = int(row[3] or 0)
+tokens_reasoning = int(row[4] or 0)
+tokens_cached = int(row[5] or 0)
+tokens_write = int(row[6] or 0)
+outcome = row[7] or ""
+tools = []
+for (data,) in con.execute(
+        "select data from session_message where type='assistant' and session_id = ?",
+        (session_id,)):
+    try:
+        d = json.loads(data or "{}")
+    except Exception:
+        continue
+    for part in d.get("content") or []:
+        if not isinstance(part, dict) or part.get("type") != "tool":
+            continue
+        st = part.get("state") or {}
+        text = "".join(
+            c.get("text") or "" for c in (st.get("content") or [])
+            if isinstance(c, dict))
+        tools.append({
+            "name": part.get("name") or "",
+            "status": st.get("status") or "",
+            "text": text,
+        })
+reasons = []
+sent = "openrouter/" + model_id
+if served.lower() != model_id.lower():
+    reasons.append("served %s, want %s" % (served or "(none)", model_id))
+if provider != "openrouter":
+    reasons.append("provider %s, want openrouter" % (provider or "(none)"))
+completion = tokens_output + tokens_reasoning
+# R79-16: a positive run with no tokens or a $0 bill is not a pass; the
+# outcome check alone would hide it.
+total_tokens = (
+    tokens_input + tokens_output + tokens_reasoning + tokens_cached + tokens_write
+)
+if total_tokens == 0:
+    reasons.append("the positive session has 0 tokens")
+if bill <= 0:
+    reasons.append(
+        "bill $%.8f is $0 (the OpenRouter usage lags or the run was not billed)"
+        % bill)
+# R79-5: opencode's session_v2.tokens_input is the fresh input; the
+# cached tokens are reported apart (the step's input 125, cache read 5312).
+tokens_fresh = tokens_input
+expected = (
+    tokens_fresh * float(rate_prompt)
+    + tokens_cached * float(rate_cache_read)
+    + tokens_write * float(rate_cache_write)
+    + completion * float(rate_completion)
+) / 1_000_000
+ratio = None
+bill_ok = None
+if expected > 0:
+    ratio = bill / expected
+    # R79-5a: a zero delta or a bill below the floor is the lagging usage,
+    # not a cheap call.
+    bill_ok = ratio <= 1.25 and ratio >= 0.1
+    if not bill_ok:
+        if ratio < 0.1:
+            reasons.append("bill $%.8f is %.3fx the snapshot $%.8f, below the 0.1x floor (the OpenRouter usage lags?)" % (bill, ratio, expected))
+        else:
+            reasons.append("bill $%.8f is %.2fx the snapshot $%.8f" % (bill, ratio, expected))
+tool_ok = any(
+    t["status"] in ("completed", "success") and "probe-forty-two" in t["text"]
+    for t in tools)
+if not tool_ok:
+    reasons.append("tool-call round trip failed")
+if outcome and outcome != "succeeded":
+    reasons.append("session outcome %s" % outcome)
+print(json.dumps({
+    "sent": sent, "served": served, "provider": provider, "bill": bill,
+    "session_cost": session_cost,
+    "expected": expected, "ratio": ratio, "bill_ok": bill_ok,
+    "tokens_fresh": tokens_fresh, "tokens_input": tokens_input,
+    "tokens_output": tokens_output, "tokens_reasoning": tokens_reasoning,
+    "tokens_cached": tokens_cached,
+    "tokens_completion": completion, "tokens_write": tokens_write,
+    "tools": tools, "tool_ok": tool_ok, "outcome": outcome,
+    "reasons": reasons, "ok": not reasons,
+}))
+PY
+)"
+    local ok sent served provider bill expected ratio tokens_line reasons
+    ok="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["ok"] else "0")' "$verdict")"
+    sent="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$verdict")"
+    served="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["served"])' "$verdict")"
+    provider="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["provider"])' "$verdict")"
+    bill="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["bill"])' "$verdict")"
+    expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["expected"])' "$verdict")"
+    ratio="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("" if v["ratio"] is None else "%.3f" % v["ratio"])' "$verdict")"
+    tokens_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d fresh, %d cached, %d completion, %d cache write" % (v["tokens_fresh"], v["tokens_cached"], v["tokens_completion"], v["tokens_write"]))' "$verdict")"
+    raw_row="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("input %d, output %d, reasoning %d, cache read %d, cache write %d, cost %.8f" % (v["tokens_input"], v["tokens_output"], v["tokens_reasoning"], v["tokens_cached"], v["tokens_write"], v["session_cost"]))' "$verdict")"
+    reasons="$(python3 -c 'import json,sys; print("; ".join(json.loads(sys.argv[1])["reasons"]))' "$verdict")"
+    if [[ -n "$pin" && "$neg_ok" != "1" ]]; then
+        ok=0
+        if [[ -n "$reasons" ]]; then
+            reasons="$reasons; $neg_line"
+        else
+            reasons="$neg_line"
+        fi
+    fi
+    if [[ "$usage_settled" != "1" ]]; then
+        ok=0
+        if [[ -n "$reasons" ]]; then
+            reasons="$reasons; usage $usage_note"
+        else
+            reasons="usage $usage_note"
+        fi
+    fi
+    {
+        echo "model:    $id"
+        echo "sent:     $sent"
+        echo "served:   $served"
+        echo "session-id: $session_id"
+        if [[ -n "$pin" ]]; then
+            echo "provider: $provider (sent pin: $pin)"
+        else
+            echo "provider: $provider (no pin sent)"
+        fi
+        echo "bill:     \$$bill (OpenRouter key usage; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"); snapshot \$$expected, ratio $ratio)"
+        echo "usage:    $usage_note"
+        echo "tokens:   $tokens_line (opencode session)"
+        echo "session:  $raw_row (session_v2)"
+        echo "tool-calls: $(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d tool part(s)" % len(v["tools"]))' "$verdict")"
+        echo "$neg_line"
+        echo "time:     $time_utc"
+        echo "image:    $image"
+        if [[ "$ok" == "1" ]]; then
+            echo "RESULT: PASS"
+        else
+            echo "RESULT: FAIL ($reasons)"
+        fi
+    } > "$record"
+    if [[ "$ok" == "1" ]]; then
+        echo "[model-check] PASS (opencode): $id sent exactly, session model $served ($record)"
+        return 0
+    fi
+    echo "[model-check] FATAL (opencode): $reasons ($record)" >&2
+    return 1
+}
+
+# R79 F3: the opencode harness has its own check and record.
+if [[ "$harness" == "opencode" ]]; then
+    opencode_check
+    exit $?
+fi
 
 if ! run_omp reply "Reply with exactly: ok" "read" "$session_file"; then
     {

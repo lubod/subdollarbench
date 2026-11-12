@@ -3374,6 +3374,22 @@ mod tests {
         }
     }
 
+    /// R79 F4: rewrite a phase's recorded harness in both files.
+    fn set_phase_harness(runs: &Path, prefix: &str, phase: u32, harness: &str) {
+        let dir = runs.join(format!("campaign_{prefix}_p{phase}"));
+        for file in ["campaign.json", "status.json"] {
+            let path = dir.join(file);
+            let mut v: Value = serde_json::from_str(&read(&path)).unwrap();
+            let rollup = if file == "status.json" {
+                v.get_mut("rollup").unwrap()
+            } else {
+                &mut v
+            };
+            rollup["harness"] = serde_json::json!(harness);
+            fs::write(path, v.to_string()).unwrap();
+        }
+    }
+
     /// R64 F5: rewrite every stage's turns and give it a 1000 s agent
     /// duration, in both files.
     fn set_turns(runs: &Path, prefix: &str, phase: u32, turns: &[u32]) {
@@ -4455,6 +4471,45 @@ mod tests {
                 "{page} is {bytes} bytes with 10 .46 + 6 .45 models, over 150 KB"
             );
         }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R79 F4: a comparison (smoke) run on the opencode harness is not in
+    /// the export: not ranked, not a model, not named on either page; its
+    /// campaign.json names the harness.
+    #[test]
+    fn r79_f4_comparison_runs_are_hidden() {
+        let (base, runs, out) = fixture("r79compare");
+        career(&runs, "cmp", "opencode-model", [4.0; 4], [0.01; 4]);
+        set_mark(&runs, "cmp", 1, "smoke");
+        for phase in 1..=4 {
+            set_phase_harness(&runs, "cmp", phase, "opencode");
+        }
+        let cells = careers(runs.to_str().unwrap());
+        assert!(cells[0].smoke, "the comparison run is not a smoke cell");
+        assert_eq!(cells[0].harness, "opencode");
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
+        assert_eq!(meta["ranked"], 0, "{meta}");
+        assert!(
+            meta["models"].as_array().unwrap().is_empty(),
+            "a comparison model reached the export: {meta}"
+        );
+        let board = read(&out.join("index.html"));
+        let results = read(&out.join("results.html"));
+        for page in [&board, &results] {
+            assert!(
+                !page.contains("opencode-model"),
+                "the comparison model leaked: {page}"
+            );
+            assert!(
+                !page.contains("campaign_cmp"),
+                "the comparison career leaked: {page}"
+            );
+        }
+        let rollup: Value =
+            serde_json::from_str(&read(&runs.join("campaign_cmp_p4/campaign.json"))).unwrap();
+        assert_eq!(rollup["harness"], "opencode", "{rollup}");
         let _ = fs::remove_dir_all(&base);
     }
 

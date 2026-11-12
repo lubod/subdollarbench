@@ -4567,3 +4567,68 @@ fn r74_f1_health_from_logs() {
     billed.billed_ratio = Some(1.1);
     assert_eq!(billed.billed_ratio, Some(1.1));
 }
+
+/// R79 F2: the recorded opencode session (2026-11-11, ling-3.1-flash, the
+/// ref-sql shell probe) yields turns, turn times and the ref-sql query.
+#[test]
+fn r79_f2_health_reads_opencode_log() {
+    let oc = health_from_live_log(include_str!("fixtures/health/opencode-20261111.txt"));
+    assert_eq!(oc.turns, 2, "opencode turns");
+    assert!(
+        oc.turn_secs_p50 > 0.0 && oc.turn_secs_max >= oc.turn_secs_p50,
+        "opencode turn times: {oc:?}"
+    );
+    assert_eq!(
+        oc.empty_responses, 0,
+        "a healthy opencode session has no empty turns"
+    );
+    assert_eq!(oc.ref_queries, 1, "opencode ref-sql queries");
+    assert_eq!(oc.ref_refused, 0, "opencode ref-sql refusals");
+
+    // R79-1: a truly empty turn (a step with no response and no tool) is
+    // counted once, at its end.
+    let empty = health_from_live_log(
+        "[10:00:00] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 200, Budget: $0.99\n\
+         [10:00:01] [LIVE] Turn 1 started\n\
+         [10:00:05] [TELEMETRY] turn=1 max_turns=200 spent=0.000000 tokens=0\n",
+    );
+    assert_eq!(empty.turns, 1, "the empty turn is a turn");
+    assert_eq!(empty.empty_responses, 1, "the empty turn is counted");
+}
+
+/// R79-2: the local stub's captured opencode lines. The stub answered
+/// 429-then-200, 429-always, 402 and a broken stream; the counters read
+/// what opencode actually printed.
+#[test]
+fn r79_f2_health_reads_opencode_stub_lines() {
+    // A successful 429 retry is invisible: one Turn line, one answer.
+    let retry = health_from_live_log(include_str!("fixtures/health/opencode-retry.txt"));
+    assert_eq!(retry.turns, 1, "the successful retry is one turn");
+    assert_eq!(
+        retry.rate_limited, 0,
+        "opencode does not print the successful retry; nothing to count"
+    );
+    assert_eq!(retry.empty_responses, 0, "the retried turn answered");
+
+    // An exhausted 429 prints one Turn per attempt and the final error.
+    let exhausted = health_from_live_log(include_str!("fixtures/health/opencode-exhausted.txt"));
+    assert_eq!(exhausted.turns, 10, "ten attempts");
+    assert_eq!(
+        exhausted.rate_limited, 9,
+        "nine retries before the exhausted 429"
+    );
+
+    // A broken stream retries too, but it is a tool error, not a 429.
+    let stream = health_from_live_log(include_str!("fixtures/health/opencode-stream_error.txt"));
+    assert_eq!(stream.turns, 10, "ten stream attempts");
+    assert_eq!(stream.tool_errors, 1, "the stream error is one tool error");
+    assert_eq!(stream.rate_limited, 0, "a stream retry is not a rate limit");
+
+    // A tool turn is not an empty turn; the plain answer has no Turn line.
+    let tool = health_from_live_log(include_str!("fixtures/health/opencode-tool.txt"));
+    assert_eq!(tool.turns, 1, "the tool turn");
+    assert_eq!(tool.empty_responses, 0, "a tool turn is not empty");
+    let ok = health_from_live_log(include_str!("fixtures/health/opencode-ok.txt"));
+    assert_eq!(ok.turns, 0, "a plain answer has no [LIVE] Turn line");
+    assert_eq!(ok.empty_responses, 0, "a plain answer is not an empty turn");
+}
