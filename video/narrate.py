@@ -305,18 +305,35 @@ def narrate_text(text, out_path, ref_wav, ref_txt, cache_dir,
     }
 
 
-def refuse_repo_output(path):
-    """The repo's tree is refused; portal/ is the samples' exception."""
-    target = Path(path).resolve()
+def repo_roots():
+    """The worktree and the main checkout of the same repo."""
+    roots = [ROOT]
     try:
-        rel = target.relative_to(ROOT)
-    except ValueError:
-        return
-    if rel.parts and rel.parts[0] == "portal":
-        return
-    raise SystemExit(
-        "[narrate] refusing to write inside the repo: %s (only portal/ is "
-        "allowed)" % target)
+        common = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], capture_output=True, text=True,
+            check=True).stdout.strip()
+        main = Path(common).parent.resolve()
+        if main != ROOT:
+            roots.append(main)
+    except Exception:
+        pass
+    return roots
+
+
+def refuse_repo_output(path):
+    """Every checkout of the repo is refused; portal/ is the samples' exception."""
+    target = Path(path).resolve()
+    for root in repo_roots():
+        try:
+            rel = target.relative_to(root)
+        except ValueError:
+            continue
+        if rel.parts and rel.parts[0] == "portal":
+            continue
+        raise SystemExit(
+            "[narrate] refusing to write inside the repo: %s (only portal/ is "
+            "allowed)" % target)
 
 
 def run_self_test():
@@ -417,7 +434,14 @@ def run_self_test():
             text=True)
         assert inside.returncode != 0, inside.stdout
         assert "inside the repo" in inside.stderr, inside.stderr
-        refuse_repo_output(ROOT / "portal" / "video" / "sample.mp3")
+        for root in repo_roots():
+            try:
+                refuse_repo_output(root / "not-portal.mp3")
+            except SystemExit as exc:
+                assert "inside the repo" in str(exc), exc
+            else:
+                raise AssertionError("a repo path was allowed: %s" % root)
+            refuse_repo_output(root / "portal" / "video" / "sample.mp3")
 
         print("[narrate self-test] the splitter keeps sentences and the word "
               "limit, the lexicon speaks amounts and decimals, the cache "

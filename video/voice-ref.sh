@@ -25,17 +25,22 @@ refuse() {
     exit 1
 }
 
-# A path under the repo's tree is refused (portal/ is the samples'
-# exception); the operator's recording must never be tracked.
+# A path under any checkout of the repo is refused (portal/ is the
+# samples' exception); the operator's recording must never be tracked.
 repo_path() {
-    local path="$1" repo
-    repo="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
-    [[ -n "$repo" ]] || return 1
+    local path="$1" repo common main
     path="$(realpath -m "$path")"
-    case "$path" in
-        "$repo"/portal | "$repo"/portal/*) return 1 ;;
-        "$repo" | "$repo"/*) return 0 ;;
-    esac
+    repo="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+    common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    main=""
+    [[ -n "$common" ]] && main="$(dirname "$common")"
+    for repo in "$repo" "$main"; do
+        [[ -n "$repo" ]] || continue
+        case "$path" in
+            "$repo"/portal | "$repo"/portal/*) continue ;;
+            "$repo" | "$repo"/*) return 0 ;;
+        esac
+    done
     return 1
 }
 
@@ -120,6 +125,22 @@ self_test() {
     expect_refused "$tmp/clips/clipped.wav" "clipped"
     expect_refused "$tmp/clips/lowrate.wav" "below 16 kHz"
     expect_refused "$ROOT/README.md" "inside the repo"
+    local main
+    main="$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")"
+    if [[ "$main" != "$ROOT" && -f "$main/README.md" ]]; then
+        expect_refused "$main/README.md" "inside the repo"
+    fi
+    rc=0
+    out="$(SDB_VIDEO_DIR="$tmp/video" SDB_VOICE_DIR="$tmp/voice-empty" "$0" 2>&1)" || rc=$?
+    [[ "$rc" -ne 0 ]] && grep -q "no recording" <<<"$out" || {
+        echo "[voice-ref self-test] an empty incoming/ was not refused: $out" >&2
+        exit 1; }
+    mkdir -p "$tmp/voice/incoming"
+    cp "$tmp/clips/good.wav" "$tmp/voice/incoming/newest.wav"
+    SDB_VIDEO_DIR="$tmp/video" SDB_VOICE_DIR="$tmp/voice" "$0" >/dev/null
+    [[ -f "$tmp/voice/ref.wav" ]] || {
+        echo "[voice-ref self-test] the newest incoming file was not installed" >&2
+        exit 1; }
 
     # A good clip installs ref.wav and ref.txt.
     SDB_VIDEO_DIR="$tmp/video" SDB_VOICE_DIR="$tmp/voice" "$0" "$tmp/clips/good.wav" >/dev/null
@@ -151,6 +172,13 @@ if [[ "${1:-}" == "--self-test" ]]; then
     self_test
     exit 0
 fi
-[[ $# -eq 1 ]] || usage
-check "$1"
-install_ref "$1"
+if [[ $# -eq 0 ]]; then
+    mkdir -p "$VOICE_DIR/incoming"
+    rec="$(ls -1t "$VOICE_DIR/incoming"/* 2>/dev/null | head -1 || true)"
+    [[ -n "$rec" ]] || refuse "no recording in $VOICE_DIR/incoming/"
+else
+    [[ $# -eq 1 ]] || usage
+    rec="$1"
+fi
+check "$rec"
+install_ref "$rec"
