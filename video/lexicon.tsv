@@ -1,0 +1,17 @@
+# R80 F3: written form <TAB> spoken form. Whole words only; the longest
+# entry is applied first. Amounts ($0.99) and decimals (65.0) are rules
+# in narrate.py, not rows here.
+SQL	sequel
+SQLite	sequel lite
+deepseek	deep seek
+mimo	mimo
+mimo-flash	mimo flash
+luna	luna
+luna-pro	luna pro
+haiku	haiku
+qwen	qwen
+minimax	minimax
+glm-5.3-flash	g l m five point three flash
+ling	ling
+hy4	h y four
+subdollarbench.org	sub dollar bench dot org
