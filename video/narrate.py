@@ -147,18 +147,41 @@ def split_long(sentence, max_words=MAX_WORDS):
 
 
 def chunk_text(text, max_words=MAX_WORDS):
-    """Whole sentences, <= max_words each; a flag on a paragraph's last chunk."""
+    """Whole sentences, <= max_words each; a flag on a paragraph's last chunk.
+
+    A sentence over the limit is split at commas into its own standalone
+    sub-chunks: the fragments never merge with the sentences before or
+    after it, so no pause lands between two unrelated sentences.
+    """
     paragraphs = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
     chunks = []
     for pi, paragraph in enumerate(paragraphs):
         paragraph = " ".join(paragraph.split())
-        sentences = []
-        for sentence in split_sentences(paragraph):
-            sentences.extend(split_long(sentence, max_words))
         current = []
         words = 0
-        for sentence in sentences:
+        for sentence in split_sentences(paragraph):
             n = len(sentence.split())
+            if n > max_words:
+                if current:
+                    chunks.append({"text": " ".join(current),
+                                   "paragraph_break_after": False})
+                    current = []
+                    words = 0
+                group = []
+                group_words = 0
+                for piece in split_long(sentence, max_words):
+                    piece_words = len(piece.split())
+                    if group and group_words + piece_words > max_words:
+                        chunks.append({"text": " ".join(group),
+                                       "paragraph_break_after": False})
+                        group = []
+                        group_words = 0
+                    group.append(piece)
+                    group_words += piece_words
+                if group:
+                    chunks.append({"text": " ".join(group),
+                                   "paragraph_break_after": False})
+                continue
             if current and words + n > max_words:
                 chunks.append({"text": " ".join(current),
                                "paragraph_break_after": False})
@@ -171,6 +194,9 @@ def chunk_text(text, max_words=MAX_WORDS):
                 "text": " ".join(current),
                 "paragraph_break_after": pi < len(paragraphs) - 1,
             })
+        elif chunks and pi < len(paragraphs) - 1:
+            # The paragraph ended with a long sentence's sub-chunks.
+            chunks[-1]["paragraph_break_after"] = True
     return chunks
 
 
