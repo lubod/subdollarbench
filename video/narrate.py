@@ -104,14 +104,17 @@ def load_lexicon(path=None):
 
 
 def apply_lexicon(text, entries=None):
-    """Whole-word replacements, then the amount and decimal rules."""
+    """Whole-word replacements in one pass, then the amount and decimal rules."""
     if entries is None:
         entries = load_lexicon()
-    for written, spoken in entries:
+    if entries:
         pattern = re.compile(
-            r"(?<![A-Za-z0-9])" + re.escape(written) + r"(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])("
+            + "|".join(re.escape(written) for written, _ in entries)
+            + r")(?![A-Za-z0-9])",
             re.IGNORECASE)
-        text = pattern.sub(spoken, text)
+        lookup = {written.lower(): spoken for written, spoken in entries}
+        text = pattern.sub(lambda m: lookup[m.group(1).lower()], text)
     text = re.sub(r"\$(\d+)\.(\d{2})\b", amount_words, text)
     text = re.sub(r"\b(\d+)\.(\d+)\b", decimal_words, text)
     return text
@@ -350,6 +353,12 @@ def run_self_test():
             apply_lexicon("DeepSeek and MiMo")
         assert apply_lexicon("subdollarbench.org") == "sub dollar bench dot org", \
             apply_lexicon("subdollarbench.org")
+        assert apply_lexicon("glm-5.3-flash") == "g l m five point three flash", \
+            apply_lexicon("glm-5.3-flash")
+        assert apply_lexicon("mimo-flash") == "mimo flash", \
+            apply_lexicon("mimo-flash")
+        assert apply_lexicon("luna-pro") == "luna pro", \
+            apply_lexicon("luna-pro")
 
         # The cache: a second run generates nothing; one changed sentence
         # regenerates one chunk.
