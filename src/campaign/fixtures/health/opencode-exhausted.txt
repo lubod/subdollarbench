@@ -1,12 +1,12 @@
-[11:42:21] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
-[11:42:21] [LIVE] Turn 1 started
-[11:42:23] [LIVE] Turn 2 started
-[11:42:26] [LIVE] Turn 3 started
-[11:42:33] [LIVE] Turn 4 started
-[11:42:41] [LIVE] Turn 5 started
-[11:42:50] [LIVE] Turn 6 started
-[11:43:02] [LIVE] Turn 7 started
-[11:43:10] [LIVE] Turn 8 started
-[11:43:19] [LIVE] Turn 9 started
-[11:43:28] [LIVE] Turn 10 started
-[11:43:37] [LOG] {"type":"error","timestamp":1794570217151,"sessionID":"ses_capture_exhausted","error":{"type":"provider.rate-limit","message":"rate limited","status":429,"response":{"body":"{\"error\":{\"message\":\"rate limited\",\"code\":429}}"}}}
+[12:56:20] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[12:56:20] [LIVE] Turn 1 started
+[12:56:23] [LIVE] Turn 2 started
+[12:56:27] [LIVE] Turn 3 started
+[12:56:34] [LIVE] Turn 4 started
+[12:56:43] [LIVE] Turn 5 started
+[12:56:54] [LIVE] Turn 6 started
+[12:57:06] [LIVE] Turn 7 started
+[12:57:16] [LIVE] Turn 8 started
+[12:57:26] [LIVE] Turn 9 started
+[12:57:36] [LIVE] Turn 10 started
+[12:57:45] [LOG] {"type":"error","timestamp":1794574665017,"sessionID":"ses_capture_exhausted","error":{"type":"provider.rate-limit","message":"rate limited","status":429,"response":{"body":"{\"error\":{\"message\":\"rate limited\",\"code\":429}}"}}}

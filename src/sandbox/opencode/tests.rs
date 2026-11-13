@@ -1336,22 +1336,16 @@ fn r82_start_stub(case: &str, log: &std::path::Path) -> (R82Stub, u16) {
 }
 
 fn r82_config(port: u16, bare: &str) -> String {
-    // The stub needs the deprecated singular `provider` baseURL (the one
-    // shape 2.0.24 honours; the current `providers` schema has no
-    // baseURL — see scripts/capture-opencode-lines.sh). The plural
-    // `providers` models/pin cannot coexist with it: it shadows the
-    // baseURL. The production config's pin is asserted in the test.
+    // R82-1: the test runs the config the runner actually sends. The
+    // stub's baseURL goes in the production plural `providers` schema's
+    // `settings` (round 79's path), so the per-model pin and the effort
+    // variants are the ones under test.
     let mut cfg: serde_json::Value =
         serde_json::from_str(&OpenCodeRunner::variant_config_json(bare))
             .expect("the runner config");
-    cfg["provider"] = serde_json::json!({
-        "openrouter": {
-            "id": "openrouter",
-            "npm": "@openrouter/ai-sdk-provider",
-            "options": {"baseURL": format!("http://127.0.0.1:{port}")}
-        }
+    cfg["providers"]["openrouter"]["settings"] = serde_json::json!({
+        "baseURL": format!("http://127.0.0.1:{port}")
     });
-    cfg.as_object_mut().unwrap().remove("providers");
     cfg.to_string()
 }
 
@@ -1441,8 +1435,9 @@ fn r82_bodies(log: &std::path::Path) -> Vec<serde_json::Value> {
 #[test]
 fn r82_f2_one_model_per_session() {
     let base = r79_temp_dir("r82-f2");
-    let model = "openrouter/openai/gpt-6-luna-pro";
-    let bare = "openai/gpt-6-luna-pro";
+    let model = "openrouter/inclusionai/ling-3.1-flash";
+    let bare = "inclusionai/ling-3.1-flash";
+    let pin = crate::cost::calculator::provider_for_model(bare).expect("the model's pin");
     for title in [false, true] {
         let tag = if title { "title" } else { "no-title" };
         let log = base.join(format!("requests-{tag}.jsonl"));
@@ -1463,31 +1458,22 @@ fn r82_f2_one_model_per_session() {
                 Some(bare),
                 "{tag}: a request used another model: {body}"
             );
+            assert_eq!(
+                body.pointer("/provider/only")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                Some(vec![pin]),
+                "{tag}: a request lacks the {pin} pin: {body}"
+            );
+            assert_eq!(
+                body.pointer("/provider/order")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                Some(vec![pin]),
+                "{tag}: a request lacks the {pin} order: {body}"
+            );
         }
     }
-    // The production config carries the same career model as the small
-    // model and the per-model body pin (the plural shape 2.0.24
-    // forwards; the stub config above drops it because it cannot coexist
-    // with the deprecated baseURL).
-    let prod: serde_json::Value =
-        serde_json::from_str(&OpenCodeRunner::variant_config_json(bare)).unwrap();
-    assert_eq!(
-        prod.get("model").and_then(|m| m.as_str()),
-        Some(model),
-        "the production config's model"
-    );
-    assert_eq!(
-        prod.get("small_model").and_then(|m| m.as_str()),
-        Some(model),
-        "the production config's small model"
-    );
-    assert_eq!(
-        prod.pointer("/providers/openrouter/models/openai~1gpt-6-luna-pro/body/provider/only")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-        Some(vec!["openai"]),
-        "the production config's per-model pin"
-    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -1496,8 +1482,8 @@ fn r82_f2_one_model_per_session() {
 #[test]
 fn r82_f3_effort_reaches_the_request() {
     let base = r79_temp_dir("r82-f3");
-    let model = "openrouter/openai/gpt-6-luna-pro";
-    let bare = "openai/gpt-6-luna-pro";
+    let model = "openrouter/inclusionai/ling-3.1-flash";
+    let bare = "inclusionai/ling-3.1-flash";
     for effort in ["low", "high"] {
         let log = base.join(format!("requests-{effort}.jsonl"));
         let (_stub, port) = r82_start_stub("tool", &log);

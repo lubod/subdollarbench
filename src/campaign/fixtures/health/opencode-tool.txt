@@ -1,5 +1,5 @@
-[11:45:02] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
-[11:45:02] [LIVE] Turn 1 started
-[11:45:02] [ACTION] bash {"type":"tool_use","timestamp":1794570302217,"sessionID":"ses_capture_tool","part":{"partID":"prt_1d4b9b2fd001KcK36MQBnsRTpg","sessionID":"ses_capture_tool","messageID":"msg_1d4b9b2d5001fCNEXaWztIeOjN","type":"tool","id":"call_stub_1","tool":"bash","state":{"status":"error","input":{"command":"echo probe-forty-two"},"error":"No tool named \"bash\" is currently available. Please use a tool from the available tool list.","metadata":{"providerCall":{"executed":false},"providerResult":{"executed":false},"rawInput":"{\"command\":\"echo probe-forty-two\"}"},"time":{"start":1794570302205,"end":1794570302217}}}}
-[11:45:02] [TELEMETRY] turn=1 max_turns=0 spent=0.000001 tokens=11
-[11:45:02] [RESPONSE] probe-forty-two
+[12:59:13] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[12:59:13] [LIVE] Turn 1 started
+[12:59:13] [ACTION] bash {"type":"tool_use","timestamp":1794574753201,"sessionID":"ses_capture_tool","part":{"partID":"prt_1d4fd9da60018wKc3gYr776qtX","sessionID":"ses_capture_tool","messageID":"msg_1d4fd9d85001W6BWtYp3CXAYPc","type":"tool","id":"call_stub_1","tool":"bash","state":{"status":"error","input":{"command":"echo probe-forty-two"},"error":"No tool named \"bash\" is currently available. Please use a tool from the available tool list.","metadata":{"providerCall":{"executed":false},"providerResult":{"executed":false},"rawInput":"{\"command\":\"echo probe-forty-two\"}"},"time":{"start":1794574753190,"end":1794574753201}}}}
+[12:59:13] [TELEMETRY] turn=1 max_turns=0 spent=0.000001 tokens=11
+[12:59:13] [RESPONSE] probe-forty-two

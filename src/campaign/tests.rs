@@ -4601,13 +4601,12 @@ fn r79_f2_health_reads_opencode_log() {
 /// what opencode actually printed.
 #[test]
 fn r79_f2_health_reads_opencode_stub_lines() {
-    // R82 F4: the regenerated retry fixture carries the retried
-    // step_start (the runner's own mapping) but no 429 event — the
-    // successful retry is not a rate-limit signal.
+    // R82-1: with the production config the successful retry is one
+    // turn (no second step_start) and prints no 429 event.
     let retry = health_from_live_log(include_str!("fixtures/health/opencode-retry.txt"));
-    assert_eq!(retry.turns, 2, "the original turn and its retry");
+    assert_eq!(retry.turns, 1, "the successful retry is one turn");
     assert_eq!(retry.rate_limited, 0, "no 429 event is printed");
-    assert_eq!(retry.empty_responses, 1, "the interrupted first attempt");
+    assert_eq!(retry.empty_responses, 0, "the retried turn answered");
 
     // An exhausted 429 prints one Turn per attempt and the final error.
     let exhausted = health_from_live_log(include_str!("fixtures/health/opencode-exhausted.txt"));

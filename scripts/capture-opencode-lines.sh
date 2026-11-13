@@ -2,8 +2,8 @@
 # R79-2: capture opencode 2.0.24's lines for the stub cases.
 #
 # Starts scripts/opencode-stub.py, runs the sandbox's opencode against it
-# through the deprecated custom-provider baseURL (the one shape 2.0.24
-# honours; the current `providers` schema has no baseURL), and writes the
+# through the production plural `providers` schema's `settings.baseURL`
+# (the shape the runner's config uses; round 79's path), and writes the
 # runner-shaped lines to src/campaign/fixtures/health/opencode-<case>.txt.
 #
 # Usage: scripts/capture-opencode-lines.sh [case ...]
@@ -38,7 +38,7 @@ for case in "${CASES[@]}"; do
         echo "[capture] the stub did not start for $case" >&2
         exit 1
     fi
-    cfg="{\"provider\":{\"openrouter\":{\"id\":\"openrouter\",\"npm\":\"@openrouter/ai-sdk-provider\",\"options\":{\"baseURL\":\"http://127.0.0.1:$PORT\"}}}}"
+    cfg="{\"providers\":{\"openrouter\":{\"settings\":{\"baseURL\":\"http://127.0.0.1:$PORT\"}}}}"
     rc=0
     timeout 180 docker run --rm --network=host \
         -v "$work/ws:/workspace" \
