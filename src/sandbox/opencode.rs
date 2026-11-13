@@ -235,6 +235,11 @@ impl OpenCodeRunner {
         // check pins. This one function builds the per-trial config the
         // unit test reads.
         let mut config = serde_json::json!({
+            // R82 F2: the session's title/summary model is the career
+            // model, not opencode's default small model; the per-model
+            // body pin then covers both.
+            "model": format!("openrouter/{model_bare}"),
+            "small_model": format!("openrouter/{model_bare}"),
             "providers": {
                 "openrouter": {
                     "models": {
@@ -612,18 +617,18 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             if let Some(ref key) = effective_key {
                 cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
             }
-            // Per-trial variant definitions so `#variant` resolves for our
-            // models (default catalog lacks them). Env-passed: no config
-            // files in the candidate workspace.
-            if variant_id.is_some() {
-                let bare = effective_model
-                    .strip_prefix("openrouter/")
-                    .unwrap_or(&effective_model);
-                cmd.arg("-e").arg(format!(
-                    "OPENCODE_CONFIG_CONTENT={}",
-                    Self::variant_config_json(bare)
-                ));
-            }
+            // Per-trial config: the career model (and the same small
+            // model), plus the `#variant` definitions. Passed for every
+            // effort, not only a machine variant, so a prose-only run
+            // still sends its title/summary calls to the career model.
+            // Env-passed: no config files in the candidate workspace.
+            let bare = effective_model
+                .strip_prefix("openrouter/")
+                .unwrap_or(&effective_model);
+            cmd.arg("-e").arg(format!(
+                "OPENCODE_CONFIG_CONTENT={}",
+                Self::variant_config_json(bare)
+            ));
             if let Some(max_turns) = limits.max_turns {
                 cmd.arg("-e")
                     .arg(format!("SDB_BENCH_MAX_TURNS={}", max_turns));

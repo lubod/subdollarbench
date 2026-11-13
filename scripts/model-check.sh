@@ -70,8 +70,12 @@ opencode_config_json() {
     python3 - "$1" "$2" <<'PY'
 import json, sys
 model_id, pin = sys.argv[1], sys.argv[2]
-cfg = {"providers": {"openrouter": {"models": {model_id: {
-    "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}}}
+cfg = {
+    "model": "openrouter/" + model_id,
+    "small_model": "openrouter/" + model_id,
+    "providers": {"openrouter": {"models": {model_id: {
+        "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}},
+}
 if pin:
     cfg["providers"]["openrouter"]["models"][model_id]["body"] = {
         "provider": {"only": [pin], "order": [pin]}}

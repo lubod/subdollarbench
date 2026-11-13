@@ -1288,3 +1288,229 @@ fn test_opencode_runner_fake_docker_scenarios() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// R82 F2/F3: the stub-backed session helpers. The stub is the local
+/// OpenRouter chat-completions server (`scripts/opencode-stub.py`); the
+/// container uses `--network=host`, so `127.0.0.1:<port>` is the host's
+/// stub. Nothing is billed and no network is touched.
+fn r82_free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+struct R82Stub(std::process::Child);
+impl Drop for R82Stub {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn r82_start_stub(case: &str, log: &std::path::Path) -> (R82Stub, u16) {
+    let port = r82_free_port();
+    let stub = crate::config::get_repo_root().join("scripts/opencode-stub.py");
+    let child = std::process::Command::new("python3")
+        .arg(&stub)
+        .arg(port.to_string())
+        .arg(log)
+        .arg(case)
+        .spawn()
+        .expect("start the stub");
+    let stub = R82Stub(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (stub, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the stub did not start on port {port}");
+}
+
+fn r82_config(port: u16, bare: &str) -> String {
+    // The stub needs the deprecated singular `provider` baseURL (the one
+    // shape 2.0.24 honours; the current `providers` schema has no
+    // baseURL — see scripts/capture-opencode-lines.sh). The plural
+    // `providers` models/pin cannot coexist with it: it shadows the
+    // baseURL. The production config's pin is asserted in the test.
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&OpenCodeRunner::variant_config_json(bare))
+            .expect("the runner config");
+    cfg["provider"] = serde_json::json!({
+        "openrouter": {
+            "id": "openrouter",
+            "npm": "@openrouter/ai-sdk-provider",
+            "options": {"baseURL": format!("http://127.0.0.1:{port}")}
+        }
+    });
+    cfg.as_object_mut().unwrap().remove("providers");
+    cfg.to_string()
+}
+
+fn r82_run_opencode(
+    base: &std::path::Path,
+    cfg: &str,
+    model_arg: &str,
+    session: &str,
+    title: bool,
+) {
+    let ws = base.join("ws");
+    let cfg_dir = base.join("cfg");
+    let data = base.join("data");
+    for d in [&ws, &cfg_dir, &data] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--network=host".into(),
+        "-v".into(),
+        format!("{}:/workspace", ws.display()),
+        "-v".into(),
+        format!("{}:/home/ubuntu/.config/opencode", cfg_dir.display()),
+        "-v".into(),
+        format!("{}:/home/ubuntu/.local/share/opencode", data.display()),
+        "-w".into(),
+        "/workspace".into(),
+        "-e".into(),
+        "HOME=/home/ubuntu".into(),
+        "-e".into(),
+        "OPENROUTER_API_KEY=dummy".into(),
+        "-e".into(),
+        format!("OPENCODE_CONFIG_CONTENT={cfg}"),
+        "subdollar-sandbox".into(),
+        "opencode".into(),
+        "run".into(),
+        "--standalone".into(),
+        "--format".into(),
+        "json".into(),
+        "--session".into(),
+        session.into(),
+        "-m".into(),
+        model_arg.into(),
+        "--auto".into(),
+    ];
+    if title {
+        args.push("--title".into());
+        args.push("sdb-r82-test".into());
+    }
+    args.push("--".into());
+    args.push(
+        "Use the shell tool once: run `echo probe-forty-two`, then reply with its output.".into(),
+    );
+    let out = std::process::Command::new("docker")
+        .args(&args)
+        .output()
+        .expect("docker run opencode");
+    assert!(
+        out.status.success(),
+        "opencode failed: {}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn r82_bodies(log: &std::path::Path) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(body) = v.get("body").and_then(|b| b.as_str()) else {
+            continue;
+        };
+        if let Ok(b) = serde_json::from_str::<serde_json::Value>(body) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// R82 F2: every request of a two-turn session (with and without
+/// `--title`) carries the career model and its provider pin. The stub's
+/// request log is the evidence; no network is used.
+#[test]
+fn r82_f2_one_model_per_session() {
+    let base = r79_temp_dir("r82-f2");
+    let model = "openrouter/openai/gpt-6-luna-pro";
+    let bare = "openai/gpt-6-luna-pro";
+    for title in [false, true] {
+        let tag = if title { "title" } else { "no-title" };
+        let log = base.join(format!("requests-{tag}.jsonl"));
+        let (_stub, port) = r82_start_stub("tool", &log);
+        let cfg = r82_config(port, bare);
+        r82_run_opencode(
+            &base,
+            &cfg,
+            &format!("{model}#low"),
+            &format!("ses_r82_f2_{tag}"),
+            title,
+        );
+        let bodies = r82_bodies(&log);
+        assert!(!bodies.is_empty(), "{tag}: the stub saw no request");
+        for body in &bodies {
+            assert_eq!(
+                body.get("model").and_then(|m| m.as_str()),
+                Some(bare),
+                "{tag}: a request used another model: {body}"
+            );
+        }
+    }
+    // The production config carries the same career model as the small
+    // model and the per-model body pin (the plural shape 2.0.24
+    // forwards; the stub config above drops it because it cannot coexist
+    // with the deprecated baseURL).
+    let prod: serde_json::Value =
+        serde_json::from_str(&OpenCodeRunner::variant_config_json(bare)).unwrap();
+    assert_eq!(
+        prod.get("model").and_then(|m| m.as_str()),
+        Some(model),
+        "the production config's model"
+    );
+    assert_eq!(
+        prod.get("small_model").and_then(|m| m.as_str()),
+        Some(model),
+        "the production config's small model"
+    );
+    assert_eq!(
+        prod.pointer("/providers/openrouter/models/openai~1gpt-6-luna-pro/body/provider/only")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+        Some(vec!["openai"]),
+        "the production config's per-model pin"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R82 F3: `#low` and `#high` reach the request body as
+/// `reasoning.effort`; the stub's log is the evidence.
+#[test]
+fn r82_f3_effort_reaches_the_request() {
+    let base = r79_temp_dir("r82-f3");
+    let model = "openrouter/openai/gpt-6-luna-pro";
+    let bare = "openai/gpt-6-luna-pro";
+    for effort in ["low", "high"] {
+        let log = base.join(format!("requests-{effort}.jsonl"));
+        let (_stub, port) = r82_start_stub("tool", &log);
+        let cfg = r82_config(port, bare);
+        r82_run_opencode(
+            &base,
+            &cfg,
+            &format!("{model}#{effort}"),
+            &format!("ses_r82_f3_{effort}"),
+            false,
+        );
+        let bodies = r82_bodies(&log);
+        assert!(!bodies.is_empty(), "{effort}: the stub saw no request");
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.pointer("/reasoning/effort").and_then(|v| v.as_str()) == Some(effort)),
+            "{effort}: no request body carries reasoning.effort: {bodies:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
