@@ -108,7 +108,7 @@ pub enum CampaignAction {
         #[arg(short = 'e', long, default_value = "high")]
         effort: String,
         /// Agent harness (omp | opencode)
-        #[arg(long, value_enum, default_value_t = Harness::Omp)]
+        #[arg(long, value_enum, default_value_t = Harness::Opencode)]
         harness: Harness,
         /// Campaign budget cap in USD; the ladder stops (over_budget) once
         /// cumulative effective cost reaches it
@@ -540,7 +540,7 @@ impl std::fmt::Display for TaskType {
     }
 }
 
-/// Agent harness running the trial: OMP (Oh My Pi, default) or OpenCode.
+/// Agent harness running the trial: OpenCode (default) or OMP (Oh My Pi).
 /// Recorded on manifests/results; ranks never mix harnesses (same rule as
 /// effort: compare within one harness, see `validate_comparison_wave`).
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

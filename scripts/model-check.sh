@@ -86,7 +86,7 @@ usage() {
 
 mode=check
 model=""
-harness="${SDB_MODEL_CHECK_HARNESS:-omp}"
+harness="${SDB_MODEL_CHECK_HARNESS:-opencode}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --self-test) mode=self-test; shift ;;
@@ -123,6 +123,9 @@ if [[ "$mode" == "self-test" ]]; then
         trap 'rm -rf "${dir:-}"' EXIT
         export SDB_MODEL_CHECK_DIR="$dir/gates"
         export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:selftest"
+        # R82 F1: the default harness is opencode; the omp cases below are
+        # explicit, and record_path follows this local.
+        harness=omp
         mkdir -p "$SDB_MODEL_CHECK_DIR"
 
         # The snapshot rates for a fixture model (all four).
@@ -232,7 +235,7 @@ PY
             rc=0
             out="$(SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
                 SDB_MODEL_CHECK_GENERATION_JSON="$dir/generation.json" \
-                "$ROOT/scripts/model-check.sh" "$name" 2>&1)" || rc=$?
+                "$ROOT/scripts/model-check.sh" --harness omp "$name" 2>&1)" || rc=$?
             [[ "$rc" -ne 0 ]] || {
                 echo "[self-test] $case_name passed unexpectedly: $out" >&2; exit 1; }
             grep -q "RESULT: FAIL" "$(record_path "$name")" || {
@@ -247,7 +250,7 @@ PY
             rc=0
             out="$(SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
                 SDB_MODEL_CHECK_GENERATION_JSON="$dir/generation.json" \
-                "$ROOT/scripts/model-check.sh" "$name" 2>&1)" || rc=$?
+                "$ROOT/scripts/model-check.sh" --harness omp "$name" 2>&1)" || rc=$?
             [[ "$rc" -eq 0 ]] || {
                 echo "[self-test] $name was refused: $out" >&2; exit 1; }
             grep -q '^RESULT: PASS$' "$(record_path "$name")" || {
@@ -558,7 +561,7 @@ PY
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
             echo "[self-test] the slug is not z-ai-glm-5.3" >&2; exit 1; }
-        [[ "$("$ROOT/scripts/model-check.sh" --record openrouter/z-ai/glm-5.3)" == \
+        [[ "$("$ROOT/scripts/model-check.sh" --harness omp --record openrouter/z-ai/glm-5.3)" == \
             "$SDB_MODEL_CHECK_DIR/model-check-z-ai-glm-5.3.txt" ]] || {
             echo "[self-test] the record path is not the model-check slug" >&2; exit 1; }
         echo "[self-test] the slug and record path are stable"
