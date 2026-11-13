@@ -105,24 +105,115 @@ fn test_ha_node_args_launch_contract() {
 #[test]
 fn test_egress_proxy_allowlist_blocks_exfil() {
     use super::egress_allowed;
-    for h in [
-        "openrouter.ai",
-        "api.openrouter.ai",
-        "x.proxy.golang.org",
-        "github.com",
-        "a.b.github.com",
-    ] {
+    for h in ["openrouter.ai", "api.openrouter.ai", "a.api.openrouter.ai"] {
         assert!(egress_allowed(h), "{}", h);
     }
     for h in [
         "evil.com",
         "1.2.3.4",
         "openrouter.ai.evil.com",
-        "notgithub.com",
+        "notopenrouter.ai",
+        "crates.io",
+        "pypi.org",
+        "github.com",
         "",
     ] {
         assert!(!egress_allowed(h), "{}", h);
     }
+}
+
+/// R81 F2: the allowlist is exactly the two model-API hosts.
+#[test]
+fn r81_f2_allowlist_is_api_only() {
+    assert_eq!(
+        super::EGRESS_ALLOWLIST,
+        &["openrouter.ai", "api.openrouter.ai"]
+    );
+    for h in ["openrouter.ai", "api.openrouter.ai"] {
+        assert!(super::egress_allowed(h), "{h}");
+    }
+    for h in [
+        "crates.io",
+        "static.crates.io",
+        "index.crates.io",
+        "registry.npmjs.org",
+        "proxy.golang.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "github.com",
+        "objects.githubusercontent.com",
+        "codeload.github.com",
+    ] {
+        assert!(!super::egress_allowed(h), "{h} must be blocked");
+    }
+}
+
+/// R81 F2: through the per-run proxy, the registries and GitHub answer
+/// 403 while the model API connects. This runs the real proxy sidecar on
+/// the real run network, so it proves the env the agent gets, not just
+/// the host matcher.
+#[test]
+fn r81_f2_registries_blocked() {
+    use std::process::Command;
+
+    let sm = SandboxManager::with_id(&format!("r81-f2-{}", std::process::id()));
+    let _guard = RunGuard::new(SandboxManager::with_id(&format!(
+        "r81-f2-{}",
+        std::process::id()
+    )));
+    sm.cleanup();
+    let proxy = sm
+        .start_egress_proxy()
+        .expect("the egress proxy must start");
+    assert!(proxy.contains("egress-proxy:3128"), "{proxy}");
+    let net = sm.network_name();
+
+    let curl = |url: &str| -> (bool, String) {
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                &net,
+                "-e",
+                "https_proxy=http://egress-proxy:3128",
+                "-e",
+                "HTTPS_PROXY=http://egress-proxy:3128",
+                "--entrypoint",
+                "curl",
+                "subdollar-sandbox",
+                "-sS",
+                "--max-time",
+                "30",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                url,
+            ])
+            .output()
+            .expect("docker run curl");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    };
+
+    for blocked in [
+        "https://crates.io/",
+        "https://pypi.org/",
+        "https://github.com/",
+    ] {
+        let (ok, out) = curl(blocked);
+        assert!(!ok, "{blocked} must be refused by the proxy: {out}");
+        assert!(
+            out.contains("403") || out.contains("Forbidden"),
+            "{blocked} must show the proxy's 403: {out}"
+        );
+    }
+    let (ok, out) = curl("https://openrouter.ai/");
+    assert!(ok, "openrouter.ai must connect through the proxy: {out}");
+
+    sm.cleanup();
 }
 
 use super::*;
@@ -136,36 +227,31 @@ fn test_ensure_runnable_candidate_scenarios() {
 
     let sm = SandboxManager::new();
 
-    // 1. Empty dir
+    // R81 F3: only the root ./start.sh is a runnable candidate.
     assert!(!sm.ensure_runnable_candidate(&temp_dir).unwrap());
 
-    // 2. Root Dockerfile
     fs::write(temp_dir.join("Dockerfile"), "FROM alpine").unwrap();
-    assert!(sm.ensure_runnable_candidate(&temp_dir).unwrap());
+    assert!(!sm.ensure_runnable_candidate(&temp_dir).unwrap());
     let _ = fs::remove_file(temp_dir.join("Dockerfile"));
 
-    // 3. Nested Dockerfile
     let nested = temp_dir.join("subdir/nested");
     fs::create_dir_all(&nested).unwrap();
     fs::write(nested.join("Dockerfile"), "FROM alpine").unwrap();
-    assert!(sm.ensure_runnable_candidate(&temp_dir).unwrap());
-    assert!(temp_dir.join("Dockerfile").exists());
-    let _ = fs::remove_file(temp_dir.join("Dockerfile"));
+    fs::write(
+        nested.join("start.sh"),
+        "#!/bin/sh\nexec ./target/release/s\n",
+    )
+    .unwrap();
+    assert!(!sm.ensure_runnable_candidate(&temp_dir).unwrap());
+    assert!(!temp_dir.join("Dockerfile").exists());
     let _ = fs::remove_dir_all(&nested);
 
-    // 4. Root start.sh
-    fs::write(temp_dir.join("start.sh"), "#!/bin/bash\necho ok").unwrap();
+    fs::write(
+        temp_dir.join("start.sh"),
+        "#!/bin/bash\nexec ./target/release/s\n",
+    )
+    .unwrap();
     assert!(sm.ensure_runnable_candidate(&temp_dir).unwrap());
-    let _ = fs::remove_file(temp_dir.join("start.sh"));
-
-    // 5. Nested start.sh
-    let nested_sh = temp_dir.join("project");
-    fs::create_dir_all(&nested_sh).unwrap();
-    fs::write(nested_sh.join("start.sh"), "#!/bin/bash\necho nested").unwrap();
-    assert!(sm.ensure_runnable_candidate(&temp_dir).unwrap());
-    assert!(temp_dir.join("start.sh").exists());
-    let root_content = fs::read_to_string(temp_dir.join("start.sh")).unwrap();
-    assert!(root_content.contains("/workspace/project"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -451,96 +537,6 @@ while True:
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// The launch contract with an inherited-entrypoint base (the node:20
-/// shape): the harness appends `--port`/`--data` to the image's *CMD*,
-/// never replacing it — appending to the Entrypoint would drop an
-/// inherited CMD like node's `["node"]`. A shell-form CMD sees the
-/// flags as positional args, an ENTRYPOINT-only image as its argv.
-#[test]
-fn test_launch_args_append_to_the_image_cmd() {
-    use super::CandidateRunExtras;
-    let sm = SandboxManager::with_id("entrypoint-test");
-    let _guard = RunGuard::new(SandboxManager::with_id("entrypoint-test"));
-    sm.cleanup();
-    let base = std::env::temp_dir().join(format!("test_entrypoint_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let entry_cmd = base.join("entry_cmd");
-    let entry_only = base.join("entry_only");
-    std::fs::create_dir_all(&entry_cmd).unwrap();
-    std::fs::create_dir_all(&entry_only).unwrap();
-    std::fs::write(
-        entry_cmd.join("Dockerfile"),
-        "FROM subdollar-sandbox\n\
-             ENTRYPOINT [\"/bin/sh\",\"-c\"]\n\
-             CMD [\"echo ARGV \\\"$@\\\"; exec sleep 300\", \"sh\"]\n",
-    )
-    .unwrap();
-    std::fs::write(
-        entry_only.join("Dockerfile"),
-        "FROM subdollar-sandbox\nENTRYPOINT [\"sleep\"]\n",
-    )
-    .unwrap();
-    let name = sm.candidate_container_name();
-    let logs = |name: &str| -> String {
-        let out = Command::new("docker").args(["logs", name]).output();
-        match out {
-            Ok(o) => format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            ),
-            Err(_) => String::new(),
-        }
-    };
-    let running = |name: &str| -> bool {
-        Command::new("docker")
-            .args(["inspect", name, "--format", "{{.State.Running}}"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
-            .unwrap_or(false)
-    };
-    // ENTRYPOINT + CMD: the flags must arrive as the CMD's argv. The
-    // old behaviour replaced the CMD with them and `sh` died on
-    // "--port".
-    let extras = CandidateRunExtras {
-        launch_args: vec![
-            "--port".to_string(),
-            "5480".to_string(),
-            "--data".to_string(),
-            "/sdb-data".to_string(),
-        ],
-        ..Default::default()
-    };
-    assert!(sm
-        .start_candidate_in_docker_with(&entry_cmd, free_port(), &extras)
-        .is_ok());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline
-        && !logs(&name).contains("ARGV --port 5480 --data /sdb-data")
-    {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    let out = logs(&name);
-    assert!(
-        out.contains("ARGV --port 5480 --data /sdb-data"),
-        "the image CMD must receive the launch flags: {out:?}"
-    );
-    assert!(running(&name), "the entrypoint+CMD container must stay up");
-    sm.cleanup();
-    // ENTRYPOINT only: the flags are its argv (`sleep 300`).
-    let one = CandidateRunExtras {
-        launch_args: vec!["300".to_string()],
-        ..Default::default()
-    };
-    assert!(sm
-        .start_candidate_in_docker_with(&entry_only, free_port(), &one)
-        .is_ok());
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    assert!(running(&name), "the entrypoint-only container must stay up");
-    sm.cleanup();
-    let _ = std::fs::remove_dir_all(&base);
-}
-
 /// SIGTERM reaches the candidate on a graceful stop (ticket 4's
 /// "a few seconds to flush" contract); `stop_candidate` is `rm -f`, so
 /// only the graceful stop may produce the flush marker.
@@ -637,7 +633,7 @@ fn test_relax_workspace_perms_opens_any_uid_write() {
 }
 
 #[test]
-fn test_start_candidate_in_docker_start_sh_and_dockerfile() {
+fn test_start_candidate_in_docker_start_sh_only() {
     let temp_dir = std::env::temp_dir().join(format!("test_docker_run_{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).unwrap();
@@ -645,26 +641,22 @@ fn test_start_candidate_in_docker_start_sh_and_dockerfile() {
     let sm = SandboxManager::with_id("test-cand");
     let _guard = RunGuard::new(SandboxManager::with_id("test-cand"));
 
-    // 1. start.sh case
-    fs::write(
-        temp_dir.join("start.sh"),
-        "#!/bin/bash\necho candidate running\n",
-    )
-    .unwrap();
+    // R81 F3: ./start.sh is the only entrypoint.
+    fs::write(temp_dir.join("start.sh"), "#!/bin/bash\nexec sleep 300\n").unwrap();
     let res_sh = sm.start_candidate_in_docker(&temp_dir, free_port());
     assert!(res_sh.is_ok());
     sm.cleanup();
 
-    // 2. Dockerfile case
+    // A Dockerfile is no longer a runnable candidate: the container still
+    // starts (the harness only starts what ensure_runnable_candidate
+    // accepted), but the entrypoint check is false.
     let _ = fs::remove_file(temp_dir.join("start.sh"));
     fs::write(
         temp_dir.join("Dockerfile"),
         "FROM alpine\nCMD [\"echo\", \"done\"]\n",
     )
     .unwrap();
-    let res_df = sm.start_candidate_in_docker(&temp_dir, free_port());
-    assert!(res_df.is_ok());
-    sm.cleanup();
+    assert!(!sm.ensure_runnable_candidate(&temp_dir).unwrap());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -925,4 +917,343 @@ fn test_sweep_pattern_is_exact_instance_match() {
     assert!(re.is_match("subdollar-candidate-parent_20261002_120000_trial2"));
     assert!(!re.is_match("subdollar-ref-sql-parent_20261002_120000_batchref"));
     assert!(!re.is_match("subdollar-candidate-parent_20261002_120000_trial22"));
+}
+
+/// R81 F1: the sandbox is Rust-only and the image matches the Dockerfile
+/// pins. The Dockerfile half is what `scripts/seen-failing.sh` removes
+/// (the image is built by CI / the round, not by the test); the image
+/// half proves the built layer: the pinned toolchain, no other language
+/// toolchain, and a no-dependency crate building offline while any
+/// dependency fails.
+#[test]
+fn r81_f1_sandbox_is_rust_only() {
+    use std::process::Command;
+
+    let root = crate::config::get_repo_root();
+    let dockerfile = std::fs::read_to_string(root.join("Dockerfile.sandbox"))
+        .expect("Dockerfile.sandbox must be readable");
+    for needle in [
+        "ARG RUST_VERSION=1.100.0",
+        "ARG RUSTUP_VERSION=1.29.3",
+        "ARG RUSTUP_INIT_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55",
+        "--component llvm-tools-preview",
+        "ENV CARGO_NET_OFFLINE=true",
+        "replace-with = \"sdb-offline\"",
+        "directory = \"/home/ubuntu/.cargo/offline-registry\"",
+    ] {
+        assert!(
+            dockerfile.contains(needle),
+            "Dockerfile.sandbox lacks {needle:?}"
+        );
+    }
+    for gone in ["golang-go", "clang", "cmake", "python3-pip", "python3-dev"] {
+        assert!(
+            !dockerfile.contains(gone),
+            "Dockerfile.sandbox still installs {gone}"
+        );
+    }
+    // Bun is omp's private runtime, never the candidate's: no
+    // /usr/local/bin/bun, and the omp wrapper names the private path.
+    assert!(!dockerfile.contains("/usr/local/bin/bun"));
+    assert!(dockerfile.contains("/opt/omp-runtime/bin/bun"));
+
+    let run = |cmd: &str| -> (bool, String) {
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "bash",
+                "subdollar-sandbox",
+                "-lc",
+                cmd,
+            ])
+            .output()
+            .expect("docker run");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    };
+
+    let (ok, out) = run("rustc --version && cargo --version");
+    assert!(ok, "rustc/cargo must run: {out}");
+    assert!(out.contains("rustc 1.100.0"), "pinned rustc: {out}");
+    assert!(out.contains("cargo 1.100.0"), "pinned cargo: {out}");
+
+    for gone in ["go", "bun", "clang", "cmake", "pip3"] {
+        let (ok, out) = run(&format!("command -v {gone}"));
+        assert!(!ok, "{gone} must be absent, found: {out}");
+    }
+    for present in [
+        "python3 --version",
+        "node --version",
+        "opencode --version",
+        "omp --version",
+    ] {
+        let (ok, out) = run(present);
+        assert!(ok, "{present} must run: {out}");
+    }
+    let (ok, out) = run(
+        "TOOLS=\"$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin\"; \
+         \"$TOOLS/llvm-profdata\" --version && \"$TOOLS/llvm-cov\" --version",
+    );
+    assert!(ok, "llvm-tools-preview must be installed: {out}");
+
+    let base = std::env::temp_dir().join(format!("r81-f1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let nodep = base.join("nodep");
+    let dep = base.join("dep");
+    std::fs::create_dir_all(nodep.join("src")).unwrap();
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    std::fs::write(
+        nodep.join("Cargo.toml"),
+        "[package]\nname = \"sdb-nodep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(nodep.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        nodep.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n\
+         # It is not intended for manual editing.\n\
+         version = 4\n\n\
+         [[package]]\nname = \"sdb-nodep\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep.join("Cargo.toml"),
+        "[package]\nname = \"sdb-dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\nserde = \"1\"\n",
+    )
+    .unwrap();
+    std::fs::write(dep.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let in_workspace = |dir: &std::path::Path, cmd: &str| -> (bool, String) {
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "-v",
+                &format!("{}:/workspace", dir.display()),
+                "-w",
+                "/workspace",
+                "--entrypoint",
+                "bash",
+                "subdollar-sandbox",
+                "-lc",
+                cmd,
+            ])
+            .output()
+            .expect("docker run");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    };
+
+    let (ok, out) = in_workspace(
+        &nodep,
+        "cargo build --release --offline --locked && test -x target/release/sdb-nodep",
+    );
+    assert!(ok, "a dependency-free crate must build offline: {out}");
+    let (ok, out) = in_workspace(&dep, "cargo build --release --offline 2>&1");
+    assert!(!ok, "a crate with a dependency must fail offline: {out}");
+    assert!(
+        out.contains("no matching package")
+            || out.contains("failed to select a version")
+            || out.contains("not found in the offline"),
+        "the dependency failure must name the offline registry: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R81 F3: the build step without the SQL lock, so CI (which skips the
+/// live proofs) covers it. A dependency-free crate builds; a crate with
+/// a compiler error gets the first-error line.
+#[test]
+fn r81_f3_build_step_unit() {
+    let sm = SandboxManager::with_id(&format!("r81-f3-build-{}", std::process::id()));
+    let _guard = RunGuard::new(SandboxManager::with_id(&format!(
+        "r81-f3-build-{}",
+        std::process::id()
+    )));
+    sm.cleanup();
+    let base = std::env::temp_dir().join(format!("r81-f3-build-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+
+    let write = |dir: &std::path::Path, name: &str, main_rs: &str| {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Cargo.lock"),
+            format!(
+                "# This file is automatically @generated by Cargo.\n\
+                 # It is not intended for manual editing.\n\
+                 version = 4\n\n\
+                 [[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/main.rs"), main_rs).unwrap();
+    };
+
+    let good = base.join("good");
+    write(&good, "sdb-build", "fn main() {}\n");
+    sm.build_rust_candidate(&good, 120)
+        .expect("a dependency-free crate builds offline");
+
+    let bad = base.join("bad");
+    write(
+        &bad,
+        "sdb-build-bad",
+        "fn main() { let _: i32 = \"not an int\"; }\n",
+    );
+    let err = sm
+        .build_rust_candidate(&bad, 120)
+        .expect_err("a compiler error must fail the build");
+    assert!(
+        err.contains("[BUILD]") && err.contains("error"),
+        "the line names the compiler error: {err}"
+    );
+
+    sm.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R81 F3: the running-server check without the SQL lock, so CI covers
+/// it. A rustc-built listener passes; a Node process beside it is
+/// excluded by its harness root and fails without it.
+#[test]
+fn r81_f3_process_check_unit() {
+    use std::process::Command;
+
+    let sm = SandboxManager::with_id(&format!("r81-f3-proc-{}", std::process::id()));
+    let _guard = RunGuard::new(SandboxManager::with_id(&format!(
+        "r81-f3-proc-{}",
+        std::process::id()
+    )));
+    sm.cleanup();
+    let base = std::env::temp_dir().join(format!("r81-f3-proc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let work = base.join("server");
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(
+        work.join("Cargo.toml"),
+        "[package]\nname = \"sdb-proc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n\
+         # It is not intended for manual editing.\n\
+         version = 4\n\n\
+         [[package]]\nname = \"sdb-proc\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("src/main.rs"),
+        "use std::net::TcpListener;\n\
+         fn main() {\n\
+             let mut port = 5480u16;\n\
+             let args: Vec<String> = std::env::args().collect();\n\
+             let mut i = 1;\n\
+             while i < args.len() {\n\
+                 if args[i] == \"--port\" && i + 1 < args.len() {\n\
+                     port = args[i + 1].parse().unwrap_or(5480);\n\
+                 }\n\
+                 i += 1;\n\
+             }\n\
+             let listener = TcpListener::bind((\"0.0.0.0\", port)).expect(\"bind\");\n\
+             for stream in listener.incoming() {\n\
+                 if let Ok(s) = stream {\n\
+                     std::thread::spawn(move || {\n\
+                         let _held = s;\n\
+                         std::thread::sleep(std::time::Duration::from_secs(60));\n\
+                     });\n\
+                 }\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("start.sh"),
+        "#!/bin/sh\nexec ./target/release/sdb-proc \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            work.join("start.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        );
+    }
+    let port = free_port();
+    sm.build_rust_candidate(&work, 120).expect("the build");
+    sm.start_candidate_in_docker_with(
+        &work,
+        port,
+        &CandidateRunExtras {
+            launch_args: vec!["--port".to_string(), port.to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("the start");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    sm.check_rust_server_processes(port, &[])
+        .expect("the rustc-built listener passes");
+
+    let name = sm.candidate_container_name();
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            "-d",
+            "-w",
+            "/workspace",
+            &name,
+            "node",
+            "-e",
+            "setInterval(()=>{},1000)",
+            "sdb-r81-unit-harness",
+        ])
+        .output()
+        .expect("docker exec node");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut harness = 0u32;
+    for _ in 0..50 {
+        let out = Command::new("docker")
+            .args(["exec", &name, "pgrep", "-f", "sdb-r81-unit-harness"])
+            .output()
+            .expect("pgrep");
+        if let Ok(pid) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
+            harness = pid;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(harness > 0, "the harness node must appear");
+    sm.check_rust_server_processes(port, &[harness])
+        .expect("the harness tree is excluded");
+    let escaped = sm.check_rust_server_processes(port, &[]);
+    assert!(escaped.is_err(), "a node beside the server must fail");
+
+    sm.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
 }

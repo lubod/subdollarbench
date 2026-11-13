@@ -1179,8 +1179,8 @@ impl OmpRunner {
         stats.max_call_usd = max_call_usd.lock().map(|l| *l).unwrap_or(0.0);
         stats.stall = stall.lock().ok().and_then(|s| s.clone());
 
-        let has_runnable = canonical_workdir.join("Dockerfile").exists()
-            || canonical_workdir.join("start.sh").exists();
+        // R81 F3: ./start.sh is the only entrypoint.
+        let has_runnable = canonical_workdir.join("start.sh").exists();
         if !has_runnable {
             if let Some(ref sp) = final_path {
                 Self::fallback_extract_files_from_session(sp, &canonical_workdir);
@@ -2393,7 +2393,7 @@ impl OmpRunner {
             r#"ANTI-CHEAT REQUIREMENT (STRICT):
         - Embedded database engines and SQL parser libraries are STRICTLY FORBIDDEN: no SQLite (Python `sqlite3`, `node:sqlite`, `bun:sqlite`, Go/Rust drivers), no duckdb, no `sqlite3`/`psql` binaries, no vendored engine sources. This includes test and helper files: the scanner checks every file.
         - Build the SQL server from raw TCP sockets on port 5480: one statement per line, `OK <n>` / `ROWS <ncols>` frames / `ERR <class> <text>` answers, tables strictly typed.
-        - Launch: `./start.sh --port <p> --data <dir>` must work (defaults: 5480, ./data). A Dockerfile gets those arguments only with `ENTRYPOINT`; a `CMD`-only image must read `SDB_PORT`/`SDB_DATA_DIR` or use the defaults.
+        - Launch: `./start.sh --port <p> --data <dir>` must work (defaults: 5480, ./data). `./start.sh` must `exec` the binary the harness built under `target/release/`; there is no Dockerfile entrypoint.
         - Ground truth: a reference server speaking the same protocol runs at host `ref-sql`, port 5480 (`printf 'SELECT 1\n' | nc ref-sql 5480`). Compare against it while developing; it is not reachable while you are graded.
         - `SPEC.md` in the workspace holds the full contract so far (harness-owned, rewritten every ticket)."#,
         )

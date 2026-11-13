@@ -1,6 +1,7 @@
 """Allowlist egress proxy (stdlib only): HTTP GET + CONNECT tunneling.
 Usage: python3 egress_proxy.py <port>
-Env ALLOWLIST (comma hosts), default covers openrouter + registries + github.
+Env ALLOWLIST (comma hosts); the default is the .47 model API only
+(R81 F2: no registries, no GitHub).
 NO_PROXY semantics: client-side (agent env); this proxy 403s anything off-list.
 """
 import os
@@ -10,12 +11,7 @@ import threading
 PORT = int(__import__("sys").argv[1]) if len(__import__("sys").argv) > 1 else 3128
 ALLOW = set(
     os.environ
-    .get(
-        "ALLOWLIST",
-        "openrouter.ai,api.openrouter.ai,crates.io,static.crates.io,proxy.golang.org,"
-        "registry.npmjs.org,pypi.org,files.pythonhosted.org,github.com,"
-        "objects.githubusercontent.com,codeload.github.com",
-    )
+    .get("ALLOWLIST", "openrouter.ai,api.openrouter.ai")
     .split(",")
 )
 

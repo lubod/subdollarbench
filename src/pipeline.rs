@@ -489,15 +489,81 @@ fn parse_stage_commit(log: &str, stage: u32) -> Option<String> {
 }
 
 /// Total line of `go tool cover -func` ("total: (statements) 87.5%").
-fn parse_go_coverage_total(out: &str) -> Option<f64> {
-    out.lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with("total:"))
-        .and_then(|l| l.split_whitespace().last())
-        .and_then(|p| p.trim_end_matches('%').parse::<f64>().ok())
+/// R81 F4: measured line coverage of the workspace's `src/`, tests
+/// excluded, from the crate's own `cargo test` instrumented with
+/// `-C instrument-coverage` and read back with llvm-tools-preview. This
+/// replaces the Go branch and the self-reported `coverage.txt` branch.
+fn measure_rust_coverage(
+    sandbox: &crate::sandbox::docker::SandboxManager,
+    workdir: &Path,
+) -> Result<f64, String> {
+    let script = r#"set -e
+export RUSTFLAGS="-C instrument-coverage"
+export LLVM_PROFILE_FILE="/tmp/sdb-cov-%p-%m.profraw"
+rm -f /tmp/sdb-cov*.profraw /tmp/sdb-cov.profdata /tmp/sdb-cov-bins.json
+cargo test --release --offline --locked --tests
+cargo test --release --offline --locked --no-run --message-format=json > /tmp/sdb-cov-bins.json
+TOOLS="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+"$TOOLS/llvm-profdata" merge -sparse /tmp/sdb-cov-*.profraw -o /tmp/sdb-cov.profdata
+python3 - "$TOOLS/llvm-cov" <<'PY'
+import json, subprocess, sys
+llvm_cov = sys.argv[1]
+bins = []
+for line in open('/tmp/sdb-cov-bins.json'):
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    exe = m.get('executable')
+    if exe and m.get('profile', {}).get('test'):
+        bins.append(exe)
+if not bins:
+    print('no instrumented test binaries', file=sys.stderr)
+    sys.exit(2)
+out = subprocess.run([llvm_cov, 'export', '-format=text',
+                      '-instr-profile=/tmp/sdb-cov.profdata', *bins],
+                     capture_output=True, text=True)
+if out.returncode != 0:
+    print(out.stderr, file=sys.stderr)
+    sys.exit(out.returncode)
+data = json.loads(out.stdout)
+total = covered = 0
+for f in data['data'][0]['files']:
+    name = f['filename']
+    if '/workspace/src/' not in name:
+        continue
+    parts = name.split('/')
+    if 'tests' in parts or parts[-1].startswith('test_') or parts[-1].endswith('_test.rs'):
+        continue
+    lines = f['summary']['lines']
+    total += lines['count']
+    covered += lines['covered']
+if total == 0:
+    print('no source lines under src/', file=sys.stderr)
+    sys.exit(3)
+print('coverage: %.2f%%' % (100.0 * covered / total))
+PY
+"#;
+    let (ok, text) = sandbox
+        .run_workspace_command(workdir, script, 300)
+        .map_err(|e| format!("coverage measurement failed: {e}"))?;
+    if !ok {
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = &lines[lines.len().saturating_sub(12)..];
+        return Err(format!(
+            "coverage measurement failed (cargo test or llvm-cov): {}",
+            tail.join("\n")
+        ));
+    }
+    parse_self_coverage(&text).ok_or_else(|| {
+        format!(
+            "no coverage line in the measurement output: {}",
+            text.trim()
+        )
+    })
 }
 
-/// Self-reported coverage line ("coverage: 87.5%").
+/// The harness's coverage line ("coverage: 87.5%").
 fn parse_self_coverage(text: &str) -> Option<f64> {
     for line in text.lines() {
         let low = line.to_ascii_lowercase();
@@ -595,39 +661,13 @@ fn run_tests_gate_blocking(
             Err(e) => return fail(format!("./test.sh could not run (run {attempt}/2): {e}")),
         }
     }
-    let (coverage, measured) = if workdir.join("go.mod").is_file() {
-        match sandbox.run_workspace_command(
-            &workdir,
-            "go test ./... -coverprofile=/tmp/sdb-cov.out >/dev/null 2>&1; go tool cover -func=/tmp/sdb-cov.out | tail -n 1",
-            120,
-        ) {
-            Ok((_, out)) => (parse_go_coverage_total(&out), true),
-            Err(e) => return fail(format!("coverage measurement failed: {e}")),
-        }
-    } else {
-        (
-            std::fs::read_to_string(workdir.join("coverage.txt"))
-                .ok()
-                .and_then(|t| parse_self_coverage(&t)),
-            false,
-        )
-    };
-    let Some(cov) = coverage else {
-        return fail(
-            "no coverage signal: Go projects are measured by the harness via `go test -coverprofile`; other languages must write a `coverage: NN.N%` line into coverage.txt"
-                .to_string(),
-        );
+    let cov = match measure_rust_coverage(&sandbox, &workdir) {
+        Ok(c) => c,
+        Err(e) => return fail(e),
     };
     let gate = if lite { 60.0 } else { 80.0 };
-    // Round-15 M2: only Go is measured here. Say so, and say it in the
-    // prompt too, so the number is not mistaken for an independent check.
     logger.log(&format!(
-        "  [TESTS] coverage {cov:.1}% ({}; gate {gate}%)",
-        if measured {
-            "measured"
-        } else {
-            "self-report, not verified"
-        }
+        "  [TESTS] coverage {cov:.1}% (measured by the harness; gate {gate}%)"
     ));
     if cov < gate {
         return fail(format!("coverage {cov:.1}% is below the {gate}% gate"));
@@ -978,6 +1018,15 @@ pub struct VerificationOutcome {
     pub infra_error: bool,
 }
 
+/// R81-1: the one place the `.47` language rule's production wiring is
+/// decided. A model attempt on the SQL task is checked; an eval-only run
+/// (the SQL live proofs present the Python reference as the candidate)
+/// is not. `TaskType` has one variant today; the match keeps the rule
+/// scoped if another task returns.
+fn lang_check_enabled(config: &BenchmarkConfig) -> bool {
+    !config.eval_only && matches!(config.task, TaskType::Sql)
+}
+
 pub struct BenchmarkPipeline;
 
 impl BenchmarkPipeline {
@@ -1027,7 +1076,7 @@ impl BenchmarkPipeline {
         out.push_str(
             "4. Verify your fix locally by testing compilation and execution with `bash`.\n",
         );
-        out.push_str("5. Ensure `./start.sh` or `Dockerfile` remains fully executable and properly starts the server.\n");
+        out.push_str("5. Ensure `./start.sh` remains fully executable and execs the binary under `target/release/`.\n");
         out.push_str("6. When your surgical fix is complete, signal that you are ready for re-verification by creating `/workspace/READY` (e.g. `touch READY`), or conclude your session.\n");
         out
     }
@@ -1127,6 +1176,10 @@ impl BenchmarkPipeline {
         accepted: Option<&'a [u32]>,
         lite_profile: &'a [String],
         passed_lite: &'a [(u32, Vec<String>)],
+        // R81 F3: the `.47` Rust rule. A model attempt is checked; an
+        // eval-only run is a harness proof (the SQL live proofs present
+        // the Python reference as the candidate), so it is not.
+        lang_check: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = VerificationOutcome> + Send + 'a>> {
         Box::pin(async move {
             logger
@@ -1150,11 +1203,24 @@ impl BenchmarkPipeline {
                 logger.log("[VERIFY] Anti-cheat compliance passed.");
             }
 
-            let (has_runnable, candidate_check_error) =
+            // R81 F3: the workspace half of the Rust rule runs before the
+            // entrypoint check, so a Python/Node/Dockerfile-only workspace
+            // gets the graded `[LANG]` line instead of "no runnable code".
+            let lang_error = if lang_check && !disqualified {
+                crate::sandbox::docker::SandboxManager::rust_workspace_violation(workdir)
+                    .map(|why| format!("[LANG] the server is not a Rust program: {why}"))
+            } else {
+                None
+            };
+
+            let (has_runnable, candidate_check_error) = if lang_error.is_some() {
+                (false, None)
+            } else {
                 match sandbox.ensure_runnable_candidate(workdir) {
                     Ok(v) => (v, None),
                     Err(e) => (false, Some(e.to_string())),
-                };
+                }
+            };
 
             let extra_throughput: Option<f64> = None;
             let extra_robustness: Vec<crate::verifier::StageResult> = Vec::new();
@@ -1179,6 +1245,23 @@ impl BenchmarkPipeline {
                     error: Some(reason),
                 }];
                 (0.0, 0, accepted_total, stages)
+            } else if let Some(lang) = &lang_error {
+                // A graded ticket failure: the model's workspace is not a
+                // Rust server. Never a harness fault, so the cell counts.
+                logger.log(lang);
+                let ids: Vec<u32> = accepted
+                    .map(|a| a.to_vec())
+                    .unwrap_or_else(|| (0..accepted_total).collect());
+                let stages = ids
+                    .into_iter()
+                    .map(|stage| crate::verifier::StageResult {
+                        stage,
+                        name: crate::config::stage_label(stage, &format!("Stage {stage}")),
+                        passed: false,
+                        error: Some(lang.clone()),
+                    })
+                    .collect();
+                (0.0, 0, accepted_total, stages)
             } else if !has_runnable {
                 infra_error = candidate_check_error.is_some();
                 if let Some(e) = &candidate_check_error {
@@ -1190,7 +1273,7 @@ impl BenchmarkPipeline {
                         "[SETUP] Candidate did not produce runnable code. Skipping verification.",
                     );
                 } else {
-                    logger.log("[SETUP] No runnable start.sh or Dockerfile found in ./workspace! Skipping verification.");
+                    logger.log("[SETUP] No runnable ./start.sh found in ./workspace! Skipping verification.");
                 }
                 (0.0, 0, accepted_total, Vec::new())
             } else {
@@ -1259,8 +1342,8 @@ impl BenchmarkPipeline {
                             "--data".to_string(),
                             "/sdb-data".to_string(),
                         ];
-                        // Also visible to CMD-only Dockerfile images, which
-                        // are started without argv.
+                        // Also exported for a start.sh that reads the env
+                        // instead of the argv.
                         extras.env.push(("SDB_PORT".to_string(), port.to_string()));
                         extras
                             .env
@@ -1268,28 +1351,57 @@ impl BenchmarkPipeline {
                         sql_data = Some(data);
                     }
                 }
-                let phase_candidate =
-                    crate::verifier::sql::PhaseTimer::new("candidate start + ready wait");
-                if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
-                    if crate::sandbox::docker::SandboxManager::is_model_packaging_error(
-                        &e.to_string(),
-                    ) {
-                        logger.log(&format!(
-                        "[MODEL-FAULT] Candidate container failed to start ({e}); scoring as model failure."
-                    ));
-                    } else {
-                        logger.log(&format!(
-                        "[INFRA] Candidate container failed to start ({e}); verifiers would fail on transport, not on the candidate."
-                    ));
-                        infra_error = true;
+                // R81 F3: the harness builds the server. A Rust build is
+                // too slow to race the 25 s start-up limit, so it runs
+                // here, under the grading lock, before the start. A build
+                // failure is a graded ticket failure, not a harness fault.
+                let mut build_error: Option<String> = None;
+                if lang_check {
+                    let build = sandbox.build_rust_candidate(
+                        workdir,
+                        crate::sandbox::docker::SandboxManager::RUST_BUILD_TIMEOUT_SECS,
+                    );
+                    match build {
+                        Ok(()) => {
+                            logger.log("[BUILD] cargo build --release --offline --locked: ok")
+                        }
+                        Err(e) => {
+                            logger.log(&e);
+                            build_error = Some(e);
+                        }
                     }
                 }
 
-                let ready = if infra_error {
-                    logger.log(&format!(
-                    "[SETUP] Candidate never started; skipping port {} wait (stages will fail fast on transport).",
-                    port
-                ));
+                let phase_candidate =
+                    crate::verifier::sql::PhaseTimer::new("candidate start + ready wait");
+                if build_error.is_none() {
+                    if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, &extras) {
+                        if crate::sandbox::docker::SandboxManager::is_model_packaging_error(
+                            &e.to_string(),
+                        ) {
+                            logger.log(&format!(
+                                "[MODEL-FAULT] Candidate container failed to start ({e}); scoring as model failure."
+                            ));
+                        } else {
+                            logger.log(&format!(
+                                "[INFRA] Candidate container failed to start ({e}); verifiers would fail on transport, not on the candidate."
+                            ));
+                            infra_error = true;
+                        }
+                    }
+                }
+
+                let ready = if infra_error || build_error.is_some() {
+                    if build_error.is_some() {
+                        logger.log(
+                            "[SETUP] The build failed; skipping the port wait (the stages carry the build error).",
+                        );
+                    } else {
+                        logger.log(&format!(
+                            "[SETUP] Candidate never started; skipping port {} wait (stages will fail fast on transport).",
+                            port
+                        ));
+                    }
                     false
                 } else {
                     logger.log(&format!(
@@ -1306,6 +1418,23 @@ impl BenchmarkPipeline {
                     ));
                 } else {
                     logger.log(&format!("[WARN] Port {} not responding within 25s timeout. Proceeding with verification.", port));
+                }
+
+                // R81 F3: the running half of the Rust rule. The harness
+                // normally runs in its own container, so no harness root
+                // exists here; the check still accepts them (the fixture
+                // proves the exclusion). A violation is graded.
+                if ready && lang_check && build_error.is_none() {
+                    match sandbox.check_rust_server_processes(port, &[]) {
+                        Ok(()) => logger.log(
+                            "[LANG] the listener is a rustc-built binary under target/release/",
+                        ),
+                        Err(why) => {
+                            let line = format!("[LANG] the server is not a Rust program: {why}");
+                            logger.log(&line);
+                            build_error = Some(line);
+                        }
+                    }
                 }
                 drop(phase_candidate);
 
@@ -1352,7 +1481,9 @@ impl BenchmarkPipeline {
                                 Vec::new()
                             };
                         let mut upgrade_failed: Option<(u32, String)> = None;
-                        for sent in &sentinels {
+                        // A build/`[LANG]` failure means no server is up;
+                        // the sentinels would only report transport noise.
+                        for sent in sentinels.iter().filter(|_| build_error.is_none()) {
                             match crate::verifier::sql::sentinel::check(
                                 &format!("127.0.0.1:{port}"),
                                 std::time::Duration::from_secs(10),
@@ -1382,6 +1513,19 @@ impl BenchmarkPipeline {
                                 "Stage {stage}: {}",
                                 crate::verifier::sql::driver::stage_title(stage)
                             );
+                            // R81 F3: a failed build or `[LANG]` check fails
+                            // every accepted ticket with its one line.
+                            if let Some(e) = &build_error {
+                                let st = crate::verifier::StageResult {
+                                    stage,
+                                    name,
+                                    passed: false,
+                                    error: Some(e.clone()),
+                                };
+                                log_stage(logger, &st);
+                                stages.push(st);
+                                continue;
+                            }
                             if crate::verifier::sql::driver::scenario_only(stage) {
                                 // A scenario-only ticket (ticket 12 first):
                                 // its checks run after the suite, once the
@@ -3155,6 +3299,7 @@ impl BenchmarkPipeline {
                     .as_ref()
                     .map(|c| c.passed_lite.as_slice())
                     .unwrap_or(&[]),
+                lang_check_enabled(&config),
             )
             .await
         };
@@ -3441,6 +3586,7 @@ impl BenchmarkPipeline {
                             .as_ref()
                             .map(|c| c.passed_lite.as_slice())
                             .unwrap_or(&[]),
+                        lang_check_enabled(&config),
                     )
                     .await;
 

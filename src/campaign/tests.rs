@@ -2868,27 +2868,27 @@ fn r43_f1_candidate_view_unchanged() {
     }
     actual.push(format!("{:x}", h.finalize()));
     let expected: Vec<&str> = vec![
-        "2aa4b2071ebbf7964fe3473c088614d1e55d0949bb6c3adab8c9f97a07ef0130",
-        "dfeab661f07a21de492cf230b21abbd9a8f13237a08691148e39378264aaa319",
-        "fc0b7a86addb8b044241e4190f13e1e00fa714122c3d2c44bfc7614e05e36082",
-        "599d0b2604dff20b0ab9a8c1894ab7979d9708c2dcfcc87aba51d0628fad3777",
-        "af59b17d0bfd1b8cb203f7eec211f772ba8e89f4d61253da2ab1cd6b2640ad79",
-        "0af5ef606946bd71f61c79c1200cb62e6fd4db3b2d31a4ed62e9f94bcee04a35",
-        "0e54e193ae7c44276e1b9aa5ed19698c5000efb89e86720e5699dd8bb6f0715d",
-        "b98365478c0d41d9924f92adcd2a40c68b03852ece368cbce8963341e7260975",
-        "28bdd84e7433e877cda1a3600fe7b099bfe10956f1f2ef4443e0fa18725c4eee",
-        "fb55d4ca84ed8eb9f50a555c03f8e016a5226bda98188551ac3721577fe1edb5",
-        "370396b5004db43974ca4a1ab32d27e8f347e4aa867d771eca57654fce8e3b52",
-        "af02bfa6591d19be7f92616a6dca9c8618909b5c63995d0ae2d19471fa40bc90",
-        "455ddb2c7ee798f84366e61cda273c0d1f479fa0158b03fa461efa8f6285ebd1",
-        "9247f706f0e31a401cdff64fd47224d5408471b4d3b09dc5767afd1ee52e098d",
-        "81a888d76bb5e8020e3553511e584677cf2d7b17621ecedb21c9f3ee4ef231e3",
-        "25d7a04238f15039353307162b8e8019ff908634cc6fa4670eea642fc67d2f8c",
-        "b4b9624a4c743a8b9511f0cdb1c68b1d29d637450d7a611a8739f8a40e3eddca",
-        "fa97240be1b7c29bbbfb15e851beccd8a34498cdc0a97765c0afdc5061e150d8",
-        "701a8032c1916d1f7060fb220bcf1c48389422636fa65e2ee7a07244d6e198ac",
-        "bebd820d7353a19e64c8be6f609d8ae5561ccc3a3e82d469182e0d3a54fc036b",
-        "f1b075923b284348f7150bb467c1cd7fb8b2c98a8aaa0fef0c7f615d73d5f021",
+        "1917badadaf8228e8efdf8c3976789aa4234f056f573aea201ad66149b4baebd",
+        "092d8fd11d17eba266e52f8535dcd0fe038ff0cfe6520c1b1dc53e4272df78c7",
+        "f9a95d9a0025d117e1b067b485ee5c7bb9843c7d83bd7474b5bdf3ff609f7219",
+        "21d243ebc3039f8e937a2361e3557da1fe6e98c454a854ff1ccee50e86c7e9a4",
+        "385e99e2e899a162195acbc9c8145c08534f0f2c9bb42da4f504466a176cb43c",
+        "ced3bfa052d74b1ad500295c42f428e350ea58a3e51b607ffc0e4c371a0ee344",
+        "d204ab0937bed6f020028c85f949f7bd5a57fad54d580faaccea5b3689c0eac8",
+        "f0b239bd141f49ef20c68e7ad6d5219d843f28bfd9957c62dbaf78c2f1dd1166",
+        "89e420fc42bb566d6bc91845e8fcca34b7cc170fc731e8a5bd34709c2e2f731d",
+        "76005022916dc3bc2fcaad8d6ff3468fb6f4c10fc6ce2a6866aee19b7df86db6",
+        "fef4d8295b53c6ecb8708c4e3ccad0b8084897da3be9e543889b7249e19d8e66",
+        "33b781676fb4634ca0cb9f4460a8238a0f48c5e88eadbb243c92e8dcd105055f",
+        "a2ec72697d90c6ec5c9a0e971780e6e676dda1d0d027c9f40009fff2ce5ad2b7",
+        "f2f08d34b06884606086038ea0db389cb80b36509dc04dc933c40cbf5661991a",
+        "7dac61459a5fab4a076630f80770366f4b4ea7324c1f97f43d1cbe9d50967773",
+        "d4b558b668c9d47fe90ccd2c55641cdd2327ca7f4b418d52d2ab86b7eea1755c",
+        "e2d2282b9f0e96f787936259efbc9183fd49b4076c429566f0366af3bcd79a35",
+        "5f25dff65bd933d8a623b68afca9fb64fe2e1c6aab9b494acf52068a63748889",
+        "3f99667e993f7e24efbbaf16b80da2cd3284a40db5a230afc3d629f04d5d3279",
+        "9b02755047fa9175c2ea96f599f2b4f5a7339bddf836b33940cde983e4510a39",
+        "26c6099eafcdda4173cb4d43356c5035606b8450b1301fe41fa948f401d2f184",
         "f00669b1c73447c62d748a27c9a92c8ab01be0d5b63fceda23292fc6a01b59b6",
         "7a5f2c36a2b44a27f0bb892519f89cd98750e1fb11dc3c7ff4fb7398fad2f567",
         "2b3c28db6e2f7250fdbea58271659407da102675c9d8448f0f86491030484b04",
@@ -3135,7 +3135,7 @@ fn r45_f3_prompt_names_the_perf_score() {
 /// the current rules; a same-version phase does.
 #[test]
 fn r45_f4_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-09.46");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-13.47");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.43".to_string();
@@ -3152,7 +3152,7 @@ fn r45_f4_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
-    assert!(msg.contains("not 2026-11-09.46"), "{msg}");
+    assert!(msg.contains("not 2026-11-13.47"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -3167,10 +3167,10 @@ fn r45_f4_no_chain_across_the_bump() {
 }
 
 /// R49 F5 (kept current by round 75): a `.44` phase never chains into the
-/// current `.46` rules; a current phase chains normally.
+/// current `.47` rules; a current phase chains normally.
 #[test]
 fn r49_f5_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-09.46");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-13.47");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.44".to_string();
@@ -3187,7 +3187,7 @@ fn r49_f5_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.44"), "{msg}");
-    assert!(msg.contains("not 2026-11-09.46"), "{msg}");
+    assert!(msg.contains("not 2026-11-13.47"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
