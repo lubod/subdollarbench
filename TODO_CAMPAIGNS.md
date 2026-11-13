@@ -307,7 +307,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     `baidu/ernie-5.5-flash-preview:free` (operator, 2026-11-11, instead
     of deepseek), phase 1 per harness: omp 8.8 in 848 requests and
     90 min, opencode 10.0 in 431 requests and 59 min. Next: the `.47`
-    round (Go only, opencode graded, one bar).
+    rounds 81 (the sandbox, rules `.47`) and 82 (opencode graded), one
+    bar. **The language is Rust, not Go** (operator, 2026-11-13: "i have
+    changed my mind, i want to use rust"); stdlib only, no crates, the
+    harness builds with `cargo build --release --offline --locked`.
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
     "start <model>" (AGENTS.md, "Paid cells and services").

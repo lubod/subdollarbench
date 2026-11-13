@@ -785,8 +785,9 @@ The benchmark answers "what does a dollar buy" (round 23):
   now.
 - **What follows:** the `.47` round makes opencode the graded harness
   (with round 79's carried items: titles from the career model, the
-  effort variants checked, R79-10..17), together with the Go-only
-  sandbox. The bar, the model checks and a $0 rehearsal run on it before
+  effort variants checked, R79-10..17), together with the one-language
+  sandbox (Go when this was written; **Rust** since the operator's
+  2026-11-13 change, round 81). The bar, the model checks and a $0 rehearsal run on it before
   any `.47` cell.
 
 ### AGENTS.md history (moved here on 2026-10-31)
