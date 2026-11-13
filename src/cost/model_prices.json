@@ -159,6 +159,14 @@
       "cache_read_per_million": 0.0036,
       "cache_write_per_million": 0.435,
       "provider": "xiaomi/fp8"
+    },
+    {
+      "id": "meta/muse-ember",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.004,
+      "cache_write_per_million": 0.125,
+      "provider": "meta"
     }
   ]
 }
