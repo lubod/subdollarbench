@@ -208,6 +208,11 @@ pub struct PerfConfig {
     pub clients_w5: usize,
     pub timeout: Duration,
     pub workload_deadline: Duration,
+    /// R81-2: build the candidate's Rust workspace before the perf
+    /// start (the same `cargo build --release --offline --locked` and
+    /// limit as a graded start). The harness's Python reference proofs
+    /// set this false; a model's `.47` workspace leaves it true.
+    pub build_rust: bool,
 }
 
 impl Default for PerfConfig {
@@ -228,6 +233,7 @@ impl Default for PerfConfig {
             clients_w5: 16,
             timeout: Duration::from_secs(30),
             workload_deadline: Duration::from_secs(240),
+            build_rust: true,
         }
     }
 }
@@ -250,6 +256,7 @@ impl PerfConfig {
             clients_w5: 4,
             timeout: Duration::from_secs(5),
             workload_deadline: Duration::from_secs(30),
+            build_rust: false,
             ..Self::default()
         }
     }
@@ -273,6 +280,7 @@ impl PerfConfig {
             clients_w5: 8,
             timeout: Duration::from_secs(10),
             workload_deadline: Duration::from_secs(120),
+            build_rust: false,
             ..Self::default()
         }
     }
@@ -1668,6 +1676,17 @@ pub fn run_workspace_at(
 
     let ref_sb = SandboxManager::with_id(&format!("perf-ref-{}-{nonce:x}", std::process::id()));
     let cand_sb = SandboxManager::with_id(&format!("perf-cand-{}-{nonce:x}", std::process::id()));
+    // R81-2: the phase's final workspace is started through its
+    // `./start.sh`, which execs `target/release/...`; the harness builds
+    // it first, with the graded start's flags and limit. A build failure
+    // floors the phase with the build line, like a missing entrypoint.
+    if cfg.build_rust {
+        if let Err(e) =
+            cand_sb.build_rust_candidate(&workspace, SandboxManager::RUST_BUILD_TIMEOUT_SECS)
+        {
+            return Ok(PerfScore::floored(phase, e));
+        }
+    }
     // The guards exist before the containers do, so a failed start is
     // reaped too.
     let ref_guard = RunGuard::new(ref_sb);

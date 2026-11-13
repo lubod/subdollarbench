@@ -1018,6 +1018,15 @@ pub struct VerificationOutcome {
     pub infra_error: bool,
 }
 
+/// R81-1: the one place the `.47` language rule's production wiring is
+/// decided. A model attempt on the SQL task is checked; an eval-only run
+/// (the SQL live proofs present the Python reference as the candidate)
+/// is not. `TaskType` has one variant today; the match keeps the rule
+/// scoped if another task returns.
+fn lang_check_enabled(config: &BenchmarkConfig) -> bool {
+    !config.eval_only && matches!(config.task, TaskType::Sql)
+}
+
 pub struct BenchmarkPipeline;
 
 impl BenchmarkPipeline {
@@ -3290,7 +3299,7 @@ impl BenchmarkPipeline {
                     .as_ref()
                     .map(|c| c.passed_lite.as_slice())
                     .unwrap_or(&[]),
-                !config.eval_only && matches!(config.task, TaskType::Sql),
+                lang_check_enabled(&config),
             )
             .await
         };
@@ -3577,7 +3586,7 @@ impl BenchmarkPipeline {
                             .as_ref()
                             .map(|c| c.passed_lite.as_slice())
                             .unwrap_or(&[]),
-                        !config.eval_only && matches!(config.task, TaskType::Sql),
+                        lang_check_enabled(&config),
                     )
                     .await;
 

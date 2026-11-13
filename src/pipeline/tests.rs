@@ -1151,7 +1151,11 @@ fn r45_f1_reference_scores_one() {
         let workdir = dir.join("workspace");
         crate::verifier::sql::ref_server::write_reference(&workdir, 5480)
             .map_err(|e| format!("reference workspace: {e}"))?;
-        run_workspace_at(&workdir, 4, &PerfConfig::default(), &dir.join("runs"))
+        let cfg = PerfConfig {
+            build_rust: false,
+            ..PerfConfig::default()
+        };
+        run_workspace_at(&workdir, 4, &cfg, &dir.join("runs"))
             .map_err(|e| format!("reference run: {e}"))
     });
     result.expect("the reference workspace must score within tolerance");
@@ -3939,4 +3943,19 @@ async fn r81_f3_rust_server_pipeline_unit() {
     );
     sm.cleanup();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R81-1: the language rule's production wiring is one function. A
+/// model SQL attempt is checked; an eval-only run (the Python reference
+/// proofs) is not.
+#[test]
+fn r81_f1_lang_check_enabled_only_for_model_sql() {
+    let mut config = covtest_config(std::env::temp_dir().join("r81-lang"), 8, "lang");
+    config.task = TaskType::Sql;
+    assert!(!lang_check_enabled(&config), "eval-only is a harness proof");
+    config.eval_only = false;
+    assert!(
+        lang_check_enabled(&config),
+        "a model SQL attempt is checked"
+    );
 }
