@@ -755,6 +755,40 @@ The benchmark answers "what does a dollar buy" (round 23):
   snapshot row, which can't express a time-of-day price; minimax and
   deepseek run only off-peak.
 
+## 31. The `.47` harness is opencode (2026-11-13)
+
+- **Why** (operator, 2026-11-13: "A", after the reviewer's report):
+  the harness comparison (round 79 made opencode safe to compare) ran
+  phase 1 once per harness on `baidu/ernie-5.5-flash-preview:free`
+  (operator, 2026-11-11: a free model instead of deepseek), each with
+  the same 900-request cap on a fresh daily free-model quota, as smoke
+  cells that are never published:
+
+  | Phase 1 | omp | opencode |
+  |---|---|---|
+  | Points | 8.8 / 10 | 10.0 / 10 |
+  | Stages first try | 6 of 7 (stage 5 hit 200 turns, lite retry 0.8 of 2) | 7 of 7 |
+  | Free-model requests | 848 | 431 |
+  | Wall | 90 min | 59 min |
+  | Tool errors, rate-limited, empty | 0, 1, 2 | 0, 0, 2 |
+
+  Runs (in the comparison worktree, not in `runs/`):
+  `campaign_sdb-sql_openrouter_baidu_ernie-5.5-flash-preview_free_20261112_053122_w1`
+  (omp) and `..._20261113_000204_w1` (opencode). They ran from a local
+  branch, `cmp-ernie`, that differs from master `14755b0` only by the
+  model's $0 price row (pin `baidu`); it is never pushed.
+- **The limits, stated with the choice:** one phase 1 per harness, one
+  free model, about 19 hours apart; both wrote Python, and `.47` is Go
+  only; the two harnesses count turns differently (opencode counts
+  steps), so requests and wall time are the fair measures. The reviewer
+  offered a confirming phase 2 pair at $0; the operator chose to decide
+  now.
+- **What follows:** the `.47` round makes opencode the graded harness
+  (with round 79's carried items: titles from the career model, the
+  effort variants checked, R79-10..17), together with the Go-only
+  sandbox. The bar, the model checks and a $0 rehearsal run on it before
+  any `.47` cell.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

@@ -302,6 +302,12 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     a stable `.47` board.
     Ling's grid was killed on the operator's word (2026-11-11 "kill
     ling"): 7 phases in the ledger, 2 cancelled in flight and hidden.
+    **The harness is opencode** (operator, 2026-11-13 "A";
+    `docs/DECISIONS.md` #31): the comparison ran on the free
+    `baidu/ernie-5.5-flash-preview:free` (operator, 2026-11-11, instead
+    of deepseek), phase 1 per harness: omp 8.8 in 848 requests and
+    90 min, opencode 10.0 in 431 requests and 59 min. Next: the `.47`
+    round (Go only, opencode graded, one bar).
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
     "start <model>" (AGENTS.md, "Paid cells and services").
