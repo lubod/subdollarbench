@@ -46,7 +46,7 @@ REHEARSAL=0
 DRY_RUN=0
 WORKER_BASE=1
 MAX_PHASE=4
-HARNESS="${SDB_GRID_HARNESS:-omp}"
+HARNESS="${SDB_GRID_HARNESS:-opencode}"
 BUDGET_SET=0
 LEDGER_SET=0
 STOP_SET=0
@@ -55,8 +55,9 @@ log() { echo "[grid] $*" >&2; }
 
 usage() {
     cat >&2 <<'EOF'
-usage: grid.sh --careers <file> --lanes <n> [--cap <usd>] [--budget <usd>]
-               [--wall <min>] [--ledger <file>] [--hold <file>] [--stop <file>]
+usage: grid.sh --careers <file> --lanes <n> [--harness omp|opencode]
+               [--cap <usd>] [--budget <usd>] [--wall <min>]
+               [--ledger <file>] [--hold <file>] [--stop <file>]
                [--cell <path>] [--dry-run] [--max-phase <n>]
        grid.sh --rehearsal --careers <file> --lanes <n> [--cap <usd>]
                [--harness omp|opencode]
@@ -87,6 +88,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# R82 F1: opencode is the graded harness; omp stays for smoke and
+# rehearsals. Only those two names are accepted.
+case "$HARNESS" in
+    omp|opencode) ;;
+    *) log "--harness must be omp or opencode (got '$HARNESS')"; exit 2 ;;
+esac
 [[ "$LANES" =~ ^[1-9][0-9]*$ ]] || { log "--lanes must be a positive integer"; exit 2; }
 [[ "$CAP" =~ ^[0-9]+([.][0-9]+)?$ ]] || { log "--cap must be a non-negative number"; exit 2; }
 [[ "$MAX_PHASE" =~ ^[1-4]$ ]] || { log "--max-phase must be 1-4"; exit 2; }
@@ -989,6 +996,15 @@ EOF
         n="$(awk -F'\t' -v w="$w" 'NR > 1 && $4 == w { n++ } END { print n + 0 }' "$LEDGER")"
         [[ "$n" -gt 0 ]] || { echo "worker $w never ran"; exit 1; }
     done
+    got="$(awk -F'\t' 'NR > 1 { print $10 }' "$LEDGER" | sort -u)"
+    [[ "$got" == "opencode" ]] || {
+        echo "the default ledger harness is '$got', want opencode"; exit 1; }
+    rc=0
+    out="$("$ROOT/scripts/grid.sh" --careers "$scenario/careers.txt" --lanes 1 \
+        --harness foo --dry-run 2>&1)" || rc=$?
+    [[ "$rc" -eq 2 ]] || { echo "--harness foo exited $rc, want 2"; echo "$out"; exit 1; }
+    grep -q 'must be omp or opencode' <<<"$out" || {
+        echo "the --harness refusal did not say why: $out"; exit 1; }
 
     # 2) a STOP on one lane starts no phase on any lane.
     scenario="$dir/two"
@@ -1489,7 +1505,9 @@ EOF
     load_careers "$CAREERS_FILE"
     export SDB_MODEL_CHECK_DIR="$scenario/gates"
     export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:fresh"
-    record="$scenario/gates/model-check-test-model.txt"
+    # R82 F1: the default harness is opencode, so the record path carries
+    # the opencode- prefix.
+    record="$scenario/gates/model-check-opencode-test-model.txt"
     fresh="$(date -u +%FT%TZ)"
     old="$(date -u -d '8 days ago' +%FT%TZ)"
 

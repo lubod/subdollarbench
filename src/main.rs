@@ -65,6 +65,16 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
         subdollarbench::config::get_repo_root().display()
     );
     match cli.command {
+        Commands::OpencodeMap { events, model } => {
+            let text = std::fs::read_to_string(&events)?;
+            print!(
+                "{}",
+                subdollarbench::sandbox::opencode::OpenCodeRunner::opencode_map_events(
+                    &text, &model
+                )
+            );
+            return Ok(());
+        }
         Commands::MigrateCheck => {
             // Report-only integrity audit: orphans, junk rows, row-file drift.
             // Runs on every engine boot (warn-only); exit 1 on findings.

@@ -56,6 +56,38 @@ record_path() {
     printf '%s/model-check-%s%s.txt' "$(record_dir)" "$prefix" "$(model_slug "$1")"
 }
 
+# R79-12: the check spends the same key the cells and grids use, so it
+# refuses while any of them runs and names it. A detached cell/grid/bar
+# is an `sdb-*` user unit; a foreground cell holds a campaign lock in the
+# cells' runs dir; a foreground grid holds a reservation in its ledger's
+# `.running` dir.
+refuse_beside_running() {
+    local units grids
+    # The canned self-test cases drive the check itself, not the live
+    # environment; the refusal has its own case.
+    [[ "${SDB_MODEL_CHECK_SKIP_BESIDE:-0}" == "1" ]] && return 0
+    units="$(systemctl --user list-units 'sdb-*' --state=running --no-legend --no-pager 2>/dev/null \
+        | awk '{print $1}' | paste -sd' ' -)"
+    if [[ -n "$units" ]]; then
+        echo "[model-check] FATAL: refusing beside running sdb-* units: $units" >&2
+        return 1
+    fi
+    if ! "$ROOT/scripts/beside-cell.sh" "model-check" >/dev/null 2>&1; then
+        "$ROOT/scripts/beside-cell.sh" "model-check" >&2 || true
+        return 1
+    fi
+    grids="$(find "${SDB_MODEL_CHECK_RUNS_DIR:-$ROOT/runs}" -maxdepth 2 -type d -name '*.running' 2>/dev/null \
+        | while read -r d; do
+            n="$(find "$d" -maxdepth 1 -type f -name 'res-*' 2>/dev/null | wc -l)"
+            [[ "$n" -gt 0 ]] && echo "$d"
+        done | paste -sd' ' -)"
+    if [[ -n "$grids" ]]; then
+        echo "[model-check] FATAL: refusing beside a running grid: $grids" >&2
+        return 1
+    fi
+    return 0
+}
+
 # R79-18: a settled canned usage series for the self-test: six equal
 # reads, the 30 s settle window at the live 5 s interval.
 settled_series() {
@@ -70,8 +102,12 @@ opencode_config_json() {
     python3 - "$1" "$2" <<'PY'
 import json, sys
 model_id, pin = sys.argv[1], sys.argv[2]
-cfg = {"providers": {"openrouter": {"models": {model_id: {
-    "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}}}
+cfg = {
+    "model": "openrouter/" + model_id,
+    "small_model": "openrouter/" + model_id,
+    "providers": {"openrouter": {"models": {model_id: {
+        "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}},
+}
 if pin:
     cfg["providers"]["openrouter"]["models"][model_id]["body"] = {
         "provider": {"only": [pin], "order": [pin]}}
@@ -86,7 +122,7 @@ usage() {
 
 mode=check
 model=""
-harness="${SDB_MODEL_CHECK_HARNESS:-omp}"
+harness="${SDB_MODEL_CHECK_HARNESS:-opencode}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --self-test) mode=self-test; shift ;;
@@ -123,6 +159,9 @@ if [[ "$mode" == "self-test" ]]; then
         trap 'rm -rf "${dir:-}"' EXIT
         export SDB_MODEL_CHECK_DIR="$dir/gates"
         export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:selftest"
+        # R82 F1: the default harness is opencode; the omp cases below are
+        # explicit, and record_path follows this local.
+        harness=omp
         mkdir -p "$SDB_MODEL_CHECK_DIR"
 
         # The snapshot rates for a fixture model (all four).
@@ -230,9 +269,10 @@ PY
         expect_fail() {
             local want="$1" name="$2"
             rc=0
-            out="$(SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
                 SDB_MODEL_CHECK_GENERATION_JSON="$dir/generation.json" \
-                "$ROOT/scripts/model-check.sh" "$name" 2>&1)" || rc=$?
+                "$ROOT/scripts/model-check.sh" --harness omp "$name" 2>&1)" || rc=$?
             [[ "$rc" -ne 0 ]] || {
                 echo "[self-test] $case_name passed unexpectedly: $out" >&2; exit 1; }
             grep -q "RESULT: FAIL" "$(record_path "$name")" || {
@@ -245,9 +285,10 @@ PY
         expect_pass() {
             local name="$1"
             rc=0
-            out="$(SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
                 SDB_MODEL_CHECK_GENERATION_JSON="$dir/generation.json" \
-                "$ROOT/scripts/model-check.sh" "$name" 2>&1)" || rc=$?
+                "$ROOT/scripts/model-check.sh" --harness omp "$name" 2>&1)" || rc=$?
             [[ "$rc" -eq 0 ]] || {
                 echo "[self-test] $name was refused: $out" >&2; exit 1; }
             grep -q '^RESULT: PASS$' "$(record_path "$name")" || {
@@ -404,7 +445,8 @@ PY
         expect_pass_oc() {
             local name="$1" rc=0 rec
             rec="$(oc_record "$name")"
-            out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.000015)" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -434,7 +476,8 @@ PY
             local db="$1" want="$2" name="$3" series="${4:-}" rc=0 rec
             rec="$(oc_record "$name")"
             [[ -n "$series" ]] || series="$(settled_series "${OC_BILL-0.000015}")"
-            out="$(SDB_MODEL_CHECK_OPENCODE_DB="$db" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_OPENCODE_DB="$db" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$series" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -487,6 +530,22 @@ JSON
         OC_BILL=0.000001 expect_fail_oc "$dir/oc-pass.db" "floor" \
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode bill below the floor fails"
+
+        case_name=opencode-other-model
+        make_oc_db "$dir/oc-other-model.db" openrouter 0.000015
+        python3 - "$dir/oc-other-model.db" <<'PY'
+import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+model = json.dumps({"id": "openai/gpt-6-luna", "providerID": "openrouter"})
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_selftest_title", model, 0.0, 0, 0, 0, 0, 0,
+             "succeeded", 3))
+con.commit()
+con.close()
+PY
+        expect_fail_oc "$dir/oc-other-model.db" "another model" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a small-model session fails the opencode check"
 
         case_name=opencode-zero-tokens
         make_oc_db "$dir/oc-zero-tokens.db" openrouter 0.000015 0 0
@@ -554,11 +613,32 @@ cfg = json.loads(sys.argv[1])
 assert "body" not in cfg["providers"]["openrouter"], cfg
 assert "body" not in cfg["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"], cfg
 PY
+        # R79-12: a model check beside a running sdb-* unit refuses and
+        # names the unit.
+        mkdir -p "$dir/fakebin" "$dir/empty-runs"
+        cat > "$dir/fakebin/systemctl" <<'EOF'
+#!/bin/sh
+echo "sdb-fake.service loaded active running fake cell"
+EOF
+        chmod +x "$dir/fakebin/systemctl"
+        rc=0
+        out="$(PATH="$dir/fakebin:$PATH" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" \
+            "$ROOT/scripts/model-check.sh" --harness omp "openrouter/openai/gpt-6-luna-pro" 2>&1)" \
+            || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a model check beside a fake unit was accepted" >&2
+            exit 1; }
+        grep -q 'sdb-fake.service' <<<"$out" || {
+            echo "[self-test] the refusal did not name the unit: $out" >&2
+            exit 1; }
+        echo "[self-test] a model check beside a running unit is refused"
+
         echo "[self-test] the opencode config carries the per-model pin"
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
             echo "[self-test] the slug is not z-ai-glm-5.3" >&2; exit 1; }
-        [[ "$("$ROOT/scripts/model-check.sh" --record openrouter/z-ai/glm-5.3)" == \
+        [[ "$("$ROOT/scripts/model-check.sh" --harness omp --record openrouter/z-ai/glm-5.3)" == \
             "$SDB_MODEL_CHECK_DIR/model-check-z-ai-glm-5.3.txt" ]] || {
             echo "[self-test] the record path is not the model-check slug" >&2; exit 1; }
         echo "[self-test] the slug and record path are stable"
@@ -570,6 +650,8 @@ PY
 fi
 
 [[ -n "$model" ]] || usage
+
+refuse_beside_running || exit 1
 
 id="${model#openrouter/}"
 wire="openrouter/$id"
@@ -1023,6 +1105,19 @@ for (data,) in con.execute(
         })
 reasons = []
 sent = "openrouter/" + model_id
+# R82 F2: the small model (title/summary) is the career model too; a
+# successful session that used another model is a fail.
+others = []
+for (sid, raw) in con.execute("select id, model from session_v2"):
+    try:
+        mm = json.loads(raw or "{}")
+    except Exception:
+        continue
+    mid = mm.get("id") or ""
+    if mid and mid.lower() != model_id.lower():
+        others.append("%s (%s)" % (mid, sid))
+if others:
+    reasons.append("another model in the session db: %s" % ", ".join(others))
 if served.lower() != model_id.lower():
     reasons.append("served %s, want %s" % (served or "(none)", model_id))
 if provider != "openrouter":

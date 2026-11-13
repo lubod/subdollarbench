@@ -97,8 +97,14 @@ fn r79_f1_run_dir_holds_no_key() {
     let workdir = base.join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
     let key = "sk-r79-sentinel-key";
-    // The key reaches the container through the -e env only; no mount arg
-    // may carry it.
+    // R79-11: the runner's real key argument is the only place the key
+    // appears; the mount args never carry it.
+    let env = OpenCodeRunner::key_env_args(key);
+    assert_eq!(
+        env,
+        vec!["-e".to_string(), format!("OPENROUTER_API_KEY={key}")],
+        "the key's only docker-run argument"
+    );
     let args = OpenCodeRunner::opencode_mount_args(&workdir);
     assert!(
         !args.iter().any(|a| a.contains(key)),
@@ -1287,4 +1293,216 @@ fn test_opencode_runner_fake_docker_scenarios() {
         "driver must report its scenarios; got:\n{stdout}\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// R82 F2/F3: the stub-backed session helpers. The stub is the local
+/// OpenRouter chat-completions server (`scripts/opencode-stub.py`); the
+/// container uses `--network=host`, so `127.0.0.1:<port>` is the host's
+/// stub. Nothing is billed and no network is touched.
+fn r82_free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+struct R82Stub(std::process::Child);
+impl Drop for R82Stub {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn r82_start_stub(case: &str, log: &std::path::Path) -> (R82Stub, u16) {
+    let port = r82_free_port();
+    let stub = crate::config::get_repo_root().join("scripts/opencode-stub.py");
+    let child = std::process::Command::new("python3")
+        .arg(&stub)
+        .arg(port.to_string())
+        .arg(log)
+        .arg(case)
+        .spawn()
+        .expect("start the stub");
+    let stub = R82Stub(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (stub, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the stub did not start on port {port}");
+}
+
+fn r82_config(port: u16, bare: &str) -> String {
+    // R82-1: the test runs the config the runner actually sends. The
+    // stub's baseURL goes in the production plural `providers` schema's
+    // `settings` (round 79's path), so the per-model pin and the effort
+    // variants are the ones under test.
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(&OpenCodeRunner::variant_config_json(bare))
+            .expect("the runner config");
+    cfg["providers"]["openrouter"]["settings"] = serde_json::json!({
+        "baseURL": format!("http://127.0.0.1:{port}")
+    });
+    cfg.to_string()
+}
+
+fn r82_run_opencode(
+    base: &std::path::Path,
+    cfg: &str,
+    model_arg: &str,
+    session: &str,
+    title: bool,
+) {
+    let ws = base.join("ws");
+    let cfg_dir = base.join("cfg");
+    let data = base.join("data");
+    for d in [&ws, &cfg_dir, &data] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--network=host".into(),
+        "-v".into(),
+        format!("{}:/workspace", ws.display()),
+        "-v".into(),
+        format!("{}:/home/ubuntu/.config/opencode", cfg_dir.display()),
+        "-v".into(),
+        format!("{}:/home/ubuntu/.local/share/opencode", data.display()),
+        "-w".into(),
+        "/workspace".into(),
+        "-e".into(),
+        "HOME=/home/ubuntu".into(),
+        "-e".into(),
+        "OPENROUTER_API_KEY=dummy".into(),
+        "-e".into(),
+        format!("OPENCODE_CONFIG_CONTENT={cfg}"),
+        "subdollar-sandbox".into(),
+        "opencode".into(),
+        "run".into(),
+        "--standalone".into(),
+        "--format".into(),
+        "json".into(),
+        "--session".into(),
+        session.into(),
+        "-m".into(),
+        model_arg.into(),
+        "--auto".into(),
+    ];
+    if title {
+        args.push("--title".into());
+        args.push("sdb-r82-test".into());
+    }
+    args.push("--".into());
+    args.push(
+        "Use the shell tool once: run `echo probe-forty-two`, then reply with its output.".into(),
+    );
+    let out = std::process::Command::new("docker")
+        .args(&args)
+        .output()
+        .expect("docker run opencode");
+    assert!(
+        out.status.success(),
+        "opencode failed: {}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn r82_bodies(log: &std::path::Path) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(body) = v.get("body").and_then(|b| b.as_str()) else {
+            continue;
+        };
+        if let Ok(b) = serde_json::from_str::<serde_json::Value>(body) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// R82 F2: every request of a two-turn session (with and without
+/// `--title`) carries the career model and its provider pin. The stub's
+/// request log is the evidence; no network is used.
+#[test]
+fn r82_f2_one_model_per_session() {
+    let base = r79_temp_dir("r82-f2");
+    let model = "openrouter/inclusionai/ling-3.1-flash";
+    let bare = "inclusionai/ling-3.1-flash";
+    let pin = crate::cost::calculator::provider_for_model(bare).expect("the model's pin");
+    for title in [false, true] {
+        let tag = if title { "title" } else { "no-title" };
+        let log = base.join(format!("requests-{tag}.jsonl"));
+        let (_stub, port) = r82_start_stub("tool", &log);
+        let cfg = r82_config(port, bare);
+        r82_run_opencode(
+            &base,
+            &cfg,
+            &format!("{model}#low"),
+            &format!("ses_r82_f2_{tag}"),
+            title,
+        );
+        let bodies = r82_bodies(&log);
+        assert!(!bodies.is_empty(), "{tag}: the stub saw no request");
+        for body in &bodies {
+            assert_eq!(
+                body.get("model").and_then(|m| m.as_str()),
+                Some(bare),
+                "{tag}: a request used another model: {body}"
+            );
+            assert_eq!(
+                body.pointer("/provider/only")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                Some(vec![pin]),
+                "{tag}: a request lacks the {pin} pin: {body}"
+            );
+            assert_eq!(
+                body.pointer("/provider/order")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                Some(vec![pin]),
+                "{tag}: a request lacks the {pin} order: {body}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R82 F3: `#low` and `#high` reach the request body as
+/// `reasoning.effort`; the stub's log is the evidence.
+#[test]
+fn r82_f3_effort_reaches_the_request() {
+    let base = r79_temp_dir("r82-f3");
+    let model = "openrouter/inclusionai/ling-3.1-flash";
+    let bare = "inclusionai/ling-3.1-flash";
+    for effort in ["low", "high"] {
+        let log = base.join(format!("requests-{effort}.jsonl"));
+        let (_stub, port) = r82_start_stub("tool", &log);
+        let cfg = r82_config(port, bare);
+        r82_run_opencode(
+            &base,
+            &cfg,
+            &format!("{model}#{effort}"),
+            &format!("ses_r82_f3_{effort}"),
+            false,
+        );
+        let bodies = r82_bodies(&log);
+        assert!(!bodies.is_empty(), "{effort}: the stub saw no request");
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.pointer("/reasoning/effort").and_then(|v| v.as_str()) == Some(effort)),
+            "{effort}: no request body carries reasoning.effort: {bodies:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
 }

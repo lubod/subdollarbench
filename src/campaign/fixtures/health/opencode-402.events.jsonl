@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1794574666365,"sessionID":"ses_capture_402","part":{"id":"prt_1d4fc4a7d001cun8GhaeQ2X7f5","sessionID":"ses_capture_402","messageID":"msg_1d4fc4a60001ml94dmVZFZSZVM","type":"step-start"}}
+{"type":"error","timestamp":1794574666367,"sessionID":"ses_capture_402","error":{"type":"provider.quota","message":"insufficient credits","status":402,"response":{"body":"{\"error\":{\"message\":\"insufficient credits\",\"code\":402}}"}}}
