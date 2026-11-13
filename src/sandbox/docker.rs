@@ -2865,11 +2865,14 @@ mod live_docker_cov_tests {
         let base = std::env::temp_dir().join(format!("covtest_rustws_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).expect("create base");
+        assert!(SandboxManager::rust_workspace_violation(&base)
+            .expect("no Cargo.toml")
+            .contains("Cargo.toml"));
         let cargo = "[package]\nname = \"sdb\"\nversion = \"0.1.0\"\n\n\
                      [dependencies]\n\n[dev-dependencies]\n";
         fs::write(base.join("Cargo.toml"), cargo).expect("write cargo");
         assert!(SandboxManager::rust_workspace_violation(&base)
-            .expect("no Cargo.toml")
+            .expect("no start.sh")
             .contains("start.sh"));
         fs::write(
             base.join("start.sh"),
