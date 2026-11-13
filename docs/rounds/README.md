@@ -79,5 +79,5 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [78](78.md) | The board shows each career's language and test coverage; parked display findings (display only) | draft |
 | [79](79.md) | The opencode candidate harness is fit for a graded comparison: no host mounts, health and faults, the model check, hidden comparison cells | merged |
 | [80](80.md) | A narration voice cloned from the operator's own recording: the reading text, the recording check, resumable narration, a pronunciation list (outside the graded code) | merged |
-| [81](81.md) | The `.47` sandbox: Rust only (operator, 2026-11-13), no package registries, the harness builds and rejects a non-Rust server, rules `.47` | open |
+| [81](81.md) | The `.47` sandbox: Rust only (operator, 2026-11-13), no package registries, the harness builds and rejects a non-Rust server, rules `.47` | merged |
 | [82](82.md) | opencode is the graded harness: the default, one model per session, effort checked, the carried R79 items | draft |
