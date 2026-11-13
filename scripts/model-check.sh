@@ -531,6 +531,22 @@ JSON
             "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode bill below the floor fails"
 
+        case_name=opencode-other-model
+        make_oc_db "$dir/oc-other-model.db" openrouter 0.000015
+        python3 - "$dir/oc-other-model.db" <<'PY'
+import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+model = json.dumps({"id": "openai/gpt-6-luna", "providerID": "openrouter"})
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_selftest_title", model, 0.0, 0, 0, 0, 0, 0,
+             "succeeded", 3))
+con.commit()
+con.close()
+PY
+        expect_fail_oc "$dir/oc-other-model.db" "another model" \
+            "openrouter/openai/gpt-6-luna-pro"
+        echo "[self-test] a small-model session fails the opencode check"
+
         case_name=opencode-zero-tokens
         make_oc_db "$dir/oc-zero-tokens.db" openrouter 0.000015 0 0
         expect_fail_oc "$dir/oc-zero-tokens.db" "the positive session has 0 tokens" \
@@ -1089,6 +1105,19 @@ for (data,) in con.execute(
         })
 reasons = []
 sent = "openrouter/" + model_id
+# R82 F2: the small model (title/summary) is the career model too; a
+# successful session that used another model is a fail.
+others = []
+for (sid, raw) in con.execute("select id, model from session_v2"):
+    try:
+        mm = json.loads(raw or "{}")
+    except Exception:
+        continue
+    mid = mm.get("id") or ""
+    if mid and mid.lower() != model_id.lower():
+        others.append("%s (%s)" % (mid, sid))
+if others:
+    reasons.append("another model in the session db: %s" % ", ".join(others))
 if served.lower() != model_id.lower():
     reasons.append("served %s, want %s" % (served or "(none)", model_id))
 if provider != "openrouter":
