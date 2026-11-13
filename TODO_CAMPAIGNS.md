@@ -311,6 +311,17 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     bar. **The language is Rust, not Go** (operator, 2026-11-13: "i have
     changed my mind, i want to use rust"); stdlib only, no crates, the
     harness builds with `cargo build --release --offline --locked`.
+    **The `.47` line-up** (operator, 2026-11-13: Muse Ember "replaces
+    ling", after the reviewer's look at OpenRouter's models and rankings,
+    usage to 2026-11-12): deepseek-v4.1-flash-1017, hy4, glm-5.3-flash,
+    gpt-6-luna, gpt-6-luna-pro, claude-haiku-5.5, mimo-v2.6-flash,
+    qwen3.8-flash, minimax-m3.1-flash and **meta/muse-ember** (new; $0.10
+    / $0.50 on the `meta` endpoint; it passed the round 79 opencode check
+    and pin probe). **ling-3.1-flash is out** (low usage, one small
+    provider, 0-3 points per `.46` phase). Gemini 3.5 Flash-Lite was
+    proposed for the Google gap and not taken. Muse Ember needs a price
+    snapshot row (pin `meta`) before its model check.
+
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
     "start <model>" (AGENTS.md, "Paid cells and services").
