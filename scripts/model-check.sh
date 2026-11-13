@@ -56,6 +56,38 @@ record_path() {
     printf '%s/model-check-%s%s.txt' "$(record_dir)" "$prefix" "$(model_slug "$1")"
 }
 
+# R79-12: the check spends the same key the cells and grids use, so it
+# refuses while any of them runs and names it. A detached cell/grid/bar
+# is an `sdb-*` user unit; a foreground cell holds a campaign lock in the
+# cells' runs dir; a foreground grid holds a reservation in its ledger's
+# `.running` dir.
+refuse_beside_running() {
+    local units grids
+    # The canned self-test cases drive the check itself, not the live
+    # environment; the refusal has its own case.
+    [[ "${SDB_MODEL_CHECK_SKIP_BESIDE:-0}" == "1" ]] && return 0
+    units="$(systemctl --user list-units 'sdb-*' --state=running --no-legend --no-pager 2>/dev/null \
+        | awk '{print $1}' | paste -sd' ' -)"
+    if [[ -n "$units" ]]; then
+        echo "[model-check] FATAL: refusing beside running sdb-* units: $units" >&2
+        return 1
+    fi
+    if ! "$ROOT/scripts/beside-cell.sh" "model-check" >/dev/null 2>&1; then
+        "$ROOT/scripts/beside-cell.sh" "model-check" >&2 || true
+        return 1
+    fi
+    grids="$(find "${SDB_MODEL_CHECK_RUNS_DIR:-$ROOT/runs}" -maxdepth 2 -type d -name '*.running' 2>/dev/null \
+        | while read -r d; do
+            n="$(find "$d" -maxdepth 1 -type f -name 'res-*' 2>/dev/null | wc -l)"
+            [[ "$n" -gt 0 ]] && echo "$d"
+        done | paste -sd' ' -)"
+    if [[ -n "$grids" ]]; then
+        echo "[model-check] FATAL: refusing beside a running grid: $grids" >&2
+        return 1
+    fi
+    return 0
+}
+
 # R79-18: a settled canned usage series for the self-test: six equal
 # reads, the 30 s settle window at the live 5 s interval.
 settled_series() {
@@ -237,7 +269,8 @@ PY
         expect_fail() {
             local want="$1" name="$2"
             rc=0
-            out="$(SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
                 SDB_MODEL_CHECK_GENERATION_JSON="$dir/generation.json" \
                 "$ROOT/scripts/model-check.sh" --harness omp "$name" 2>&1)" || rc=$?
             [[ "$rc" -ne 0 ]] || {
@@ -252,7 +285,8 @@ PY
         expect_pass() {
             local name="$1"
             rc=0
-            out="$(SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_SESSION_JSON="$dir/session.jsonl" \
                 SDB_MODEL_CHECK_GENERATION_JSON="$dir/generation.json" \
                 "$ROOT/scripts/model-check.sh" --harness omp "$name" 2>&1)" || rc=$?
             [[ "$rc" -eq 0 ]] || {
@@ -411,7 +445,8 @@ PY
         expect_pass_oc() {
             local name="$1" rc=0 rec
             rec="$(oc_record "$name")"
-            out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.000015)" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -441,7 +476,8 @@ PY
             local db="$1" want="$2" name="$3" series="${4:-}" rc=0 rec
             rec="$(oc_record "$name")"
             [[ -n "$series" ]] || series="$(settled_series "${OC_BILL-0.000015}")"
-            out="$(SDB_MODEL_CHECK_OPENCODE_DB="$db" \
+            out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+                SDB_MODEL_CHECK_OPENCODE_DB="$db" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$series" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -561,6 +597,27 @@ cfg = json.loads(sys.argv[1])
 assert "body" not in cfg["providers"]["openrouter"], cfg
 assert "body" not in cfg["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"], cfg
 PY
+        # R79-12: a model check beside a running sdb-* unit refuses and
+        # names the unit.
+        mkdir -p "$dir/fakebin" "$dir/empty-runs"
+        cat > "$dir/fakebin/systemctl" <<'EOF'
+#!/bin/sh
+echo "sdb-fake.service loaded active running fake cell"
+EOF
+        chmod +x "$dir/fakebin/systemctl"
+        rc=0
+        out="$(PATH="$dir/fakebin:$PATH" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" \
+            "$ROOT/scripts/model-check.sh" --harness omp "openrouter/openai/gpt-6-luna-pro" 2>&1)" \
+            || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a model check beside a fake unit was accepted" >&2
+            exit 1; }
+        grep -q 'sdb-fake.service' <<<"$out" || {
+            echo "[self-test] the refusal did not name the unit: $out" >&2
+            exit 1; }
+        echo "[self-test] a model check beside a running unit is refused"
+
         echo "[self-test] the opencode config carries the per-model pin"
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
@@ -577,6 +634,8 @@ PY
 fi
 
 [[ -n "$model" ]] || usage
+
+refuse_beside_running || exit 1
 
 id="${model#openrouter/}"
 wire="openrouter/$id"

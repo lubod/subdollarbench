@@ -97,8 +97,14 @@ fn r79_f1_run_dir_holds_no_key() {
     let workdir = base.join("workspace");
     std::fs::create_dir_all(&workdir).unwrap();
     let key = "sk-r79-sentinel-key";
-    // The key reaches the container through the -e env only; no mount arg
-    // may carry it.
+    // R79-11: the runner's real key argument is the only place the key
+    // appears; the mount args never carry it.
+    let env = OpenCodeRunner::key_env_args(key);
+    assert_eq!(
+        env,
+        vec!["-e".to_string(), format!("OPENROUTER_API_KEY={key}")],
+        "the key's only docker-run argument"
+    );
     let args = OpenCodeRunner::opencode_mount_args(&workdir);
     assert!(
         !args.iter().any(|a| a.contains(key)),
