@@ -15,6 +15,19 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-13.47`: rounds 81 and 82 (one .47; round 82 amends this
+///   entry instead of bumping). The sandbox is Rust-only: the image pins
+///   Rust 1.100.0 (rustup 1.29.3, llvm-tools-preview) and drops the other
+///   language toolchains; the egress allowlist keeps only the model API;
+///   the harness builds `cargo build --release --offline --locked` before
+///   each start, requires a dependency-free `Cargo.toml` and a
+///   rustc-built binary under `target/release/`, rejects a python3/node
+///   launch tree with `[LANG]`, and measures Rust line coverage instead
+///   of Go or a self-report. Why: the operator's 2026-11-11 "stop ling"
+///   and `.47` decisions, the 2026-11-13 change to Rust, and DECISIONS
+///   #31 (opencode is the `.47` harness). Score impact: every career
+///   restarts at phase 1; the `.46` board stays unpublished and ling's
+///   `.46` phases are void; the `.47` board starts empty.
 /// - `2026-11-09.46`: round 75. The reference server's port is fixed in
 ///   the prompt (round 74 R74-1: `ref-sql` is on 5480, not the lane's
 ///   port), the sandbox omp is pinned to the version F2 picks, and the
@@ -824,7 +837,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-09.46";
+pub const RULES_VERSION: &str = "2026-11-13.47";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.

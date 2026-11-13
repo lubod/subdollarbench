@@ -462,7 +462,7 @@ pub enum Commands {
     /// R45: score a finished sdb-sql workspace against the SQLite reference
     /// (the perf axis; all five workloads, printed as 1.0 = the reference)
     Perfscore {
-        /// Finished workspace with start.sh or a Dockerfile
+        /// Finished workspace with a start.sh
         #[arg(long)]
         workspace: String,
 

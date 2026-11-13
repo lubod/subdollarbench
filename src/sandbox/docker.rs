@@ -1,29 +1,17 @@
 use anyhow::{anyhow, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
-/// Egress allowlist for the per-run allowlist forward proxy. The agent NEEDS
-/// openrouter (model API) + language registries (builds). github.com is
-/// deliberately allowed (frameworks live in git; the tradeoff is documented
-/// in methodology). Everything else 403s. Raw sockets bypass proxy env
-/// (documented residual); the API key in-container is protected by channel
-/// blocking, not by secrecy.
-pub const EGRESS_ALLOWLIST: &[&str] = &[
-    "openrouter.ai",
-    "api.openrouter.ai",
-    "crates.io",
-    "static.crates.io",
-    "proxy.golang.org",
-    "registry.npmjs.org",
-    "pypi.org",
-    "files.pythonhosted.org",
-    "github.com",
-    "objects.githubusercontent.com",
-    "codeload.github.com",
-];
+/// Egress allowlist for the per-run allowlist forward proxy. R81 F2: the
+/// `.47` sandbox keeps the model API only. The registries (crates.io,
+/// Go, npm, PyPI) and GitHub are gone with the other toolchains: a Rust
+/// candidate is standard library only and builds offline. Everything
+/// else 403s. Raw sockets bypass proxy env (documented residual); the
+/// API key in-container is protected by channel blocking, not by secrecy.
+pub const EGRESS_ALLOWLIST: &[&str] = &["openrouter.ai", "api.openrouter.ai"];
 
 /// Process-wide mutex serializing Docker network create/prune.
 /// Parallel workers creating networks simultaneously trigger pool pressure;
@@ -1045,190 +1033,181 @@ impl SandboxManager {
         }
     }
 
-    fn find_go_main_recursive(dir: &Path) -> Option<PathBuf> {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("go") {
-                    if let Ok(content) = fs::read_to_string(&p) {
-                        if content.contains("package main") && content.contains("func main()") {
-                            return Some(p);
-                        }
-                    }
-                } else if p.is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.starts_with('.')
-                        && name != "target"
-                        && name != "node_modules"
-                        && name != "vendor"
-                    {
-                        if let Some(found) = Self::find_go_main_recursive(&p) {
-                            return Some(found);
-                        }
-                    }
+    /// R81 F3: the `.47` workspace contract, checked before the build so
+    /// a non-Rust workspace gets the `[LANG]` line, not a cargo error.
+    /// The offline build is the hard enforcement; this reads the manifest
+    /// for the clear message and rejects the Dockerfile entrypoint and a
+    /// start.sh that does not run the built binary.
+    pub fn rust_workspace_violation(workdir: &Path) -> Option<String> {
+        let cargo = workdir.join("Cargo.toml");
+        if !cargo.is_file() {
+            return Some("no Cargo.toml at the workspace root".to_string());
+        }
+        let Ok(text) = fs::read_to_string(&cargo) else {
+            return Some("Cargo.toml is not readable".to_string());
+        };
+        if let Some(why) = Self::cargo_dependency_violation(&text) {
+            return Some(why);
+        }
+        let start = workdir.join("start.sh");
+        if !start.is_file() {
+            return Some(
+                "./start.sh is missing (the Dockerfile entrypoint is not graded)".to_string(),
+            );
+        }
+        let Ok(script) = fs::read_to_string(&start) else {
+            return Some("./start.sh is not readable".to_string());
+        };
+        if !script.contains("target/release") {
+            return Some("./start.sh does not start the binary under target/release/".to_string());
+        }
+        if !script.contains("exec") {
+            return Some("./start.sh does not exec the server".to_string());
+        }
+        None
+    }
+
+    /// The manifest half of [`Self::rust_workspace_violation`]: every
+    /// dependency table must be empty or absent, and `[patch]`/`[replace]`
+    /// are not allowed. A line-based read is enough for the message; the
+    /// offline build is the hard enforcement.
+    pub fn cargo_dependency_violation(text: &str) -> Option<String> {
+        let is_dep = |p: &str| {
+            matches!(
+                p,
+                "dependencies" | "dev-dependencies" | "build-dependencies"
+            )
+        };
+        let parts = |section: &str| -> Vec<String> {
+            section
+                .split('.')
+                .map(|p| p.trim().trim_matches(|c| c == '\'' || c == '"').to_string())
+                .collect()
+        };
+        let mut section = String::new();
+        for raw in text.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                section = line[1..line.len() - 1].trim().to_string();
+                let fields = parts(&section);
+                if fields.iter().any(|p| p == "patch" || p == "replace") {
+                    return Some(format!("Cargo.toml has a [{section}] table"));
                 }
+                // `[dependencies]` itself is allowed when empty; a nested
+                // table (`[dependencies.foo]`, `[workspace.dependencies]`,
+                // `[target.'cfg(unix)'.dependencies]`) declares one.
+                if fields.len() > 1 && fields.iter().any(|p| is_dep(p)) {
+                    return Some(format!(
+                        "Cargo.toml declares a dependency table [{section}]"
+                    ));
+                }
+                continue;
+            }
+            let fields = parts(&section);
+            if fields.iter().any(|p| is_dep(p)) && line.contains('=') {
+                return Some(format!("Cargo.toml declares dependencies in [{section}]"));
             }
         }
         None
     }
 
-    /// Recursively find a file by name within directory
-    fn find_file_recursive(dir: &Path, filename: &str) -> Option<PathBuf> {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(filename) {
-                    return Some(path);
-                } else if path.is_dir() {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with('.') || name == "target" || name == "node_modules" {
-                            continue;
-                        }
-                    }
-                    if let Some(found) = Self::find_file_recursive(&path, filename) {
-                        return Some(found);
-                    }
-                }
-            }
+    /// The first compiler error and a few following lines, for the graded
+    /// build-failure line. Falls back to the output tail.
+    pub fn first_build_error(text: &str) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        if let Some(i) = lines.iter().position(|l| {
+            let t = l.trim_start();
+            t.starts_with("error[") || t.starts_with("error:")
+        }) {
+            return lines[i..(i + 6).min(lines.len())].join("\n");
         }
-        None
+        let start = lines.len().saturating_sub(8);
+        lines[start..].join("\n")
     }
 
-    /// Recursively check if directory contains a runnable candidate.
-    /// If found in a subdirectory, creates a forwarding root start.sh.
+    /// R81 F3: the `.47` entrypoint is `./start.sh` only. A Dockerfile
+    /// would bypass the Rust rule, so it is not a runnable candidate.
     pub fn ensure_runnable_candidate(&self, workdir: &Path) -> Result<bool> {
-        if !workdir.exists() {
-            return Ok(false);
-        }
+        Ok(workdir.is_dir() && workdir.join("start.sh").is_file())
+    }
 
-        let root_dockerfile = workdir.join("Dockerfile");
-        if root_dockerfile.exists() {
-            return Ok(true);
-        }
+    /// R81 F3: the harness builds the candidate before every start. A
+    /// Rust build is too slow to race the 25 s start-up limit. The limit
+    /// is chosen in the round notes from a 10,000-line crate's measured
+    /// release build under the sandbox's 2 CPU / 2 GiB.
+    pub const RUST_BUILD_TIMEOUT_SECS: u64 = 300;
 
-        let root_start_sh = workdir.join("start.sh");
-        if root_start_sh.exists() {
-            return Ok(true);
+    pub fn build_rust_candidate(&self, dir: &Path, timeout_secs: u64) -> Result<(), String> {
+        let (ok, timed_out, text) = self
+            .run_workspace_command_capped(
+                dir,
+                "cargo build --release --offline --locked 2>&1",
+                timeout_secs,
+            )
+            .map_err(|e| format!("[BUILD] the release build could not run: {e}"))?;
+        if timed_out {
+            return Err(format!(
+                "[BUILD] the release build exceeded its {timeout_secs} s limit"
+            ));
         }
-
-        // Search for Dockerfile in subdirectories
-        if let Some(found_df) = Self::find_file_recursive(workdir, "Dockerfile") {
-            if found_df != root_dockerfile {
-                info!(
-                    "Found nested Dockerfile at {:?}. Hoisting to root workspace...",
-                    found_df
-                );
-                let _ = fs::copy(&found_df, &root_dockerfile);
-                return Ok(true);
-            }
+        if !ok {
+            return Err(format!(
+                "[BUILD] the release build failed: {}",
+                Self::first_build_error(&text)
+            ));
         }
+        Ok(())
+    }
 
-        // Search for start.sh in subdirectories
-        if let Some(found_sh) = Self::find_file_recursive(workdir, "start.sh") {
-            if found_sh != root_start_sh {
-                info!(
-                    "Found nested start.sh at {:?}. Creating root bridge start.sh...",
-                    found_sh
-                );
-                if let Ok(rel_path) = found_sh.strip_prefix(workdir) {
-                    let parent_dir = rel_path.parent().unwrap_or(Path::new(""));
-                    let script_name = rel_path.file_name().unwrap_or_default().to_string_lossy();
-                    let bridge_content = format!(
-                        "#!/bin/bash\ncd /workspace/{}\nchmod +x ./{}\nexec ./{}\n",
-                        parent_dir.display(),
-                        script_name,
-                        script_name
-                    );
-                    let _ = fs::write(&root_start_sh, bridge_content);
-                    return Ok(true);
-                }
-            }
-        }
-
-        // Search for any Go file with 'package main' and 'func main()'
-        if let Some(main_go) = Self::find_go_main_recursive(workdir) {
-            if let Ok(rel) = main_go.strip_prefix(workdir) {
-                let parent = rel.parent().unwrap_or(Path::new(""));
-                let cd_part = if parent.as_os_str().is_empty() {
-                    "".to_string()
-                } else {
-                    format!("cd /workspace/{}\n", parent.display())
-                };
-                let bridge = format!("#!/bin/bash\n{}exec go run .\n", cd_part);
-                info!(
-                    "Found Go main at {:?}. Synthesizing root start.sh...",
-                    main_go
-                );
-                let _ = fs::write(&root_start_sh, bridge);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&root_start_sh, fs::Permissions::from_mode(0o755));
-                }
-                return Ok(true);
-            }
-        }
-
-        // Auto-detect common language entrypoints and create default start.sh
-        let entrypoint_patterns: &[(&str, &str)] = &[
-            ("main.py", "#!/bin/bash\nexec python3 main.py\n"),
-            ("app.py", "#!/bin/bash\nexec python3 app.py\n"),
-            ("server.py", "#!/bin/bash\nexec python3 server.py\n"),
-            ("main.go", "#!/bin/bash\nexec go run main.go\n"),
-            ("Cargo.toml", "#!/bin/bash\nexec cargo run --release\n"),
-            ("index.js", "#!/bin/bash\nexec node index.js\n"),
-            ("server.js", "#!/bin/bash\nexec node server.js\n"),
-            ("main.js", "#!/bin/bash\nexec node main.js\n"),
+    /// R81 F3: the Rust rule on the running server. `harness_roots` are
+    /// the PIDs the runner started for the agent harness (excluded with
+    /// their descendants); the candidate container normally has none,
+    /// because the harness runs in its own container, and the F3 fixture
+    /// proves the exclusion. A violation is a graded ticket failure.
+    pub fn check_rust_server_processes(
+        &self,
+        port: u16,
+        harness_roots: &[u32],
+    ) -> Result<(), String> {
+        let script = include_str!("docker/lang_check.sh");
+        // Run as the container user, the same user start.sh runs as: the
+        // kernel's ptrace check lets a process read its own UID's
+        // /proc/<pid>/{exe,fd}, and Docker drops CAP_SYS_PTRACE, so a
+        // root pass could not read the candidate's ubuntu processes.
+        let mut args: Vec<String> = vec![
+            "exec".to_string(),
+            self.candidate_container_name(),
+            "bash".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            "sdb-lang".to_string(),
+            port.to_string(),
         ];
-
-        for (entry_file, start_content) in entrypoint_patterns {
-            if workdir.join(entry_file).exists() {
-                info!(
-                    "Auto-detected entrypoint '{}'. Creating default start.sh...",
-                    entry_file
-                );
-                let _ = fs::write(&root_start_sh, start_content);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&root_start_sh, fs::Permissions::from_mode(0o755));
-                }
-                return Ok(true);
-            }
-            if let Some(found) = Self::find_file_recursive(workdir, entry_file) {
-                if let Ok(rel_path) = found.strip_prefix(workdir) {
-                    let parent_dir = rel_path.parent().unwrap_or(Path::new(""));
-                    let file_name = rel_path.file_name().unwrap_or_default().to_string_lossy();
-                    let cd_part = if parent_dir.as_os_str().is_empty() {
-                        "".to_string()
-                    } else {
-                        format!("cd /workspace/{}\n", parent_dir.display())
-                    };
-                    let run_cmd = match file_name.as_ref() {
-                        "Cargo.toml" => "exec cargo run --release\n",
-                        f if f.ends_with(".py") => "exec python3 main.py\n",
-                        f if f.ends_with(".go") => "exec go run main.go\n",
-                        f if f.ends_with(".js") => "exec node main.js\n",
-                        _ => "exec ./start.sh\n",
-                    };
-                    let bridge = format!("#!/bin/bash\n{}{}", cd_part, run_cmd);
-                    info!(
-                        "Found nested entrypoint '{}' at {:?}. Creating root start.sh...",
-                        entry_file, found
-                    );
-                    let _ = fs::write(&root_start_sh, bridge);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ =
-                            fs::set_permissions(&root_start_sh, fs::Permissions::from_mode(0o755));
-                    }
-                    return Ok(true);
-                }
-            }
+        for pid in harness_roots {
+            args.push(pid.to_string());
         }
-
-        Ok(false)
+        let out = Command::new("docker")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("docker exec: {e}"))?;
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        if !out.status.success() {
+            return Err(format!("the language check could not run: {}", text.trim()));
+        }
+        if let Some(line) = text.lines().find(|l| l.starts_with("SDB-LANG-FAIL ")) {
+            return Err(line.trim_start_matches("SDB-LANG-FAIL ").to_string());
+        }
+        if text.lines().any(|l| l.trim() == "SDB-LANG-OK") {
+            return Ok(());
+        }
+        Err(format!(
+            "the language check printed no verdict: {}",
+            text.trim()
+        ))
     }
 
     /// Start the candidate server container with resource limits
@@ -1311,30 +1290,6 @@ impl SandboxManager {
         )
     }
 
-    /// The image's CMD as argv (`docker image inspect --format '{{json
-    /// .Config.Cmd}}'`), empty when the image has none (an ENTRYPOINT-only
-    /// image: the launch args then become its argv). Reading the *effective*
-    /// CMD matters because it may be inherited from the base image (e.g.
-    /// node's `["node"]` under its entrypoint).
-    fn image_cmd(image: &str) -> Vec<String> {
-        let out = Command::new("docker")
-            .args([
-                "image",
-                "inspect",
-                image,
-                "--format",
-                "{{json .Config.Cmd}}",
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                let body = String::from_utf8_lossy(&o.stdout);
-                serde_json::from_str::<Vec<String>>(body.trim()).unwrap_or_default()
-            }
-            _ => Vec::new(),
-        }
-    }
-
     fn candidate_extras_args(extras: &CandidateRunExtras) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(set) = &extras.cpuset {
@@ -1391,104 +1346,17 @@ impl SandboxManager {
         let port_tcp = format!("127.0.0.1:{}:{}", port, port);
         let port_udp = format!("127.0.0.1:{}:{}/udp", port, port);
 
-        // CASE A: Candidate provided their own Dockerfile
-        let dockerfile = canonical_workdir.join("Dockerfile");
-        if dockerfile.exists() {
-            info!("Candidate provided custom Dockerfile. Building image...");
-            let image_tag = format!("subdollar-candidate-{}", self.instance_id);
-            let build_res = Command::new("timeout")
-                .args(["120", "docker", "build", "-t", &image_tag, "."])
-                .current_dir(&canonical_workdir)
-                .output();
-
-            match build_res {
-                Ok(out) if out.status.success() => {
-                    info!("Custom Dockerfile build succeeded. Running container...");
-                    let mut args: Vec<String> = vec![
-                        "run".into(),
-                        "-d".into(),
-                        "--label".into(),
-                        format!("sdb.run={}", self.instance_id),
-                        "--label".into(),
-                        "sdb.role=candidate".into(),
-                        "--name".into(),
-                        name.clone(),
-                        "--memory=2g".into(),
-                        "--cpus=2.0".into(),
-                        "--pids-limit=256".into(),
-                    ];
-                    args.extend(Self::candidate_extras_args(extras));
-                    args.extend([
-                        "-p".into(),
-                        port_tcp.clone(),
-                        "-p".into(),
-                        port_udp.clone(),
-                        image_tag.clone(),
-                    ]);
-                    // `docker run <image> <argv>` runs `argv` *instead of*
-                    // the image's CMD, so pass the effective CMD followed by
-                    // the launch flags: an exec-form CMD (or a shell-form
-                    // one, which ignores trailing argv) receives them beside
-                    // its own command, and an ENTRYPOINT-only image gets
-                    // them as argv. Appending to Entrypoint instead would
-                    // replace an *inherited* CMD (node:20's entrypoint would
-                    // run with no `node`).
-                    let mut argv = Self::image_cmd(&image_tag);
-                    argv.extend(extras.launch_args.iter().cloned());
-                    if !argv.is_empty() {
-                        args.extend(argv);
-                    }
-                    let run_res = Command::new("docker").args(&args).output();
-                    match run_res {
-                        Ok(run_out) if run_out.status.success() => {}
-                        Ok(run_out) => {
-                            // Was warn + Ok(()): swallowed launch faults made
-                            // the caller record a model 0% instead of an
-                            // infra-error (indistinguishable verdicts).
-                            return Err(anyhow!(
-                                "candidate container failed to start: {}",
-                                String::from_utf8_lossy(&run_out.stderr)
-                            ));
-                        }
-                        Err(e) => {
-                            return Err(anyhow!("candidate container spawn failed: {e}"));
-                        }
-                    }
-                    return Ok(());
-                }
-                Ok(out) => {
-                    warn!(
-                        "Candidate Dockerfile build failed: {}. Falling back to start.sh...",
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to execute docker build: {}. Falling back to start.sh...",
-                        e
-                    );
-                }
-            }
-        }
-
-        // CASE B: Standard Sandbox with start.sh
+        // R81 F3: `./start.sh` is the only entrypoint. The Dockerfile
+        // path is gone (a custom image would bypass the Rust rule), and
+        // so is the language auto-detection: a non-Rust workspace gets
+        // the graded `[LANG]` line before it ever reaches this function.
         let mount_arg = format!("{}:/workspace", canonical_workdir.display());
         let extra = if extras.launch_args.is_empty() {
             String::new()
         } else {
             format!(" {}", extras.launch_args.join(" "))
         };
-        let launch_cmd = format!(
-            "cd /workspace && if [ -f start.sh ]; then chmod +x start.sh && exec ./start.sh{extra}; \
-             elif [ -f main.py ]; then exec python3 main.py{extra}; \
-             elif [ -f app.py ]; then exec python3 app.py{extra}; \
-             elif [ -f server.py ]; then exec python3 server.py{extra}; \
-             elif [ -f main.go ]; then exec go run main.go{extra}; \
-             elif [ -f Cargo.toml ]; then exec cargo run --release{extra}; \
-             elif [ -f main.js ]; then exec node main.js{extra}; \
-             elif [ -f index.js ]; then exec node index.js{extra}; \
-             else chmod +x start.sh 2>/dev/null && exec ./start.sh{extra}; fi"
-        );
+        let launch_cmd = format!("cd /workspace && chmod +x start.sh && exec ./start.sh{extra}");
         let mut args: Vec<String> = vec![
             "run".into(),
             "-d".into(),
@@ -1548,6 +1416,19 @@ impl SandboxManager {
         cmd: &str,
         timeout_secs: u64,
     ) -> Result<(bool, String)> {
+        let (ok, _timed_out, text) = self.run_workspace_command_capped(dir, cmd, timeout_secs)?;
+        Ok((ok, text))
+    }
+
+    /// R81 F3: the capped form, with `timed_out` separate from a command
+    /// that ran and failed. `timeout` exits 124 when the cap fires (even
+    /// after the KILL), so a build over its limit gets its own clear line.
+    pub fn run_workspace_command_capped(
+        &self,
+        dir: &Path,
+        cmd: &str,
+        timeout_secs: u64,
+    ) -> Result<(bool, bool, String)> {
         let canonical = if dir.is_absolute() {
             dir.to_path_buf()
         } else {
@@ -1587,6 +1468,10 @@ impl SandboxManager {
             ])
             .output()
             .map_err(|e| anyhow!("failed to run workspace command: {e}"))?;
+        // `timeout` returns 124 for a TERM-clean command, but the docker
+        // CLI ignores TERM and is KILLed after `-k 5`: then it returns
+        // 137. Both mean the cap fired.
+        let timed_out = matches!(output.status.code(), Some(124) | Some(137));
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
         let mut text = String::from_utf8_lossy(&output.stdout).to_string();
         let err = String::from_utf8_lossy(&output.stderr);
@@ -1594,7 +1479,7 @@ impl SandboxManager {
             text.push_str("\n--- stderr ---\n");
             text.push_str(&err);
         }
-        Ok((output.status.success(), text))
+        Ok((output.status.success(), timed_out, text))
     }
 
     pub async fn wait_for_port(&self, port: u16, timeout_secs: u64) -> bool {
@@ -2939,68 +2824,124 @@ mod live_docker_cov_tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
-    /// Pure path/synthesis coverage for ensure_runnable_candidate: Go main
-    /// discovery, entrypoint patterns (root and nested), and the
-    /// target/node_modules/hidden skip rules.
+    /// R81 F3: the `.47` entrypoint is `./start.sh` at the root only.
+    /// A Dockerfile, a nested start.sh, or a language entrypoint is not
+    /// a runnable candidate.
     #[test]
-    fn test_ensure_runnable_candidate_go_and_entrypoint_patterns() {
+    fn test_ensure_runnable_candidate_start_sh_only() {
         let base = std::env::temp_dir().join(format!("covtest_runnable_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let sm = SandboxManager::with_id("covtest-unit");
-
-        // Nested Go main: root bridge start.sh with `go run .`.
-        let go_dir = base.join("cmd/server");
-        fs::create_dir_all(&go_dir).expect("create go dir");
-        fs::write(go_dir.join("main.go"), "package main\n\nfunc main() {}\n")
-            .expect("write go main");
-        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
-        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
-        assert!(start.contains("cd /workspace/cmd/server"), "{start}");
-        assert!(start.contains("go run ."), "{start}");
-        let _ = fs::remove_dir_all(&base);
-
-        // Nested python entrypoint: cd into its dir, run python3 main.py.
-        let py_dir = base.join("svc");
-        fs::create_dir_all(&py_dir).expect("create py dir");
-        fs::write(py_dir.join("main.py"), "print('x')\n").expect("write py");
-        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
-        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
-        assert!(start.contains("cd /workspace/svc"), "{start}");
-        assert!(start.contains("python3 main.py"), "{start}");
-        let _ = fs::remove_dir_all(&base);
-
-        // Root Cargo.toml: release run line.
         fs::create_dir_all(&base).expect("create base");
-        fs::write(base.join("Cargo.toml"), "[package]\nname='x'\n").expect("write cargo");
-        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
-        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
-        assert!(start.contains("cargo run --release"), "{start}");
-        let _ = fs::remove_dir_all(&base);
-
-        // Nested index.js: node bridge.
-        let js_dir = base.join("web");
-        fs::create_dir_all(&js_dir).expect("create js dir");
-        fs::write(js_dir.join("index.js"), "console.log(1)\n").expect("write js");
-        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
-        let start = fs::read_to_string(base.join("start.sh")).expect("bridge start.sh");
-        assert!(start.contains("node main.js"), "{start}");
-        let _ = fs::remove_dir_all(&base);
-
-        // Skipped dirs (.hidden/target/node_modules) are not entrypoints.
-        let skipped = base.join("target/secret");
-        fs::create_dir_all(&skipped).expect("create skipped");
-        fs::write(skipped.join("main.py"), "print('no')\n").expect("write hidden py");
-        let hidden = base.join(".hidden");
-        fs::create_dir_all(&hidden).expect("create hidden");
-        fs::write(hidden.join("server.py"), "print('no')\n").expect("write hidden server");
         assert!(!sm.ensure_runnable_candidate(&base).expect("scan"));
+
+        fs::write(base.join("Dockerfile"), "FROM alpine\n").expect("write dockerfile");
+        assert!(!sm.ensure_runnable_candidate(&base).expect("scan"));
+        let _ = fs::remove_file(base.join("Dockerfile"));
+
+        let nested = base.join("project");
+        fs::create_dir_all(&nested).expect("create nested");
+        fs::write(
+            nested.join("start.sh"),
+            "#!/bin/sh\nexec ./target/release/s\n",
+        )
+        .expect("write nested start");
+        assert!(!sm.ensure_runnable_candidate(&base).expect("scan"));
+
+        fs::write(
+            base.join("start.sh"),
+            "#!/bin/sh\nexec ./target/release/s\n",
+        )
+        .expect("write start");
+        assert!(sm.ensure_runnable_candidate(&base).expect("scan"));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R81 F3: the workspace contract. Empty dependency tables are fine;
+    /// any declared dependency, patch/replace table, missing start.sh or
+    /// a start.sh that does not run the built binary is not.
+    #[test]
+    fn test_rust_workspace_contract() {
+        let base = std::env::temp_dir().join(format!("covtest_rustws_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("create base");
+        let cargo = "[package]\nname = \"sdb\"\nversion = \"0.1.0\"\n\n\
+                     [dependencies]\n\n[dev-dependencies]\n";
+        fs::write(base.join("Cargo.toml"), cargo).expect("write cargo");
+        assert!(SandboxManager::rust_workspace_violation(&base)
+            .expect("no Cargo.toml")
+            .contains("start.sh"));
+        fs::write(
+            base.join("start.sh"),
+            "#!/bin/sh\nexec ./target/release/sdb \"$@\"\n",
+        )
+        .expect("write start");
+        assert_eq!(SandboxManager::rust_workspace_violation(&base), None);
+
+        fs::write(
+            base.join("Cargo.toml"),
+            "[package]\nname = \"sdb\"\n\n[dependencies]\nserde = \"1\"\n",
+        )
+        .expect("write dep cargo");
+        let why = SandboxManager::rust_workspace_violation(&base).expect("dep");
+        assert!(why.contains("dependencies"), "{why}");
+
+        fs::write(
+            base.join("Cargo.toml"),
+            "[package]\nname = \"sdb\"\n\n[dependencies.foo]\npath = \"foo\"\n",
+        )
+        .expect("write dep table");
+        let why = SandboxManager::rust_workspace_violation(&base).expect("dep table");
+        assert!(why.contains("dependency table"), "{why}");
+
+        fs::write(
+            base.join("Cargo.toml"),
+            "[package]\nname = \"sdb\"\n\n[patch.crates-io]\nfoo = { path = \"foo\" }\n",
+        )
+        .expect("write patch");
+        let why = SandboxManager::rust_workspace_violation(&base).expect("patch");
+        assert!(why.contains("[patch.crates-io]"), "{why}");
+
+        fs::write(
+            base.join("Cargo.toml"),
+            "[package]\nname = \"sdb\"\n\n[target.'cfg(unix)'.dependencies]\nfoo = \"1\"\n",
+        )
+        .expect("write target dep");
+        let why = SandboxManager::rust_workspace_violation(&base).expect("target dep");
+        assert!(why.contains("dependency table"), "{why}");
+
+        fs::write(base.join("Cargo.toml"), cargo).expect("restore cargo");
+        fs::write(base.join("start.sh"), "#!/bin/sh\ncargo run --release\n")
+            .expect("write cargo run");
+        let why = SandboxManager::rust_workspace_violation(&base).expect("cargo run");
+        assert!(why.contains("target/release"), "{why}");
+        fs::write(base.join("start.sh"), "#!/bin/sh\n./target/release/sdb\n")
+            .expect("write no exec");
+        let why = SandboxManager::rust_workspace_violation(&base).expect("no exec");
+        assert!(why.contains("exec"), "{why}");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R81 F3: the build-failure line names the first compiler error, not
+    /// the whole log; a log without one falls back to the tail.
+    #[test]
+    fn test_first_build_error() {
+        let log = "   Compiling sdb v0.1.0\nwarning: unused\nerror[E0425]: cannot find value `x`\n --> src/main.rs:3:5\n  |\n3 | x\n  | ^\n";
+        let first = SandboxManager::first_build_error(log);
+        assert!(first.starts_with("error[E0425]"), "{first}");
+        assert!(!first.contains("Compiling"), "{first}");
+        let no_error = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let tail = SandboxManager::first_build_error(no_error);
+        assert!(tail.ends_with("j"), "{tail}");
+        assert!(!tail.contains('a'), "{tail}");
     }
 
     /// Workdir canonicalization: absolute stays verbatim; an unusable
     /// relative path falls back to tempdir join (never panics).
     #[test]
     fn test_canonical_workdir_for_absolute_and_fallback() {
+        use std::path::PathBuf;
         let abs = Path::new("/tmp/covtest-abs");
         assert_eq!(
             SandboxManager::canonical_workdir_for(abs),

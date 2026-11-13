@@ -3,7 +3,7 @@
   "version": 1,
   "task": "sql",
   "title": "sdb-sql: a SQL database, verified differentially",
-  "description": "Tickets on one living workspace: a SQL database server in the language of your choice, stdlib only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition is the full tickets 0-20 ladder: query core, storage and transactions, relational features, concurrency, schema change, observability, tests, memory, disk-full, hostile input, replication, and the PostgreSQL wire protocol.",
+  "description": "Tickets on one living workspace: a SQL database server in Rust, standard library only, grown ticket by ticket. Verification is differential: a seeded generator sends statements to your server and to an in-process SQLite, and every answer must match (rows, headers, affected counts, error classes). This definition is the full tickets 0-20 ladder: query core, storage and transactions, relational features, concurrency, schema change, observability, tests, memory, disk-full, hostile input, replication, and the PostgreSQL wire protocol.",
   "ladder": "continue",
   "stages": [
     {

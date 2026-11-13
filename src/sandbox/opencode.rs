@@ -334,7 +334,7 @@ impl OpenCodeRunner {
     /// the agent wrote. AGENTS.md is ours (written pre-launch), never
     /// counts. Bounded walk so a pathological tree can't stall the check.
     pub(crate) fn workspace_has_content(dir: &std::path::Path) -> bool {
-        if dir.join("start.sh").is_file() || dir.join("Dockerfile").is_file() {
+        if dir.join("start.sh").is_file() {
             return true;
         }
         let mut stack = vec![dir.to_path_buf()];
@@ -367,7 +367,7 @@ impl OpenCodeRunner {
     /// turn 1 (then got cut off), so restate only the action contract.
     fn cutoff_nudge(port: u16) -> String {
         format!(
-            "Your previous response was cut off before creating any files (no tool calls reached /workspace). Do NOT write a long plan. Immediately call the `write` and `bash` tools: create the implementation with entrypoint `./start.sh` or `Dockerfile` listening on port {port}, then test it. Brief thinking, then tools."
+            "Your previous response was cut off before creating any files (no tool calls reached /workspace). Do NOT write a long plan. Immediately call the `write` and `bash` tools: create the implementation with entrypoint `./start.sh` (it must exec the binary under `target/release/`) listening on port {port}, then test it. Brief thinking, then tools."
         )
     }
 

@@ -1612,15 +1612,12 @@ pub fn run_workspace_at(
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace {}", workspace.display()))?;
-    if !workspace.join("start.sh").exists() && !workspace.join("Dockerfile").exists() {
+    if !workspace.join("start.sh").exists() {
         // The workspace is the candidate; a missing entrypoint is its
         // failure, so the phase floors instead of losing its score.
         return Ok(PerfScore::floored(
             phase,
-            format!(
-                "workspace {} has no start.sh or Dockerfile",
-                workspace.display()
-            ),
+            format!("workspace {} has no start.sh", workspace.display()),
         ));
     }
     std::fs::create_dir_all(root).context("create the perf data root")?;

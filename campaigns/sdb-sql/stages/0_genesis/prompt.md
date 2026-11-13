@@ -11,21 +11,31 @@ hard-coded, and the schema is different every run.
 
 ## Launch contract (fixed for the whole campaign)
 
-- **Entrypoint**: an executable `./start.sh`, or a `Dockerfile`.
+- **Entrypoint**: an executable `./start.sh` at the repo root.
   `./start.sh` is started as `./start.sh --port <p> --data <dir>`, and the
-  defaults must still work when nothing is passed. A `Dockerfile` image is
-  started with **its own `CMD` followed by `--port <p> --data <dir>`**, so
-  put the server in an exec-form `CMD` (or an `ENTRYPOINT` with no `CMD`)
-  and the flags arrive as argv. `SDB_PORT` / `SDB_DATA_DIR` are exported
-  too, as a fallback. A clean stop sends **SIGTERM to every process in the
-  container** (not just PID 1), so a `start.sh` without `exec` still
-  delivers it; `exec` remains the recommended form.
+  defaults must still work when nothing is passed. It must `exec` the
+  binary the harness builds under `target/release/`. There is no
+  custom-image entrypoint: it would bypass the rules below.
+  `SDB_PORT` / `SDB_DATA_DIR` are exported too, as a fallback. A clean
+  stop sends **SIGTERM to every process in the container** (not just
+  PID 1).
+- **Build**: the harness runs `cargo build --release --offline --locked`
+  in the workspace before every start. The workspace root's `Cargo.toml`
+  has **no dependencies** (`[dependencies]`, `[dev-dependencies]` and
+  `[build-dependencies]` empty or absent; no `[patch]`), and `Cargo.lock`
+  is kept in the workspace. A failed build is a ticket failure with the
+  compiler's first error.
+- **The language rule**: the process listening on the candidate port must
+  be an ELF under `target/release/` built by rustc, and no `python3` or
+  `node` process may run in the server's launch tree. A workspace that is
+  not a Rust server fails with one `[LANG]` line.
 - **Port**: listen on **`0.0.0.0:5480`** by default; honor `--port <p>`.
 - **Data directory**: `./data` by default; honor `--data <dir>`. The
   harness owns that directory and restarts the server on it between
   tickets, so anything you persist must survive.
-- The server runs in a minimal Linux sandbox with python3, node, go and
-  rust available. Foreground process, one listener.
+- The server is **Rust 1.100.0**, standard library only. `python3` and
+  `node` exist for test scripts only; they may not serve. Foreground
+  process, one listener.
 
 ## The text protocol (fixed for the whole campaign)
 
@@ -87,7 +97,7 @@ committed rows, and sends garbage bytes, an unterminated line and a 2 MiB
 line: none of them may kill the server, and a fresh connection must
 still answer afterwards.
 
-## Performance (rules `.43`)
+## Performance (rules `.47`)
 
 Correctness is graded ticket by ticket. Speed is a **second axis** next to
 points: points sort first, and a tie in points is broken by the perf
