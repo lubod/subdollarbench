@@ -4601,14 +4601,13 @@ fn r79_f2_health_reads_opencode_log() {
 /// what opencode actually printed.
 #[test]
 fn r79_f2_health_reads_opencode_stub_lines() {
-    // A successful 429 retry is invisible: one Turn line, one answer.
+    // R82 F4: the regenerated retry fixture carries the retried
+    // step_start (the runner's own mapping) but no 429 event — the
+    // successful retry is not a rate-limit signal.
     let retry = health_from_live_log(include_str!("fixtures/health/opencode-retry.txt"));
-    assert_eq!(retry.turns, 1, "the successful retry is one turn");
-    assert_eq!(
-        retry.rate_limited, 0,
-        "opencode does not print the successful retry; nothing to count"
-    );
-    assert_eq!(retry.empty_responses, 0, "the retried turn answered");
+    assert_eq!(retry.turns, 2, "the original turn and its retry");
+    assert_eq!(retry.rate_limited, 0, "no 429 event is printed");
+    assert_eq!(retry.empty_responses, 1, "the interrupted first attempt");
 
     // An exhausted 429 prints one Turn per attempt and the final error.
     let exhausted = health_from_live_log(include_str!("fixtures/health/opencode-exhausted.txt"));
@@ -4631,4 +4630,72 @@ fn r79_f2_health_reads_opencode_stub_lines() {
     let ok = health_from_live_log(include_str!("fixtures/health/opencode-ok.txt"));
     assert_eq!(ok.turns, 0, "a plain answer has no [LIVE] Turn line");
     assert_eq!(ok.empty_responses, 0, "a plain answer is not an empty turn");
+}
+
+/// R82 F4 (R79-10, R79-17): a turn left open by a new session or a new
+/// turn is judged once, with its time and its empty flag; a 429 in one
+/// session does not mark another session's retries.
+#[test]
+fn r82_f4_health_interrupted_turn_and_429() {
+    let log = "\
+[10:00:00] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[10:00:01] [LIVE] Turn 1 started
+[10:00:03] [RESPONSE] first
+[10:00:04] [LIVE] Turn 2 started
+[10:00:05] [LIVE] Turn 3 started
+[10:00:06] [TELEMETRY] turn=3 max_turns=0 spent=0.000000 tokens=0
+[10:00:07] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[10:00:08] [LIVE] Turn 1 started
+[10:00:09] [LIVE] Turn 2 started
+[10:00:10] [TELEMETRY] turn=2 max_turns=0 spent=0.000000 tokens=0
+[10:00:10] {\"type\":\"error\",\"error\":{\"type\":\"provider.rate-limit\",\"status\":429}}
+[10:00:11] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[10:00:12] [LIVE] Turn 1 started
+[10:00:13] [LIVE] Turn 2 started
+[10:00:14] [TELEMETRY] turn=2 max_turns=0 spent=0.000000 tokens=0
+";
+    let h = health_from_live_log(log);
+    assert_eq!(h.turns, 7, "every started turn is counted: {h:?}");
+    assert_eq!(h.empty_responses, 6, "the interrupted empty turns: {h:?}");
+    assert!(
+        (h.turn_secs_max - 3.0).abs() < 1e-9,
+        "the first turn runs 3 s: {h:?}"
+    );
+    assert_eq!(
+        h.rate_limited, 1,
+        "only the session that saw the 429 counts its retry: {h:?}"
+    );
+}
+
+/// R82 F4 (R79-14): each opencode fixture equals the runner's mapping of
+/// its raw `--format json` events beside it.
+#[test]
+fn r82_f4_fixtures_match_events() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/campaign/fixtures/health");
+    let model = "openrouter/inclusionai/ling-3.1-flash";
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let Some(rest) = stem.strip_prefix("opencode-") else {
+            continue;
+        };
+        let Some(case) = rest.strip_suffix(".events") else {
+            continue;
+        };
+        let fixture = dir.join(format!("opencode-{case}.txt"));
+        let events = std::fs::read_to_string(&path).unwrap();
+        let expected = std::fs::read_to_string(&fixture).unwrap();
+        let got = crate::sandbox::opencode::OpenCodeRunner::opencode_map_events(&events, model);
+        assert_eq!(
+            got.trim_end(),
+            expected.trim_end(),
+            "opencode-{case} does not match its events"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 6, "checked {checked} fixture(s)");
 }

@@ -154,6 +154,14 @@ pub enum CampaignAction {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// R82 F4: map opencode `--format json` events to the bench log lines
+    #[command(hide = true)]
+    OpencodeMap {
+        /// The events file
+        events: String,
+        /// The career model, for token pricing
+        model: String,
+    },
     /// Export the sdb-sql career board (static HTML) and grid.json
     Portal {
         /// Path to runs directory

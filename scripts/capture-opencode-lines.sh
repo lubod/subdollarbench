@@ -51,67 +51,19 @@ for case in "${CASES[@]}"; do
         "Reply with exactly: ok" > "$work/out.json" 2> "$work/err.log" || rc=$?
     kill "$stub" 2>/dev/null || true
     wait "$stub" 2>/dev/null || true
-    python3 - "$work/out.json" "$work/err.log" "$OUT/opencode-$case.txt" "$case" "$rc" <<'PY'
-import datetime
+    # R82 F4: the raw events stay beside the fixture; the lines come
+    # from the runner's own mapping (`subdollarbench opencode-map`), not
+    # a Python reimplementation.
+    cp "$work/out.json" "$OUT/opencode-$case.events.jsonl"
+    python3 - "$work/err.log" >> "$OUT/opencode-$case.events.jsonl" <<'PY'
 import json
 import sys
 
-out, err, dest, case, rc = sys.argv[1:6]
-lines = []
-turns = 0
-
-
-def clock(ms):
-    return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%H:%M:%S")
-
-
-raw = [l for l in open(out, errors="replace").read().splitlines() if l.strip()]
-first = None
-for line in raw:
-    try:
-        v = json.loads(line)
-    except Exception:
-        lines.append("[LOG] " + line[:1500])
-        continue
-    if first is None:
-        first = v.get("timestamp")
-    t = v.get("type")
-    ts = clock(v.get("timestamp") or first or 0)
-    if t == "step_start":
-        turns += 1
-        lines.append(f"[{ts}] [LIVE] Turn {turns} started")
-    elif t == "tool_use":
-        part = v.get("part") or {}
-        tool = part.get("tool") or "tool"
-        lines.append(f"[{ts}] [ACTION] {tool} {json.dumps(v, separators=(',', ':'))}")
-    elif t == "text":
-        text = (v.get("part") or {}).get("text") or ""
-        lines.append(f"[{ts}] [RESPONSE] {text[:1500]}")
-    elif t == "step_finish":
-        part = v.get("part") or {}
-        tok = part.get("tokens") or {}
-        total = sum(int(tok.get(k) or 0) for k in ("input", "output", "reasoning"))
-        cache = tok.get("cache") or {}
-        total += int(cache.get("read") or 0) + int(cache.get("write") or 0)
-        lines.append(f"[{ts}] [TELEMETRY] turn={turns} max_turns=0 spent={float(part.get('cost') or 0):.6f} tokens={total}")
-    elif t == "error":
-        error = v.get("error") or {}
-        status = error.get("status") or error.get("code")
-        lines.append(f"[{ts}] [LOG] {json.dumps(v, separators=(',', ':'))[:1500]}")
-        if status == 402:
-            lines.append(f"[{ts}] [BILLING] provider billing exhausted (HTTP 402)")
-        elif status == 429:
-            lines.append(f"[{ts}] [BILLING] provider rate-limited (HTTP 429)")
-    else:
-        lines.append(f"[{ts}] [LOG] {json.dumps(v, separators=(',', ':'))[:1500]}")
-
-head = f"[{clock(first or 0)}] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00"
-for line in open(err, errors="replace").read().splitlines():
+for line in open(sys.argv[1], errors="replace").read().splitlines():
     if line.strip():
-        lines.append("[STDERR] " + line[:1500])
-with open(dest, "w") as f:
-    f.write(head + "\n")
-    f.write("\n".join(lines) + ("\n" if lines else ""))
-print(f"[capture] {case}: rc={rc} -> {dest}")
+        print(json.dumps({"type": "stderr", "line": line[:1500]}))
 PY
+    cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -- opencode-map \
+        "$OUT/opencode-$case.events.jsonl" "$MODEL" > "$OUT/opencode-$case.txt"
+    echo "[capture] $case: rc=$rc -> $OUT/opencode-$case.txt"
 done

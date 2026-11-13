@@ -15,6 +15,13 @@ use crate::sandbox::omp::{
 /// `Dockerfile.sandbox`; bump together (same discipline as OMP_VERSION).
 pub const OPENCODE_VERSION: &str = "2.0.24";
 
+/// R82 F4: an event timestamp (ms) as the log clock.
+fn map_clock(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|d| d.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "00:00:00".to_string())
+}
+
 /// Second harness adapter: runs the agent loop with the OpenCode CLI
 /// (`opencode run`) inside the same `subdollar-sandbox` container family.
 ///
@@ -35,6 +42,28 @@ pub const OPENCODE_VERSION: &str = "2.0.24";
 ///   `OPENCODE_CONFIG_CONTENT`) which the openrouter package forwards as
 ///   native `reasoning.effort`; prose effort line stays as fallback, and a
 ///   variant-resolution failure retries prose-only (today's behavior).
+///
+/// R82 F4: one step's usage, priced from the snapshot.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenCodeStepUsage {
+    pub prompt: u64,
+    pub completion: u64,
+    pub cached: u64,
+    pub cache_write: u64,
+    pub total: u64,
+    pub cost: f64,
+}
+
+/// R82 F4: what one event changes in the runner besides its lines.
+#[derive(Debug, Default)]
+pub(crate) struct OpenCodeEventEffects {
+    pub usage: Option<OpenCodeStepUsage>,
+    pub variant_failed: bool,
+    pub rate_limited: bool,
+    pub billing: Option<String>,
+    pub limit: Option<String>,
+}
+
 pub struct OpenCodeRunner;
 
 impl OpenCodeRunner {
@@ -42,7 +71,10 @@ impl OpenCodeRunner {
     /// prompt = Σ input, completion = Σ (output + reasoning),
     /// cached = Σ cache.read, total = Σ (input + output + reasoning).
     /// Reasoning bills provider-side as completion, so it joins completion.
-    fn add_step(stats: &mut OmpSessionStats, tokens: &serde_json::Value, model: &str) -> f64 {
+    /// R82 F4: one step's usage, priced from the committed snapshot
+    /// (never the provider's own `part.cost`). The mapping and the
+    /// `add_step` accumulator share it.
+    fn step_usage(tokens: &serde_json::Value, model: &str) -> OpenCodeStepUsage {
         let u64f = |v: Option<&serde_json::Value>| v.and_then(|x| x.as_u64()).unwrap_or(0);
         let input = u64f(tokens.get("input"));
         let output = u64f(tokens.get("output"));
@@ -57,19 +89,198 @@ impl OpenCodeRunner {
             .and_then(|c| c.get("write"))
             .and_then(|x| x.as_u64())
             .unwrap_or(0);
-        // R24 R2/R3: price the event from the committed snapshot, including
-        // cache-write context; never from the provider's own `part.cost`.
         let cost = crate::cost::ModelPricing::for_model(model)
             .compute_cost_with_cache_and_write(input, cache_read, output + reasoning, cache_write)
             .total_cost_usd;
-        stats.prompt_tokens += input;
-        stats.completion_tokens += output + reasoning;
-        stats.cached_tokens += cache_read;
-        stats.cache_write_tokens += cache_write;
-        stats.total_tokens += input + output + reasoning + cache_write;
-        stats.cost_usd += cost;
-        stats.max_call_usd = stats.max_call_usd.max(cost);
-        cost
+        OpenCodeStepUsage {
+            prompt: input,
+            completion: output + reasoning,
+            cached: cache_read,
+            cache_write,
+            total: input + output + reasoning + cache_write,
+            cost,
+        }
+    }
+
+    fn apply_usage(stats: &mut OmpSessionStats, u: &OpenCodeStepUsage) {
+        stats.prompt_tokens += u.prompt;
+        stats.completion_tokens += u.completion;
+        stats.cached_tokens += u.cached;
+        stats.cache_write_tokens += u.cache_write;
+        stats.total_tokens += u.total;
+        stats.cost_usd += u.cost;
+        stats.max_call_usd = stats.max_call_usd.max(u.cost);
+    }
+
+    #[cfg(test)]
+    fn add_step(stats: &mut OmpSessionStats, tokens: &serde_json::Value, model: &str) -> f64 {
+        let u = Self::step_usage(tokens, model);
+        Self::apply_usage(stats, &u);
+        u.cost
+    }
+
+    /// R82 F4: the `--format json` event -> bench log line mapping, out
+    /// of the run loop so the fixture capture and the runner use one
+    /// implementation. The caller owns the turn counter and the
+    /// accumulated stats; `spent`/`tokens` are the totals *before* this
+    /// event (the step's usage is added here for the telemetry line and
+    /// returned for the caller to apply).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn opencode_event_lines(
+        v: &serde_json::Value,
+        raw: &str,
+        turn: u32,
+        max_turns: u32,
+        spent: f64,
+        tokens: u64,
+        cost_model: &str,
+        max_budget: f64,
+    ) -> (Vec<String>, OpenCodeEventEffects) {
+        let mut lines = Vec::new();
+        let mut effects = OpenCodeEventEffects::default();
+        let etype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match etype {
+            "step_start" => {
+                if max_turns > 0 && turn > max_turns {
+                    effects.limit = Some(format!("max turns {max_turns} reached"));
+                } else {
+                    lines.push(format!("[LIVE] Turn {turn} started"));
+                }
+            }
+            "tool_use" => {
+                let tool = v
+                    .pointer("/part/tool")
+                    .or_else(|| v.get("tool"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("tool");
+                lines.push(format!("[ACTION] {} {}", tool, Self::cap_line(raw)));
+            }
+            "text" => {
+                let text = v
+                    .pointer("/part/text")
+                    .or_else(|| v.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or(raw);
+                if let Some(crate::sandbox::omp::BillingSignal::Fault(reason)) =
+                    crate::sandbox::omp::classify_billing_error(raw)
+                        .or_else(|| crate::sandbox::omp::classify_billing_error(text))
+                {
+                    lines.push(format!("[BILLING] {}", reason));
+                    effects.billing = Some(reason.to_string());
+                }
+                if Self::is_rate_limit_event(v, text) {
+                    effects.rate_limited = true;
+                }
+                lines.push(format!("[RESPONSE] {}", Self::cap_line(text)));
+            }
+            "step_finish" => {
+                let toks = v
+                    .pointer("/part/tokens")
+                    .or_else(|| v.get("tokens"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let usage = Self::step_usage(&toks, cost_model);
+                lines.push(format!(
+                    "[TELEMETRY] turn={} max_turns={} spent={:.6} tokens={}",
+                    turn,
+                    max_turns,
+                    spent + usage.cost,
+                    tokens + usage.prompt + usage.completion + usage.cached
+                ));
+                if spent + usage.cost > max_budget {
+                    effects.limit = Some(format!("budget ${max_budget:.2} exceeded"));
+                }
+                effects.usage = Some(usage);
+            }
+            _ => {
+                if Self::is_variant_unavailable_event(v) {
+                    effects.variant_failed = true;
+                    lines.push(
+                        "[VARIANT] model variant unavailable; will retry prose-only".to_string(),
+                    );
+                }
+                let rate_event = Self::is_rate_limit_event(v, raw);
+                if rate_event {
+                    effects.rate_limited = true;
+                }
+                if let Some(reason) = Self::provider_auth_billing_reason(v) {
+                    lines.push(format!("[BILLING] {reason}"));
+                    effects.billing = Some(reason);
+                }
+                if !rate_event {
+                    if let Some(reason) = Self::error_event_billing_reason(raw) {
+                        lines.push(format!("[BILLING] {reason}"));
+                        effects.billing = Some(reason.to_string());
+                    }
+                }
+                if etype == "stderr" {
+                    lines.push(format!(
+                        "[STDERR] {}",
+                        v.get("line").and_then(|l| l.as_str()).unwrap_or(raw)
+                    ));
+                } else if etype == "header" {
+                    // The capture's session header; the runner emits its
+                    // own from the launch parameters.
+                } else {
+                    lines.push(format!("[LOG] {}", Self::cap_line(raw)));
+                }
+            }
+        }
+        (lines, effects)
+    }
+
+    /// R82 F4: map a raw `--format json` events file to the fixture's
+    /// lines (the header, the runner lines and the stderr lines). The
+    /// capture script and the fixture test call this; the runner uses
+    /// [`Self::opencode_event_lines`] directly.
+    pub fn opencode_map_events(text: &str, model: &str) -> String {
+        let mut turn = 0u32;
+        let mut stats = OmpSessionStats::default();
+        let mut spent = 0.0;
+        let mut out: Vec<String> = Vec::new();
+        let mut first_ts: Option<i64> = None;
+        let mut last_clock = "00:00:00".to_string();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            let ts = v.get("timestamp").and_then(|t| t.as_i64());
+            if first_ts.is_none() {
+                first_ts = ts;
+            }
+            if let Some(ts) = ts {
+                last_clock = map_clock(ts);
+            }
+            let etype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if etype == "step_start" {
+                turn += 1;
+            }
+            let tokens = stats.prompt_tokens + stats.completion_tokens + stats.cached_tokens;
+            let (lines, effects) =
+                Self::opencode_event_lines(&v, trimmed, turn, 0, spent, tokens, model, f64::MAX);
+            if let Some(u) = effects.usage {
+                Self::apply_usage(&mut stats, &u);
+                spent += u.cost;
+            }
+            for l in lines {
+                out.push(format!("[{last_clock}] {l}"));
+            }
+        }
+        let clock = first_ts
+            .map(map_clock)
+            .unwrap_or_else(|| "00:00:00".to_string());
+        let mut text = format!(
+            "[{clock}] [LIVE] Agent initialized (opencode {OPENCODE_VERSION}). Max turns: 0, Budget: $0.00\n"
+        );
+        for line in out {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
     }
 
     /// Provider rate-limit signal on one `--format json` event or raw line.
@@ -396,6 +607,12 @@ impl OpenCodeRunner {
         (config, data)
     }
 
+    /// R79-11: the key reaches the container only as this env argument;
+    /// no mount or config file carries it.
+    pub(crate) fn key_env_args(key: &str) -> Vec<String> {
+        vec!["-e".to_string(), format!("OPENROUTER_API_KEY={key}")]
+    }
+
     /// The two `-v` args: the per-run dirs at the container's opencode
     /// paths. No path under the host's home appears here.
     fn opencode_mount_args(workdir: &std::path::Path) -> Vec<String> {
@@ -615,7 +832,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .map(|s| s.to_string())
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
             if let Some(ref key) = effective_key {
-                cmd.arg("-e").arg(format!("OPENROUTER_API_KEY={}", key));
+                cmd.args(Self::key_env_args(key));
             }
             // Per-trial config: the career model (and the same small
             // model), plus the `#variant` definitions. Passed for every
@@ -794,126 +1011,59 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                             }
                         };
                         let etype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        match etype {
-                            "step_start" => {
-                                let n = turns_o.fetch_add(1, Ordering::SeqCst) + 1;
-                                if max_turns > 0 && n > max_turns {
-                                    // Round-14 N4: the turn past the cap is
-                                    // killed at its start; it never ran, so
-                                    // it is not counted (it used to cost
-                                    // the repair round one turn).
-                                    turns_o.fetch_sub(1, Ordering::SeqCst);
-                                    *limit_msg_o.lock().unwrap() =
-                                        Some(format!("max turns {} reached", max_turns));
-                                    limit_hit_o.store(true, Ordering::SeqCst);
-                                    running_o.store(false, Ordering::SeqCst);
-                                    let _ =
-                                        Command::new("docker").args(["rm", "-f", &cname]).output();
-                                    break;
-                                }
-                                let _ = tx_o.send(format!("[LIVE] Turn {} started", n));
+                        let turn = if etype == "step_start" {
+                            turns_o.fetch_add(1, Ordering::SeqCst) + 1
+                        } else {
+                            turns_o.load(Ordering::SeqCst)
+                        };
+                        if etype == "tool_use" {
+                            tools_o.fetch_add(1, Ordering::SeqCst);
+                        }
+                        let (spent, tokens) = {
+                            let st = stats_o.lock().unwrap();
+                            (
+                                *spent_o.lock().unwrap(),
+                                st.prompt_tokens + st.completion_tokens + st.cached_tokens,
+                            )
+                        };
+                        let (lines, effects) = Self::opencode_event_lines(
+                            &v,
+                            trimmed,
+                            turn,
+                            max_turns,
+                            spent,
+                            tokens,
+                            &cost_model,
+                            max_budget,
+                        );
+                        if let Some(u) = effects.usage {
+                            Self::apply_usage(&mut stats_o.lock().unwrap(), &u);
+                            *spent_o.lock().unwrap() += u.cost;
+                        }
+                        if effects.variant_failed {
+                            variant_failed_o.store(true, Ordering::SeqCst);
+                        }
+                        if effects.rate_limited {
+                            rate_o.store(true, Ordering::SeqCst);
+                        }
+                        if effects.billing.is_some() {
+                            billing_o.store(true, Ordering::SeqCst);
+                        }
+                        for line in lines {
+                            let _ = tx_o.send(line);
+                        }
+                        if let Some(msg) = effects.limit {
+                            // Round-14 N4: the turn past the cap never ran;
+                            // it is not counted. A budget trip keeps the
+                            // step's usage (the old add_step order).
+                            if etype == "step_start" {
+                                turns_o.fetch_sub(1, Ordering::SeqCst);
                             }
-                            "tool_use" => {
-                                tools_o.fetch_add(1, Ordering::SeqCst);
-                                let tool = v
-                                    .pointer("/part/tool")
-                                    .or_else(|| v.get("tool"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("tool");
-                                let _ = tx_o.send(format!(
-                                    "[ACTION] {} {}",
-                                    tool,
-                                    Self::cap_line(trimmed)
-                                ));
-                            }
-                            "text" => {
-                                let text = v
-                                    .pointer("/part/text")
-                                    .or_else(|| v.get("text"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or(trimmed);
-                                // R77 F1: a retried 429 is transient; only a
-                                // fault trips the billing stop.
-                                if let Some(crate::sandbox::omp::BillingSignal::Fault(reason)) =
-                                    crate::sandbox::omp::classify_billing_error(trimmed).or_else(
-                                        || crate::sandbox::omp::classify_billing_error(text),
-                                    )
-                                {
-                                    let _ = tx_o.send(format!("[BILLING] {}", reason));
-                                    billing_o.store(true, Ordering::SeqCst);
-                                }
-                                if Self::is_rate_limit_event(&v, text) {
-                                    rate_o.store(true, Ordering::SeqCst);
-                                }
-                                let _ = tx_o.send(format!("[RESPONSE] {}", Self::cap_line(text)));
-                            }
-                            "step_finish" => {
-                                let tokens = v
-                                    .pointer("/part/tokens")
-                                    .or_else(|| v.get("tokens"))
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null);
-                                let step_cost = Self::add_step(
-                                    &mut stats_o.lock().unwrap(),
-                                    &tokens,
-                                    &cost_model,
-                                );
-                                *spent_o.lock().unwrap() += step_cost;
-                                let st = stats_o.lock().unwrap().clone();
-                                let n = turns_o.load(Ordering::SeqCst);
-                                let total_tok =
-                                    st.prompt_tokens + st.completion_tokens + st.cached_tokens;
-                                let _ = tx_o.send(format!(
-                                    "[TELEMETRY] turn={} max_turns={} spent={:.6} tokens={}",
-                                    n,
-                                    max_turns,
-                                    *spent_o.lock().unwrap(),
-                                    total_tok
-                                ));
-                                if *spent_o.lock().unwrap() > max_budget {
-                                    *limit_msg_o.lock().unwrap() =
-                                        Some(format!("budget ${:.2} exceeded", max_budget));
-                                    limit_hit_o.store(true, Ordering::SeqCst);
-                                    running_o.store(false, Ordering::SeqCst);
-                                    let _ =
-                                        Command::new("docker").args(["rm", "-f", &cname]).output();
-                                    break;
-                                }
-                            }
-                            _ => {
-                                if Self::is_variant_unavailable_event(&v) {
-                                    variant_failed_o.store(true, Ordering::SeqCst);
-                                    let _ = tx_o.send(
-                                        "[VARIANT] model variant unavailable; will retry prose-only"
-                                            .to_string(),
-                                    );
-                                }
-                                let rate_event = Self::is_rate_limit_event(&v, trimmed);
-                                if rate_event {
-                                    rate_o.store(true, Ordering::SeqCst);
-                                }
-                                if let Some(reason) = Self::provider_auth_billing_reason(&v) {
-                                    let _ = tx_o.send(format!("[BILLING] {reason}"));
-                                    billing_o.store(true, Ordering::SeqCst);
-                                }
-                                // R79-2: the opencode error events (the
-                                // provider.quota 402 and the exhausted
-                                // provider.rate-limit 429) go through the
-                                // shared classifier; a stream error stays a
-                                // tool error, not a billing fault. A 429
-                                // stays on the resume/backoff path (the
-                                // exhausted case is the throttle arm's
-                                // OmpBillingError), so the classifier must
-                                // not pre-empt it.
-                                if !rate_event {
-                                    if let Some(reason) = Self::error_event_billing_reason(trimmed)
-                                    {
-                                        let _ = tx_o.send(format!("[BILLING] {reason}"));
-                                        billing_o.store(true, Ordering::SeqCst);
-                                    }
-                                }
-                                let _ = tx_o.send(format!("[LOG] {}", Self::cap_line(trimmed)));
-                            }
+                            *limit_msg_o.lock().unwrap() = Some(msg);
+                            limit_hit_o.store(true, Ordering::SeqCst);
+                            running_o.store(false, Ordering::SeqCst);
+                            let _ = Command::new("docker").args(["rm", "-f", &cname]).output();
+                            break;
                         }
                     }
                 }))

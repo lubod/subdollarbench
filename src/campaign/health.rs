@@ -138,6 +138,25 @@ fn median(mut v: Vec<f64>) -> f64 {
     }
 }
 
+/// R79-10: judge a turn left open by a new session or a new turn, with
+/// the last response/tool as its end. The turn is counted once, with its
+/// time, and an empty one is still empty.
+fn judge_open_turn(
+    h: &mut PhaseHealth,
+    start: Option<u64>,
+    now: Option<u64>,
+    has_response: bool,
+    has_tool: bool,
+    deltas: &mut Vec<f64>,
+) {
+    let Some(start) = start else { return };
+    let end = now.unwrap_or(start);
+    deltas.push(((end + 86_400 - start) % 86_400) as f64);
+    if !has_response && !has_tool {
+        h.empty_responses += 1;
+    }
+}
+
 /// Parse one phase's `live.log` text.
 pub fn health_from_live_log(text: &str) -> PhaseHealth {
     let mut h = PhaseHealth::default();
@@ -156,13 +175,29 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
     // R79-2: opencode's extra step_starts are retried requests. They are
     // counted as rate-limited retries only when the run also ends in a
     // 429; a stream-error retry is a tool error, not a rate limit.
-    let mut retries: u64 = 0;
-    let mut saw_429 = false;
+    // R79-17: both are per session, so one session's 429 never marks
+    // another session's retries.
+    let mut session_retries: u64 = 0;
+    let mut session_saw_429 = false;
 
     for line in text.lines() {
         if line.contains("[BENCH-POLICY] active maxTurns=") {
             // A new ticket/session: the turn clock restarts and the first
-            // turn's duration is measured from here.
+            // turn's duration is measured from here. R79-10/R79-17: judge
+            // the open turn and flush the finished session's 429s.
+            judge_open_turn(
+                &mut h,
+                turn_start.take(),
+                clock(line).or(last_event),
+                has_response,
+                has_tool,
+                &mut deltas,
+            );
+            if session_saw_429 {
+                h.rate_limited += session_retries;
+            }
+            session_retries = 0;
+            session_saw_429 = false;
             session_start = clock(line);
             last_turn = None;
             ref_block = false;
@@ -175,6 +210,19 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         // starts at `[LIVE] Agent initialized`; each `[LIVE] Turn N
         // started` is one turn (the omp `[BENCH-POLICY] turn=` shape).
         if line.contains("[LIVE] Agent initialized") {
+            judge_open_turn(
+                &mut h,
+                turn_start.take(),
+                clock(line).or(last_event),
+                has_response,
+                has_tool,
+                &mut deltas,
+            );
+            if session_saw_429 {
+                h.rate_limited += session_retries;
+            }
+            session_retries = 0;
+            session_saw_429 = false;
             session_start = clock(line);
             last_turn = None;
             turn_start = None;
@@ -187,9 +235,18 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         }
         if line.contains("[LIVE] Turn ") && line.contains(" started") {
             if turn_start.is_some() {
-                // R79-2: opencode's extra step_start is a retried
-                // request; count the retry and drop the open turn.
-                retries += 1;
+                // R79-2/R79-10: opencode's extra step_start is a retried
+                // request; judge the open turn (its time, empty or not)
+                // and count the retry.
+                judge_open_turn(
+                    &mut h,
+                    turn_start.take(),
+                    clock(line).or(last_event),
+                    has_response,
+                    has_tool,
+                    &mut deltas,
+                );
+                session_retries += 1;
             }
             h.turns += 1;
             turn_start = clock(line);
@@ -236,7 +293,7 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             h.tool_errors += 1;
         }
         if line.contains("\"status\":429") || line.contains("provider.rate-limit") {
-            saw_429 = true;
+            session_saw_429 = true;
         }
         let b = body(line);
         // R77 F2: a transient 429 (omp's retry line with n < m) is
@@ -310,15 +367,16 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
 
     // R79-1: a last turn with no [TELEMETRY] is judged at the log end,
     // with the last response/tool as its end.
-    if let Some(start) = turn_start {
-        let now = last_event.unwrap_or(start);
-        deltas.push(((now + 86_400 - start) % 86_400) as f64);
-        if !has_response && !has_tool {
-            h.empty_responses += 1;
-        }
-    }
-    if saw_429 {
-        h.rate_limited += retries;
+    judge_open_turn(
+        &mut h,
+        turn_start,
+        last_event,
+        has_response,
+        has_tool,
+        &mut deltas,
+    );
+    if session_saw_429 {
+        h.rate_limited += session_retries;
     }
     h.turn_secs_max = deltas.iter().copied().fold(0.0, f64::max);
     h.turn_secs_p50 = median(deltas);

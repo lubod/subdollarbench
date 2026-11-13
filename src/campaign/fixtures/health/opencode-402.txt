@@ -1,4 +1,4 @@
-[14:46:31] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
-[14:46:31] [LIVE] Turn 1 started
-[14:46:31] [LOG] {"type":"error","timestamp":1794408391015,"sessionID":"ses_capture_402","error":{"type":"provider.quota","message":"insufficient credits","status":402,"response":{"body":"{\"error\":{\"message\":\"insufficient credits\",\"code\":402}}"}}}
-[14:46:31] [BILLING] provider billing exhausted (HTTP 402)
+[11:43:38] [LIVE] Agent initialized (opencode 2.0.24). Max turns: 0, Budget: $0.00
+[11:43:38] [LIVE] Turn 1 started
+[11:43:38] [BILLING] provider billing exhausted (HTTP 402)
+[11:43:38] [LOG] {"type":"error","timestamp":1794570218631,"sessionID":"ses_capture_402","error":{"type":"provider.quota","message":"insufficient credits","status":402,"response":{"body":"{\"error\":{\"message\":\"insufficient credits\",\"code\":402}}"}}}
