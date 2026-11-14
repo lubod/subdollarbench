@@ -82,4 +82,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [81](81.md) | The `.47` sandbox: Rust only (operator, 2026-11-13), no package registries, the harness builds and rejects a non-Rust server, rules `.47` | merged |
 | [82](82.md) | opencode is the graded harness: the default, one model per session, effort checked, the carried R79 items | merged |
 | [83](83.md) | The `.47` model checks are trustworthy: the wrong-pin probe, the beside-a-job refusal, off-peak, why hy4 and luna bill 1.6x | merged |
-| [84](84.md) | The scored cost counts every opencode call (the end-of-run summary call) | open |
+| [84](84.md) | The scored cost counts every opencode call (the end-of-run summary call) | merged |
