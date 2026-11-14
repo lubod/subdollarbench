@@ -607,6 +607,125 @@ fn test_add_step_maps_usage_losslessly() {
     assert_eq!(st2.cached_tokens, 0);
 }
 
+/// R84 F1: a canned opencode `session_v2` row with the given buckets.
+fn r84_make_db(
+    path: &std::path::Path,
+    input: i64,
+    output: i64,
+    reasoning: i64,
+    cached: i64,
+    write: i64,
+) {
+    let con = rusqlite::Connection::open(path).unwrap();
+    con.execute(
+        "create table session_v2(id text primary key, model text, cost real, \
+         tokens_input integer, tokens_output integer, tokens_reasoning integer, \
+         tokens_cache_read integer, tokens_cache_write integer, idle_outcome text, \
+         time_created integer)",
+        [],
+    )
+    .unwrap();
+    con.execute(
+        "insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+        rusqlite::params![
+            "ses_r84",
+            "openai/gpt-6-luna",
+            0.0,
+            input,
+            output,
+            reasoning,
+            cached,
+            write,
+            "succeeded",
+            1
+        ],
+    )
+    .unwrap();
+}
+
+/// R84 F1: the db holds the step events' tokens plus the end-of-run
+/// summary call's. The reconcile prices the difference from the same
+/// snapshot, so the run's cost is the snapshot price of every call, and
+/// the `[COST] reconciled` line names it.
+#[test]
+fn r84_f1_cost_counts_the_summary_call() {
+    let dir = r79_temp_dir("r84-f1");
+    let db = dir.join("opencode.db");
+    r84_make_db(&db, 150, 30, 7, 10, 0);
+    // The canned step event: 100 fresh, 20 output, 5 reasoning, 7 cached.
+    let tokens = ev(r#"{"input":100,"output":20,"reasoning":5,"cache":{"read":7}}"#);
+    let mut stats = OmpSessionStats::default();
+    OpenCodeRunner::add_step(&mut stats, &tokens, "openai/gpt-6-luna");
+    let before = stats.cost_usd;
+    let mut logs = Vec::new();
+    OpenCodeRunner::reconcile_db_usage(&db, &mut stats, "openai/gpt-6-luna", &mut |l| logs.push(l));
+    let expected = crate::cost::ModelPricing::for_model("openai/gpt-6-luna")
+        .compute_cost_with_cache_and_write(150, 10, 37, 0)
+        .total_cost_usd;
+    assert!(
+        (stats.cost_usd - expected).abs() < 1e-12,
+        "run cost {} vs all calls {expected}",
+        stats.cost_usd
+    );
+    assert!(stats.cost_usd > before, "the summary call must add cost");
+    assert_eq!(stats.prompt_tokens, 150);
+    assert_eq!(stats.completion_tokens, 37);
+    assert_eq!(stats.cached_tokens, 10);
+    assert_eq!(stats.total_tokens, 187);
+    assert!(
+        logs.iter()
+            .any(|l| l
+                == "[COST] reconciled: +62 tokens, +$0.00001103 (calls the events didn't report)"),
+        "{logs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R84 F1: equal totals add nothing; a missing db leaves the events and
+/// says why; a db with fewer tokens never lowers the events' count.
+#[test]
+fn r84_f1_reconcile_edges() {
+    let dir = r79_temp_dir("r84-f1-edges");
+    let tokens = ev(r#"{"input":100,"output":20,"reasoning":5,"cache":{"read":7}}"#);
+    let mut stats = OmpSessionStats::default();
+    OpenCodeRunner::add_step(&mut stats, &tokens, "openai/gpt-6-luna");
+    let before = stats.cost_usd;
+    let equal = dir.join("equal.db");
+    r84_make_db(&equal, 100, 20, 5, 7, 0);
+    let mut logs = Vec::new();
+    OpenCodeRunner::reconcile_db_usage(&equal, &mut stats, "openai/gpt-6-luna", &mut |l| {
+        logs.push(l)
+    });
+    assert_eq!(stats.cost_usd, before, "equal totals must add nothing");
+    assert!(logs.is_empty(), "{logs:?}");
+    let mut logs = Vec::new();
+    OpenCodeRunner::reconcile_db_usage(
+        &dir.join("missing.db"),
+        &mut stats,
+        "openai/gpt-6-luna",
+        &mut |l| logs.push(l),
+    );
+    assert_eq!(stats.cost_usd, before, "a missing db must leave the events");
+    assert!(
+        logs.iter().any(|l| l.contains("reconcile skipped")),
+        "{logs:?}"
+    );
+    let lower = dir.join("lower.db");
+    r84_make_db(&lower, 10, 2, 1, 1, 0);
+    let mut logs = Vec::new();
+    OpenCodeRunner::reconcile_db_usage(&lower, &mut stats, "openai/gpt-6-luna", &mut |l| {
+        logs.push(l)
+    });
+    assert_eq!(stats.cost_usd, before, "the db must never lower the events");
+    assert_eq!(stats.prompt_tokens, 100);
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("the step events show more tokens")),
+        "{logs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_backoff_sleep_exits_immediately_on_deadline_or_cancel() {
     // Past deadline: no sleep, false.
@@ -874,6 +993,38 @@ case "$1" in
         ;;
       timeout|cancel)
         wait_for_kill
+        ;;
+      reconcile)
+        data=""
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "-v" ]; then
+            case "$arg" in
+              *:/home/ubuntu/.local/share/opencode)
+                data="${arg%%:/home/ubuntu/.local/share/opencode}" ;;
+            esac
+          fi
+          prev="$arg"
+        done
+        if [ -n "$data" ]; then
+          python3 - "$data/opencode.db" <<'PY'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table session_v2(id text primary key, model text, cost real, "
+            "tokens_input integer, tokens_output integer, tokens_reasoning integer, "
+            "tokens_cache_read integer, tokens_cache_write integer, idle_outcome text, "
+            "time_created integer)")
+con.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)",
+            ("ses_covtest", "covtest/model", 0.0, 150, 30, 7, 10, 0, "succeeded", 1))
+con.commit()
+con.close()
+PY
+        fi
+        printf '%s\n' \
+          '{"type":"step_start","sessionID":"ses_covtest"}' \
+          '{"type":"tool_use","part":{"tool":"write"}}' \
+          '{"type":"step_finish","part":{"tokens":{"input":100,"output":20,"reasoning":5,"cache":{"read":7,"write":0}}}}'
+        exit 0
         ;;
     esac
     exit 1
@@ -1239,6 +1390,31 @@ fn oc_driver() {
                 .contains("refusing to run the agent unfiltered"),
             "{}",
             err
+        );
+        passed += 1;
+    }
+
+    // 18. R84 F1: the session db's extra summary call is priced into the
+    //     run's cost and named in the log.
+    {
+        let (res, logs) = run_oc_scenario("reconcile", &root, covtest_limits(10, 1.0, 10), None);
+        let st = res.expect("clean exit 0 with a db must be Ok");
+        assert_eq!(st.prompt_tokens, 150);
+        assert_eq!(st.completion_tokens, 37);
+        assert_eq!(st.cached_tokens, 10);
+        assert_eq!(st.total_tokens, 187);
+        let expected = crate::cost::ModelPricing::for_model("covtest/model")
+            .compute_cost_with_cache_and_write(150, 10, 37, 0)
+            .total_cost_usd;
+        assert!(
+            (st.cost_usd - expected).abs() < 1e-12,
+            "cost {} vs {expected}",
+            st.cost_usd
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("[COST] reconciled: +62 tokens")),
+            "{logs:?}"
         );
         passed += 1;
     }

@@ -119,6 +119,99 @@ impl OpenCodeRunner {
         u.cost
     }
 
+    /// R84 F1: the run's opencode db also counts the calls opencode makes
+    /// outside its `step_finish` events (the end-of-run summary call). Add
+    /// only what the events missed, priced from the same snapshot; the db
+    /// never lowers the events' count, and a missing or unreadable db
+    /// leaves them and logs why (never a harness fault).
+    ///
+    /// The db's `tokens_input` is the fresh input, `tokens_output` +
+    /// `tokens_reasoning` the completion, and the cache columns are the
+    /// read and write counts — the same buckets `step_usage` maps. The
+    /// logged `+<tokens>` is the step-event `total` shape (fresh +
+    /// completion + cache write; cached reads are counted separately).
+    fn reconcile_db_usage(
+        db_path: &std::path::Path,
+        stats: &mut OmpSessionStats,
+        model: &str,
+        log: &mut dyn FnMut(String),
+    ) {
+        // READ_ONLY: a missing file must not be created, and a live run's
+        // db is never written by the runner.
+        let conn = match rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                log(format!(
+                    "[COST] reconcile skipped: cannot open {}: {e}",
+                    db_path.display()
+                ));
+                return;
+            }
+        };
+        let totals: rusqlite::Result<(i64, i64, i64, i64, i64)> = conn.query_row(
+            "select coalesce(sum(tokens_input), 0), coalesce(sum(tokens_output), 0), \
+             coalesce(sum(tokens_reasoning), 0), coalesce(sum(tokens_cache_read), 0), \
+             coalesce(sum(tokens_cache_write), 0) from session_v2",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        );
+        let (input, output, reasoning, cached, write) = match totals {
+            Ok(v) => v,
+            Err(e) => {
+                log(format!(
+                    "[COST] reconcile skipped: cannot read session_v2: {e}"
+                ));
+                return;
+            }
+        };
+        let db_fresh = input.max(0) as u64;
+        let db_completion = (output.max(0) + reasoning.max(0)) as u64;
+        let db_cached = cached.max(0) as u64;
+        let db_write = write.max(0) as u64;
+        let fresh = db_fresh.saturating_sub(stats.prompt_tokens);
+        let completion = db_completion.saturating_sub(stats.completion_tokens);
+        let cached_delta = db_cached.saturating_sub(stats.cached_tokens);
+        let write_delta = db_write.saturating_sub(stats.cache_write_tokens);
+        let lowered = db_fresh < stats.prompt_tokens
+            || db_completion < stats.completion_tokens
+            || db_cached < stats.cached_tokens
+            || db_write < stats.cache_write_tokens;
+        if fresh == 0 && completion == 0 && cached_delta == 0 && write_delta == 0 {
+            if lowered {
+                log("[COST] reconcile: the step events show more tokens than the session db; keeping the events".to_string());
+            }
+            return;
+        }
+        let cost = crate::cost::ModelPricing::for_model(model)
+            .compute_cost_with_cache_and_write(fresh, cached_delta, completion, write_delta)
+            .total_cost_usd;
+        stats.prompt_tokens += fresh;
+        stats.completion_tokens += completion;
+        stats.cached_tokens += cached_delta;
+        stats.cache_write_tokens += write_delta;
+        stats.total_tokens += fresh + completion + write_delta;
+        stats.cost_usd += cost;
+        log(format!(
+            "[COST] reconciled: +{} tokens, +${:.8} (calls the events didn't report)",
+            fresh + completion + write_delta,
+            cost
+        ));
+        if lowered {
+            log("[COST] reconcile: the step events show more tokens than the session db in some kinds; kept the events' counts".to_string());
+        }
+    }
+
     /// R82 F4: the `--format json` event -> bench log line mapping, out
     /// of the run loop so the fixture capture and the runner use one
     /// implementation. The caller owns the turn counter and the
@@ -731,7 +824,9 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         }
         // R79 F1: fresh per-run config/data dirs; the guard removes them
         // when the run ends, so no session or key survives in the run dir.
-        let _run_dirs = RunDirs::new(&canonical_workdir);
+        // R84 F1: the data dir's db is read after each attempt, before the
+        // guard removes it.
+        let run_dirs = RunDirs::new(&canonical_workdir);
 
         // Same task text + entrypoint contract as OMP (shared helper).
         let (base_port, base_cmd, raw_guidance) = OmpRunner::task_guidance(spec.task, prompt);
@@ -1189,6 +1284,23 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             let _ = Command::new("docker")
                 .args(["rm", "-f", &container_name])
                 .output();
+            // R84 F1: after every attempt and resume, add the calls the
+            // step events missed (the end-of-run summary call). The
+            // budget above stays on the events during the run; the
+            // reconciled stats are what the phase records and scores.
+            {
+                let db_path = run_dirs.data.join("opencode.db");
+                let mut reconcile_log = |line: String| {
+                    let _ = retry_tx.send(line);
+                };
+                let mut stats_guard = stats.lock().unwrap();
+                Self::reconcile_db_usage(
+                    &db_path,
+                    &mut stats_guard,
+                    &effective_model,
+                    &mut reconcile_log,
+                );
+            }
             if billing_tripped.load(Ordering::SeqCst) {
                 let st = Self::snapshot_stats(
                     &stats,
