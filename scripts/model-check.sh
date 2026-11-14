@@ -148,11 +148,13 @@ wrong_pin_for() {
 }
 
 # R83 F3: minimax and deepseek are priced and run off-peak only (R75-1,
-# DECISIONS #30). The windows are the ones the grid's price overrides use
-# (`src/cost/calculator.rs`, `PRICE_OVERRIDES`): minimax's maker doubles
-# 01:00-15:00 UTC; deepseek's provider doubles in its weekday peak hours
-# (off-peak 16:30-00:30 UTC, the DeepSeek pricing page). A peak-time
-# check refuses with the window; the record is not written.
+# DECISIONS #30). minimax's window is the one PRICE_OVERRIDES names
+# (`src/cost/calculator.rs`: "2x 01:00-15:00 UTC"). deepseek's is its
+# published pricing page: peak 01:00-04:00 and 06:00-10:00 UTC, Monday
+# through Friday; weekends and Chinese public holidays are off-peak
+# (the check does not know the holiday calendar, so a holiday check may
+# wait a day). A peak-time check refuses with the window; the record is
+# not written.
 peak_state() {
     local id="$1" now dow hhmm
     now="${SDB_MODEL_CHECK_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
@@ -167,8 +169,11 @@ peak_state() {
             fi
             ;;
         deepseek/*)
-            if [[ "$dow" -le 5 && "$hhmm" > "00:29" && "$hhmm" < "16:30" ]]; then
-                echo "peak 00:30-16:30 UTC on weekdays (off-peak 16:30-00:30 UTC daily and weekends)"
+            # Peak 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday.
+            if [[ "$dow" -le 5 ]] && {
+                { [[ "$hhmm" > "00:59" && "$hhmm" < "04:00" ]] || \
+                  [[ "$hhmm" > "05:59" && "$hhmm" < "10:00" ]]; }; }; then
+                echo "peak 01:00-04:00 and 06:00-10:00 UTC on weekdays (off-peak all other hours, weekends and Chinese public holidays)"
             else
                 echo "off-peak"
             fi
@@ -856,8 +861,20 @@ EOF
         [[ "$got" == "off-peak" ]] || {
             echo "[self-test] minimax at 16:00 is not off-peak: $got" >&2; exit 1; }
         got="$(SDB_MODEL_CHECK_NOW="2026-11-16T07:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
-        [[ "$got" == peak* ]] && grep -q '00:30-16:30 UTC' <<<"$got" || {
+        [[ "$got" == peak* ]] && grep -q '01:00-04:00 and 06:00-10:00 UTC' <<<"$got" || {
             echo "[self-test] deepseek on a Monday 07:00 is not a named peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T01:30:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == peak* ]] || {
+            echo "[self-test] deepseek on a Monday 01:30 is not a peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T04:30:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Monday 04:30 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T05:30:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Monday 05:30 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T10:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Monday 10:00 is not off-peak: $got" >&2; exit 1; }
         got="$(SDB_MODEL_CHECK_NOW="2026-11-14T17:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
         [[ "$got" == "off-peak" ]] || {
             echo "[self-test] deepseek at 17:00 is not off-peak: $got" >&2; exit 1; }
