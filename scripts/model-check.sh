@@ -143,6 +143,36 @@ wrong_pin_for() {
     return 1
 }
 
+# R83 F3: minimax and deepseek are priced and run off-peak only (R75-1,
+# DECISIONS #30). The windows are the ones the grid's price overrides use
+# (`src/cost/calculator.rs`, `PRICE_OVERRIDES`): minimax's maker doubles
+# 01:00-15:00 UTC; deepseek's provider doubles in its weekday peak hours
+# (off-peak 16:30-00:30 UTC, the DeepSeek pricing page). A peak-time
+# check refuses with the window; the record is not written.
+peak_state() {
+    local id="$1" now dow hhmm
+    now="${SDB_MODEL_CHECK_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    dow="$(date -u -d "$now" +%u 2>/dev/null || echo 0)"
+    hhmm="$(date -u -d "$now" +%H:%M 2>/dev/null || echo 00:00)"
+    case "$id" in
+        minimax/*)
+            if [[ "$hhmm" > "00:59" && "$hhmm" < "15:00" ]]; then
+                echo "peak 01:00-15:00 UTC (off-peak 15:00-01:00 UTC)"
+            else
+                echo "off-peak"
+            fi
+            ;;
+        deepseek/*)
+            if [[ "$dow" -le 5 && "$hhmm" > "00:29" && "$hhmm" < "16:30" ]]; then
+                echo "peak 00:30-16:30 UTC on weekdays (off-peak 16:30-00:30 UTC daily and weekends)"
+            else
+                echo "off-peak"
+            fi
+            ;;
+        *) echo "off-peak" ;;
+    esac
+}
+
 # R79-18: a settled canned usage series for the self-test: six equal
 # reads, the 30 s settle window at the live 5 s interval.
 settled_series() {
@@ -751,6 +781,33 @@ EOF
             echo "[self-test] the failed endpoints call did not say why: $out" >&2; exit 1; }
         echo "[self-test] the wrong pin comes from the model's endpoints"
 
+        # R83 F3: minimax refuses at its peak with the window; deepseek
+        # refuses in its weekday peak and runs off-peak (and weekends).
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T07:00:00Z" peak_state "minimax/minimax-m3.1-flash")"
+        [[ "$got" == peak* ]] && grep -q '01:00-15:00 UTC' <<<"$got" || {
+            echo "[self-test] minimax at 07:00 is not a named peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T16:00:00Z" peak_state "minimax/minimax-m3.1-flash")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] minimax at 16:00 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T07:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == peak* ]] && grep -q '00:30-16:30 UTC' <<<"$got" || {
+            echo "[self-test] deepseek on a Monday 07:00 is not a named peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T17:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek at 17:00 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T07:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Saturday is not off-peak: $got" >&2; exit 1; }
+        rc=0
+        out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 SDB_MODEL_CHECK_NOW="2026-11-14T07:00:00Z" \
+            "$ROOT/scripts/model-check.sh" --harness omp \
+            "openrouter/minimax/minimax-m3.1-flash" 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a peak-time minimax check was accepted: $out" >&2; exit 1; }
+        grep -q 'off-peak only: peak 01:00-15:00 UTC' <<<"$out" || {
+            echo "[self-test] the peak refusal did not name the window: $out" >&2; exit 1; }
+        echo "[self-test] a peak-time check refuses with the window"
+
         echo "[self-test] the opencode config carries the per-model pin"
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
@@ -771,6 +828,12 @@ fi
 refuse_beside_running || exit 1
 
 id="${model#openrouter/}"
+# R83 F3: a peak-priced model is checked off-peak only.
+peak="$(peak_state "$id")"
+if [[ "$peak" != "off-peak" ]]; then
+    echo "[model-check] FATAL: $id is off-peak only: $peak" >&2
+    exit 1
+fi
 wire="openrouter/$id"
 
 # The snapshot row, if any: pin, prompt and completion rates. A model with
