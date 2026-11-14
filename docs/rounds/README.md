@@ -81,4 +81,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [80](80.md) | A narration voice cloned from the operator's own recording: the reading text, the recording check, resumable narration, a pronunciation list (outside the graded code) | merged |
 | [81](81.md) | The `.47` sandbox: Rust only (operator, 2026-11-13), no package registries, the harness builds and rejects a non-Rust server, rules `.47` | merged |
 | [82](82.md) | opencode is the graded harness: the default, one model per session, effort checked, the carried R79 items | merged |
-| [83](83.md) | The `.47` model checks are trustworthy: the wrong-pin probe, the beside-a-job refusal, off-peak, why hy4 and luna bill 1.6x | draft |
+| [83](83.md) | The `.47` model checks are trustworthy: the wrong-pin probe, the beside-a-job refusal, off-peak, why hy4 and luna bill 1.6x | open |
