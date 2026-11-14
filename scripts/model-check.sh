@@ -62,12 +62,18 @@ record_path() {
 # cells' runs dir; a foreground grid holds a reservation in its ledger's
 # `.running` dir.
 refuse_beside_running() {
-    local units grids
+    local units grids own pid f live
     # The canned self-test cases drive the check itself, not the live
     # environment; the refusal has its own case.
     [[ "${SDB_MODEL_CHECK_SKIP_BESIDE:-0}" == "1" ]] && return 0
+    # R83 F2: the check may run inside its own sdb-* unit (detach.sh
+    # passes the unit name); that unit is not a reason to refuse.
+    own="${SDB_DETACH_UNIT:-}"
+    if [[ -z "$own" ]]; then
+        own="$(sed -n 's#.*/\(sdb-[^/]*\.service\).*#\1#p' /proc/self/cgroup 2>/dev/null | head -1)"
+    fi
     units="$(systemctl --user list-units 'sdb-*' --state=running --no-legend --no-pager 2>/dev/null \
-        | awk '{print $1}' | paste -sd' ' -)"
+        | awk '{print $1}' | grep -v -x -F "${own:-__no_own_unit__}" | paste -sd' ' -)"
     if [[ -n "$units" ]]; then
         echo "[model-check] FATAL: refusing beside running sdb-* units: $units" >&2
         return 1
@@ -76,10 +82,16 @@ refuse_beside_running() {
         "$ROOT/scripts/beside-cell.sh" "model-check" >&2 || true
         return 1
     fi
+    # R83 F2: a res-<pid>-* file whose PID is dead is a leftover, not a
+    # running grid; only a live PID counts.
     grids="$(find "${SDB_MODEL_CHECK_RUNS_DIR:-$ROOT/runs}" -maxdepth 2 -type d -name '*.running' 2>/dev/null \
         | while read -r d; do
-            n="$(find "$d" -maxdepth 1 -type f -name 'res-*' 2>/dev/null | wc -l)"
-            [[ "$n" -gt 0 ]] && echo "$d"
+            live=0
+            while read -r f; do
+                pid="$(sed -n 's#.*/res-\([0-9][0-9]*\)-.*#\1#p' <<<"$f")"
+                [[ -n "$pid" && -d "/proc/$pid" ]] && live=1
+            done < <(find "$d" -maxdepth 1 -type f -name 'res-*' 2>/dev/null)
+            [[ "$live" -eq 1 ]] && echo "$d"
         done | paste -sd' ' -)"
     if [[ -n "$grids" ]]; then
         echo "[model-check] FATAL: refusing beside a running grid: $grids" >&2
@@ -661,26 +673,58 @@ cfg = json.loads(sys.argv[1])
 assert "body" not in cfg["providers"]["openrouter"], cfg
 assert "body" not in cfg["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"], cfg
 PY
-        # R79-12: a model check beside a running sdb-* unit refuses and
-        # names the unit.
-        mkdir -p "$dir/fakebin" "$dir/empty-runs"
+        # R83 F2: the check's own unit is not a reason to refuse; another
+        # unit is; a dead reservation is ignored, a live one refuses.
+        mkdir -p "$dir/fakebin" "$dir/fakebin-own" "$dir/empty-runs"
         cat > "$dir/fakebin/systemctl" <<'EOF'
 #!/bin/sh
-echo "sdb-fake.service loaded active running fake cell"
+echo "sdb-own.service loaded active running own check"
+echo "sdb-other.service loaded active running other job"
 EOF
-        chmod +x "$dir/fakebin/systemctl"
+        cat > "$dir/fakebin-own/systemctl" <<'EOF'
+#!/bin/sh
+echo "sdb-own.service loaded active running own check"
+EOF
+        chmod +x "$dir/fakebin/systemctl" "$dir/fakebin-own/systemctl"
         rc=0
         out="$(PATH="$dir/fakebin:$PATH" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
-            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" \
-            "$ROOT/scripts/model-check.sh" --harness omp "openrouter/openai/gpt-6-luna-pro" 2>&1)" \
-            || rc=$?
+            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running 2>&1)" || rc=$?
         [[ "$rc" -ne 0 ]] || {
-            echo "[self-test] a model check beside a fake unit was accepted" >&2
+            echo "[self-test] a check beside another fake unit was accepted" >&2
             exit 1; }
-        grep -q 'sdb-fake.service' <<<"$out" || {
-            echo "[self-test] the refusal did not name the unit: $out" >&2
+        grep -q 'sdb-other.service' <<<"$out" || {
+            echo "[self-test] the refusal did not name the other unit: $out" >&2
             exit 1; }
-        echo "[self-test] a model check beside a running unit is refused"
+        grep -q 'sdb-own.service' <<<"$out" && {
+            echo "[self-test] the refusal named its own unit: $out" >&2
+            exit 1; }
+        PATH="$dir/fakebin-own:$PATH" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running || {
+            echo "[self-test] a check inside its own fake unit was refused" >&2
+            exit 1; }
+        echo "[self-test] the refusal ignores its own unit and names another"
+
+        mkdir -p "$dir/res-runs/.grid-fake-ledger.tsv.running"
+        : > "$dir/res-runs/.grid-fake-ledger.tsv.running/res-999999-abc"
+        SDB_MODEL_CHECK_RUNS_DIR="$dir/res-runs" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            PATH="$dir/fakebin-own:$PATH" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running || {
+            echo "[self-test] a dead reservation was counted as a running grid" >&2
+            exit 1; }
+        : > "$dir/res-runs/.grid-fake-ledger.tsv.running/res-$$-abc"
+        rc=0
+        out="$(SDB_MODEL_CHECK_RUNS_DIR="$dir/res-runs" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            PATH="$dir/fakebin-own:$PATH" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a live reservation was ignored: $out" >&2; exit 1; }
+        grep -q 'grid-fake-ledger' <<<"$out" || {
+            echo "[self-test] the live-reservation refusal did not name the grid: $out" >&2
+            exit 1; }
+        rm -rf "$dir/res-runs"
+        echo "[self-test] a dead reservation is ignored and a live one refuses"
 
         # R83 F1: a provider that serves the model is never the wrong
         # pin; a provider outside its endpoints is; a failed endpoints
