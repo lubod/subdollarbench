@@ -27,7 +27,11 @@ mod graded_hash;
 ///   and `.47` decisions, the 2026-11-13 change to Rust, and DECISIONS
 ///   #31 (opencode is the `.47` harness). Score impact: every career
 ///   restarts at phase 1; the `.46` board stays unpublished and ling's
-///   `.46` phases are void; the `.47` board starts empty.
+///   `.46` phases are void; the `.47` board starts empty. Round 84
+///   amends it: an opencode phase's scored cost includes the calls
+///   opencode makes outside its `step_finish` events (the end-of-run
+///   summary call): +$0.00007255 on a 2-call luna probe (9.0% of that
+///   run; about 0.005-0.02% of a $1 phase).
 /// - `2026-11-09.46`: round 75. The reference server's port is fixed in
 ///   the prompt (round 74 R74-1: `ref-sql` is on 5480, not the lane's
 ///   port), the sandbox omp is pinned to the version F2 picks, and the
