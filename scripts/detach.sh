@@ -74,7 +74,8 @@ start() {
     # caller's PATH (and the toolchain homes, when set) to the unit. The
     # first bar through this script failed 1,120 runs on `nice: cargo: No
     # such file or directory` (docs/rounds/61.md, "After the merge").
-    local envs=(--setenv="SDB_DETACH_STATUS=$status" --setenv="PATH=$PATH")
+    local envs=(--setenv="SDB_DETACH_STATUS=$status" --setenv="PATH=$PATH" \
+        --setenv="SDB_DETACH_UNIT=$unit.service")
     local v
     for v in CARGO_HOME RUSTUP_HOME; do
         [[ -n "${!v:-}" ]] && envs+=(--setenv="$v=${!v}")

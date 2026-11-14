@@ -30,6 +30,10 @@
 #   SDB_MODEL_CHECK_GENERATION_JSON   a canned generation response
 #   SDB_MODEL_CHECK_MODELS_JSON       a canned /api/v1/models response
 #   SDB_MODEL_CHECK_OPENCODE_DB       a canned opencode session db
+#   SDB_MODEL_CHECK_OPENCODE_PROXY_LOG a canned opencode proxy log
+#   SDB_MODEL_CHECK_ENDPOINTS_JSON    a canned /api/v1/models/<id>/endpoints
+#   SDB_MODEL_CHECK_ENDPOINTS_RC      make that canned call fail
+#   SDB_MODEL_CHECK_NOW               the fake clock for the peak gate
 #   SDB_MODEL_CHECK_USAGE_BEFORE/AFTER the OpenRouter key usage around a run
 #   SDB_ENV_FILE                      where to read OPENROUTER_API_KEY
 set -euo pipefail
@@ -62,12 +66,18 @@ record_path() {
 # cells' runs dir; a foreground grid holds a reservation in its ledger's
 # `.running` dir.
 refuse_beside_running() {
-    local units grids
+    local units grids own pid f live
     # The canned self-test cases drive the check itself, not the live
     # environment; the refusal has its own case.
     [[ "${SDB_MODEL_CHECK_SKIP_BESIDE:-0}" == "1" ]] && return 0
+    # R83 F2: the check may run inside its own sdb-* unit (detach.sh
+    # passes the unit name); that unit is not a reason to refuse.
+    own="${SDB_DETACH_UNIT:-}"
+    if [[ -z "$own" ]]; then
+        own="$(sed -n 's#.*/\(sdb-[^/]*\.service\).*#\1#p' /proc/self/cgroup 2>/dev/null | head -1)"
+    fi
     units="$(systemctl --user list-units 'sdb-*' --state=running --no-legend --no-pager 2>/dev/null \
-        | awk '{print $1}' | paste -sd' ' -)"
+        | awk '{print $1}' | grep -v -x -F "${own:-__no_own_unit__}" | paste -sd' ' -)"
     if [[ -n "$units" ]]; then
         echo "[model-check] FATAL: refusing beside running sdb-* units: $units" >&2
         return 1
@@ -76,16 +86,100 @@ refuse_beside_running() {
         "$ROOT/scripts/beside-cell.sh" "model-check" >&2 || true
         return 1
     fi
+    # R83 F2: a res-<pid>-* file whose PID is dead is a leftover, not a
+    # running grid; only a live PID counts.
     grids="$(find "${SDB_MODEL_CHECK_RUNS_DIR:-$ROOT/runs}" -maxdepth 2 -type d -name '*.running' 2>/dev/null \
         | while read -r d; do
-            n="$(find "$d" -maxdepth 1 -type f -name 'res-*' 2>/dev/null | wc -l)"
-            [[ "$n" -gt 0 ]] && echo "$d"
+            live=0
+            while read -r f; do
+                pid="$(sed -n 's#.*/res-\([0-9][0-9]*\)-.*#\1#p' <<<"$f")"
+                [[ -n "$pid" && -d "/proc/$pid" ]] && live=1
+            done < <(find "$d" -maxdepth 1 -type f -name 'res-*' 2>/dev/null)
+            [[ "$live" -eq 1 ]] && echo "$d"
         done | paste -sd' ' -)"
     if [[ -n "$grids" ]]; then
         echo "[model-check] FATAL: refusing beside a running grid: $grids" >&2
         return 1
     fi
     return 0
+}
+
+# R83 F1: the wrong pin is a provider that serves other models but not
+# this one. The model's endpoints API lists the providers that do serve
+# it (the tag's first segment is the provider slug); a failed call fails
+# the check, never a silent fallback to a fixed slug.
+endpoints_slugs() {
+    local id="$1" body
+    if [[ -n "${SDB_MODEL_CHECK_ENDPOINTS_JSON:-}" ]]; then
+        [[ "${SDB_MODEL_CHECK_ENDPOINTS_RC:-0}" == "0" ]] || return 1
+        body="$(cat "$SDB_MODEL_CHECK_ENDPOINTS_JSON")" || return 1
+    else
+        body="$(curl -sS --max-time 20 \
+            "https://openrouter.ai/api/v1/models/$id/endpoints" \
+            -H "Authorization: Bearer $key")" || return 1
+    fi
+    printf '%s' "$body" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+eps = (d.get("data") or {}).get("endpoints") or []
+slugs = sorted({(e.get("tag") or "").split("/")[0] for e in eps if e.get("tag")})
+if not slugs:
+    raise SystemExit(1)
+print("\n".join(slugs))'
+}
+
+wrong_pin_for() {
+    local id="$1" pin="$2" eps candidate
+    eps="$(endpoints_slugs "$id")" || {
+        echo "[model-check] FATAL: cannot read the endpoints for $id; the wrong-pin probe cannot pick a provider" >&2
+        return 1
+    }
+    for candidate in novita baidu openai anthropic google deepseek minimax \
+        tencent z-ai inclusionai xiaomi qwen; do
+        [[ "$candidate" == "$pin" ]] && continue
+        grep -qx "$candidate" <<<"$eps" && continue
+        printf '%s' "$candidate"
+        return 0
+    done
+    echo "[model-check] FATAL: no provider outside $id's endpoints to use as the wrong pin" >&2
+    return 1
+}
+
+# R83 F3: minimax and deepseek are priced and run off-peak only (R75-1,
+# DECISIONS #30). minimax's window is the one PRICE_OVERRIDES names
+# (`src/cost/calculator.rs`: "2x 01:00-15:00 UTC"). deepseek's is its
+# published pricing page: peak 01:00-04:00 and 06:00-10:00 UTC, Monday
+# through Friday; weekends and Chinese public holidays are off-peak
+# (the check does not know the holiday calendar, so a holiday check may
+# wait a day). A peak-time check refuses with the window; the record is
+# not written.
+peak_state() {
+    local id="$1" now dow hhmm
+    now="${SDB_MODEL_CHECK_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    dow="$(date -u -d "$now" +%u 2>/dev/null || echo 0)"
+    hhmm="$(date -u -d "$now" +%H:%M 2>/dev/null || echo 00:00)"
+    case "$id" in
+        minimax/*)
+            if [[ "$hhmm" > "00:59" && "$hhmm" < "15:00" ]]; then
+                echo "peak 01:00-15:00 UTC (off-peak 15:00-01:00 UTC)"
+            else
+                echo "off-peak"
+            fi
+            ;;
+        deepseek/*)
+            # Peak 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday.
+            if [[ "$dow" -le 5 ]] && {
+                { [[ "$hhmm" > "00:59" && "$hhmm" < "04:00" ]] || \
+                  [[ "$hhmm" > "05:59" && "$hhmm" < "10:00" ]]; }; }; then
+                echo "peak 01:00-04:00 and 06:00-10:00 UTC on weekdays (off-peak all other hours, weekends and Chinese public holidays)"
+            else
+                echo "off-peak"
+            fi
+            ;;
+        *) echo "off-peak" ;;
+    esac
 }
 
 # R79-18: a settled canned usage series for the self-test: six equal
@@ -99,15 +193,17 @@ settled_series() {
 # and the snapshot provider pin (the same shape the runner sends). The pin
 # is per model: a provider-wide body would pin opencode's title model too.
 opencode_config_json() {
-    python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" "${3:-}" <<'PY'
 import json, sys
-model_id, pin = sys.argv[1], sys.argv[2]
+model_id, pin, base_url = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = {
     "model": "openrouter/" + model_id,
     "small_model": "openrouter/" + model_id,
     "providers": {"openrouter": {"models": {model_id: {
         "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}},
 }
+if base_url:
+    cfg["providers"]["openrouter"]["settings"] = {"baseURL": base_url}
 if pin:
     cfg["providers"]["openrouter"]["models"][model_id]["body"] = {
         "provider": {"only": [pin], "order": [pin]}}
@@ -192,6 +288,11 @@ PY
 ]}
 JSON
         export SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json"
+        # R83 F1: the wrong pin is picked from the model's endpoints; the
+        # opencode cases use a canned answer that lists only openai, so
+        # the first candidate outside it is novita.
+        printf '{"data":{"endpoints":[{"tag":"openai"}]}}\n' > "$dir/eps-openai.json"
+        export SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-openai.json"
 
         fixture() {
             local sent="$1" served="$2" provider="$3" bill="$4" fallback="$5"
@@ -442,11 +543,20 @@ PY
             printf '%s/model-check-opencode-%s.txt' "$SDB_MODEL_CHECK_DIR" \
                 "$(model_slug "$1")"
         }
+        # R83 F4: the canned proxy log; one positive call, 100 fresh and
+        # 10 completion, prices to $0.000015 at luna-pro's rates.
+        oc_proxy_one="$dir/oc-proxy-one.jsonl"
+        printf '%s\n' '{"path":"/api/v1/chat/completions","id":"gen-selftest-positive","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.000015,"status":200}' > "$oc_proxy_one"
+        oc_proxy_double="$dir/oc-proxy-double.jsonl"
+        printf '%s\n' '{"path":"/api/v1/chat/completions","id":"gen-selftest-double","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.00003,"status":200}' > "$oc_proxy_double"
+        oc_proxy_floor="$dir/oc-proxy-floor.jsonl"
+        printf '%s\n' '{"path":"/api/v1/chat/completions","id":"gen-selftest-floor","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.000001,"status":200}' > "$oc_proxy_floor"
         expect_pass_oc() {
             local name="$1" rc=0 rec
             rec="$(oc_record "$name")"
             out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
                 SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+                SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_one" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.000015)" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -473,11 +583,13 @@ PY
                 cat "$rec" >&2; exit 1; }
         }
         expect_fail_oc() {
-            local db="$1" want="$2" name="$3" series="${4:-}" rc=0 rec
+            local db="$1" want="$2" name="$3" series="${4:-}" proxy="${5:-$oc_proxy_one}"
+            local rc=0 rec
             rec="$(oc_record "$name")"
             [[ -n "$series" ]] || series="$(settled_series "${OC_BILL-0.000015}")"
             out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
                 SDB_MODEL_CHECK_OPENCODE_DB="$db" \
+                SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$proxy" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$series" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -509,6 +621,55 @@ JSON
         expect_pass_oc "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode session passes (a later failed session is ignored)"
 
+        case_name=opencode-extra-calls
+        oc_proxy_extra="$dir/oc-proxy-extra.jsonl"
+        printf '%s\n' \
+            '{"path":"/api/v1/chat/completions","id":"gen-selftest-positive","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.000015,"status":200}' \
+            '{"path":"/api/v1/chat/completions","id":"gen-selftest-title","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.0000045,"status":200}' \
+            > "$oc_proxy_extra"
+        rc=0
+        out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+            SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_extra" \
+            SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+            SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.0000195)" \
+            SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+            "$ROOT/scripts/model-check.sh" --harness opencode \
+            "openrouter/openai/gpt-6-luna-pro" 2>&1)" || rc=$?
+        [[ "$rc" -eq 0 ]] || {
+            echo "[self-test] opencode extra calls were refused: $out" >&2; exit 1; }
+        grep -q 'calls:    2 call(s): gen-selftest-positive, gen-selftest-title' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] opencode extra calls were not listed" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        grep -qF 'snapshot: $0.00001950 for the calls' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] opencode extra calls were not priced into the expected bill" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        echo "[self-test] the expected bill sums every proxied call"
+
+        case_name=opencode-late-charges
+        rc=0
+        out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+            SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_extra" \
+            SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+            SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.00006)" \
+            SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+            "$ROOT/scripts/model-check.sh" --harness opencode \
+            "openrouter/openai/gpt-6-luna-pro" 2>&1)" || rc=$?
+        [[ "$rc" -eq 0 ]] || {
+            echo "[self-test] late-landing earlier charges failed the check: $out" >&2; exit 1; }
+        grep -qF 'bill:     $0.00001950' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the bill is not the calls' own cost" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        grep -qF 'key usage delta $0.00006000' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the record does not name the polluted usage delta" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        echo "[self-test] the bill is the calls' cost, not the polluted usage delta"
+
         case_name=opencode-provider
         make_oc_db "$dir/oc-provider.db" Other 0.000015
         expect_fail_oc "$dir/oc-provider.db" "provider Other" \
@@ -518,17 +679,17 @@ JSON
         case_name=opencode-bill
         make_oc_db "$dir/oc-bill.db" openrouter 0.000030
         OC_BILL=0.000030 expect_fail_oc "$dir/oc-bill.db" "bill" \
-            "openrouter/openai/gpt-6-luna-pro"
+            "openrouter/openai/gpt-6-luna-pro" "" "$oc_proxy_double"
         echo "[self-test] an opencode 2x bill fails"
 
         case_name=opencode-lag
-        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage lags" \
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage not settled" \
             "openrouter/openai/gpt-6-luna-pro"
-        echo "[self-test] an opencode zero usage delta fails"
+        echo "[self-test] an opencode zero usage delta never settles and fails"
 
         case_name=opencode-floor
         OC_BILL=0.000001 expect_fail_oc "$dir/oc-pass.db" "floor" \
-            "openrouter/openai/gpt-6-luna-pro"
+            "openrouter/openai/gpt-6-luna-pro" "" "$oc_proxy_floor"
         echo "[self-test] an opencode bill below the floor fails"
 
         case_name=opencode-other-model
@@ -554,13 +715,13 @@ PY
         echo "[self-test] a positive session with 0 tokens fails"
 
         case_name=opencode-zero-bill
-        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" \
-            "the OpenRouter usage lags or the run was not billed" \
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage not settled" \
             "openrouter/openai/gpt-6-luna-pro"
-        echo "[self-test] a positive run with a \$0 bill fails"
+        echo "[self-test] a positive run with a \$0 usage delta fails"
 
         case_name=opencode-settle
         out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_one" \
             SDB_MODEL_CHECK_USAGE_BEFORE=0 \
             SDB_MODEL_CHECK_USAGE_AFTER="0,0,0.000005,0,0,0.000015,0.000015,0.000015,0.000015,0.000015,0.000015" \
             SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -613,26 +774,122 @@ cfg = json.loads(sys.argv[1])
 assert "body" not in cfg["providers"]["openrouter"], cfg
 assert "body" not in cfg["providers"]["openrouter"]["models"]["google/gemini-2.5-flash"], cfg
 PY
-        # R79-12: a model check beside a running sdb-* unit refuses and
-        # names the unit.
-        mkdir -p "$dir/fakebin" "$dir/empty-runs"
+        # R83 F2: the check's own unit is not a reason to refuse; another
+        # unit is; a dead reservation is ignored, a live one refuses.
+        mkdir -p "$dir/fakebin" "$dir/fakebin-own" "$dir/empty-runs"
         cat > "$dir/fakebin/systemctl" <<'EOF'
 #!/bin/sh
-echo "sdb-fake.service loaded active running fake cell"
+echo "sdb-own.service loaded active running own check"
+echo "sdb-other.service loaded active running other job"
 EOF
-        chmod +x "$dir/fakebin/systemctl"
+        cat > "$dir/fakebin-own/systemctl" <<'EOF'
+#!/bin/sh
+echo "sdb-own.service loaded active running own check"
+EOF
+        chmod +x "$dir/fakebin/systemctl" "$dir/fakebin-own/systemctl"
         rc=0
         out="$(PATH="$dir/fakebin:$PATH" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
-            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" \
-            "$ROOT/scripts/model-check.sh" --harness omp "openrouter/openai/gpt-6-luna-pro" 2>&1)" \
-            || rc=$?
+            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running 2>&1)" || rc=$?
         [[ "$rc" -ne 0 ]] || {
-            echo "[self-test] a model check beside a fake unit was accepted" >&2
+            echo "[self-test] a check beside another fake unit was accepted" >&2
             exit 1; }
-        grep -q 'sdb-fake.service' <<<"$out" || {
-            echo "[self-test] the refusal did not name the unit: $out" >&2
+        grep -q 'sdb-other.service' <<<"$out" || {
+            echo "[self-test] the refusal did not name the other unit: $out" >&2
             exit 1; }
-        echo "[self-test] a model check beside a running unit is refused"
+        grep -q 'sdb-own.service' <<<"$out" && {
+            echo "[self-test] the refusal named its own unit: $out" >&2
+            exit 1; }
+        PATH="$dir/fakebin-own:$PATH" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            SDB_MODEL_CHECK_RUNS_DIR="$dir/empty-runs" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running || {
+            echo "[self-test] a check inside its own fake unit was refused" >&2
+            exit 1; }
+        echo "[self-test] the refusal ignores its own unit and names another"
+
+        mkdir -p "$dir/res-runs/.grid-fake-ledger.tsv.running"
+        : > "$dir/res-runs/.grid-fake-ledger.tsv.running/res-999999-abc"
+        SDB_MODEL_CHECK_RUNS_DIR="$dir/res-runs" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            PATH="$dir/fakebin-own:$PATH" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running || {
+            echo "[self-test] a dead reservation was counted as a running grid" >&2
+            exit 1; }
+        : > "$dir/res-runs/.grid-fake-ledger.tsv.running/res-$$-abc"
+        rc=0
+        out="$(SDB_MODEL_CHECK_RUNS_DIR="$dir/res-runs" SDB_CELL_RUNS_DIR="$dir/empty-runs" \
+            PATH="$dir/fakebin-own:$PATH" SDB_DETACH_UNIT=sdb-own.service \
+            refuse_beside_running 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a live reservation was ignored: $out" >&2; exit 1; }
+        grep -q 'grid-fake-ledger' <<<"$out" || {
+            echo "[self-test] the live-reservation refusal did not name the grid: $out" >&2
+            exit 1; }
+        rm -rf "$dir/res-runs"
+        echo "[self-test] a dead reservation is ignored and a live one refuses"
+
+        # R83 F1: a provider that serves the model is never the wrong
+        # pin; a provider outside its endpoints is; a failed endpoints
+        # call fails the check.
+        printf '{"data":{"endpoints":[{"tag":"novita/fp8"}]}}\n' > "$dir/eps-novita.json"
+        got="$(SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-novita.json" \
+            wrong_pin_for "openai/gpt-6-luna-pro" "openai")" || {
+            echo "[self-test] the endpoints pick failed on a novita listing" >&2; exit 1; }
+        [[ "$got" != "novita" ]] || {
+            echo "[self-test] the wrong pin was a provider that serves the model: $got" >&2
+            exit 1; }
+        got="$(SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-openai.json" \
+            wrong_pin_for "openai/gpt-6-luna-pro" "openai")" || {
+            echo "[self-test] the endpoints pick failed on an openai listing" >&2; exit 1; }
+        [[ "$got" == "novita" ]] || {
+            echo "[self-test] the wrong pin was $got, want novita" >&2; exit 1; }
+        rc=0
+        out="$(SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-openai.json" \
+            SDB_MODEL_CHECK_ENDPOINTS_RC=1 \
+            wrong_pin_for "openai/gpt-6-luna-pro" "openai" 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a failed endpoints call was accepted: $out" >&2; exit 1; }
+        grep -q 'cannot read the endpoints' <<<"$out" || {
+            echo "[self-test] the failed endpoints call did not say why: $out" >&2; exit 1; }
+        echo "[self-test] the wrong pin comes from the model's endpoints"
+
+        # R83 F3: minimax refuses at its peak with the window; deepseek
+        # refuses in its weekday peak and runs off-peak (and weekends).
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T07:00:00Z" peak_state "minimax/minimax-m3.1-flash")"
+        [[ "$got" == peak* ]] && grep -q '01:00-15:00 UTC' <<<"$got" || {
+            echo "[self-test] minimax at 07:00 is not a named peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T16:00:00Z" peak_state "minimax/minimax-m3.1-flash")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] minimax at 16:00 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T07:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == peak* ]] && grep -q '01:00-04:00 and 06:00-10:00 UTC' <<<"$got" || {
+            echo "[self-test] deepseek on a Monday 07:00 is not a named peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T01:30:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == peak* ]] || {
+            echo "[self-test] deepseek on a Monday 01:30 is not a peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T04:30:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Monday 04:30 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T05:30:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Monday 05:30 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-16T10:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Monday 10:00 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T17:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek at 17:00 is not off-peak: $got" >&2; exit 1; }
+        got="$(SDB_MODEL_CHECK_NOW="2026-11-14T07:00:00Z" peak_state "deepseek/deepseek-v4.1-flash-1017")"
+        [[ "$got" == "off-peak" ]] || {
+            echo "[self-test] deepseek on a Saturday is not off-peak: $got" >&2; exit 1; }
+        rc=0
+        out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 SDB_MODEL_CHECK_NOW="2026-11-14T07:00:00Z" \
+            "$ROOT/scripts/model-check.sh" --harness omp \
+            "openrouter/minimax/minimax-m3.1-flash" 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a peak-time minimax check was accepted: $out" >&2; exit 1; }
+        grep -q 'off-peak only: peak 01:00-15:00 UTC' <<<"$out" || {
+            echo "[self-test] the peak refusal did not name the window: $out" >&2; exit 1; }
+        echo "[self-test] a peak-time check refuses with the window"
 
         echo "[self-test] the opencode config carries the per-model pin"
 
@@ -654,6 +911,12 @@ fi
 refuse_beside_running || exit 1
 
 id="${model#openrouter/}"
+# R83 F3: a peak-priced model is checked off-peak only.
+peak="$(peak_state "$id")"
+if [[ "$peak" != "off-peak" ]]; then
+    echo "[model-check] FATAL: $id is off-peak only: $peak" >&2
+    exit 1
+fi
 wire="openrouter/$id"
 
 # The snapshot row, if any: pin, prompt and completion rates. A model with
@@ -720,6 +983,10 @@ fi
 
 work="$(mktemp -d /tmp/sdb-model-check.XXXXXX)"
 cleanup() {
+    # R83 F4: a logging proxy left behind by an early exit.
+    if [[ -f "$work/proxy.pid" ]]; then
+        kill "$(cat "$work/proxy.pid")" 2>/dev/null || true
+    fi
     rm -rf "$work"
 }
 trap cleanup EXIT
@@ -886,6 +1153,11 @@ opencode_check() {
     local db="${SDB_MODEL_CHECK_OPENCODE_DB:-}" run_dir="$work/opencode"
     local events="$work/opencode-events.json" log="$work/opencode.log" rc=0
     local usage_before usage_after bill
+    # R83 F4: every request goes through a local logging proxy (the
+    # config's baseURL); the expected bill is the sum of its calls, not
+    # the positive session's row alone.
+    local proxy_log="${SDB_MODEL_CHECK_OPENCODE_PROXY_LOG:-$work/opencode-proxy.jsonl}"
+    local proxy_pid="" proxy_port=""
     # R79-15: the positive session has its own id and data dir; the
     # negative probe must never write into the db the verdict reads.
     local session_id="${SDB_MODEL_CHECK_OPENCODE_SESSION_ID:-ses_model_check_$(model_slug "$model")_$$}"
@@ -901,10 +1173,27 @@ opencode_check() {
     fi
     if [[ -z "$db" ]]; then
         mkdir -p "$run_dir/ws" "$run_dir/cfg" "$run_dir/data"
+        proxy_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+        : > "$proxy_log"
+        python3 "$ROOT/scripts/opencode-proxy.py" "$proxy_port" "$proxy_log" &
+        proxy_pid=$!
+        echo "$proxy_pid" > "$work/proxy.pid"
+        local i proxy_ready=0
+        for i in $(seq 1 50); do
+            if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.2); sys.exit(0 if s.connect_ex(('127.0.0.1', $proxy_port)) == 0 else 1)"; then
+                proxy_ready=1
+                break
+            fi
+            sleep 0.1
+        done
+        if [[ "$proxy_ready" != "1" ]]; then
+            echo "[model-check] FATAL: the logging proxy did not start on port $proxy_port" >&2
+            exit 1
+        fi
         local cfg_json
-        cfg_json="$(opencode_config_json "$id" "$pin")"
+        cfg_json="$(opencode_config_json "$id" "$pin" "http://127.0.0.1:$proxy_port/api/v1")"
         set +e
-        timeout 300 docker run --rm --name "sdb-model-check-oc-$(model_slug "$model")-$$" \
+        timeout 300 docker run --rm --network=host --name "sdb-model-check-oc-$(model_slug "$model")-$$" \
             -v "$run_dir/ws:/workspace" \
             -v "$run_dir/cfg:/home/ubuntu/.config/opencode" \
             -v "$run_dir/data:/home/ubuntu/.local/share/opencode" \
@@ -998,23 +1287,21 @@ opencode_check() {
         "$usage_before" "$usage_after")"
     local usage_note
     if [[ "$usage_settled" == "1" ]]; then
-        usage_note="settled after $usage_reads reads (delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+        usage_note="settled after $usage_reads reads (delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"); key usage $usage_before -> $usage_after)"
     else
-        usage_note="not settled after $usage_reads reads (last delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+        usage_note="not settled after $usage_reads reads (last delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"); key usage $usage_before -> $usage_after)"
     fi
     # R79-4: the negative probe. A wrong pin must be refused by
     # OpenRouter's routing at $0 (no inference is billed); if the wrong-pin
     # run succeeds, opencode did not forward the pin and the positive run
     # proves nothing. A negative run that fails for another reason is
     # inconclusive, not a pass.
-    local wrong_pin="novita" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
+    local wrong_pin="" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
     local neg_dir="$work/opencode-negative"
-    if [[ "$pin" == "novita" ]]; then
-        wrong_pin="baidu"
-    fi
     if [[ -z "$pin" ]]; then
         neg_line="negative: no pin (skipped)"
     else
+        wrong_pin="$(wrong_pin_for "$id" "$pin")" || exit 1
         if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC:-}" ]]; then
             neg_rc="$SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC"
             if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS:-}" ]]; then
@@ -1023,9 +1310,9 @@ opencode_check() {
         else
             local neg_cfg
             mkdir -p "$neg_dir/ws" "$neg_dir/cfg" "$neg_dir/data"
-            neg_cfg="$(opencode_config_json "$id" "$wrong_pin")"
+            neg_cfg="$(opencode_config_json "$id" "$wrong_pin" "http://127.0.0.1:$proxy_port/api/v1")"
             set +e
-            timeout 300 docker run --rm --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
+            timeout 300 docker run --rm --network=host --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
                 -v "$neg_dir/ws:/workspace" \
                 -v "$neg_dir/cfg:/home/ubuntu/.config/opencode" \
                 -v "$neg_dir/data:/home/ubuntu/.local/share/opencode" \
@@ -1039,23 +1326,31 @@ opencode_check() {
             set -e
         fi
         if [[ "$neg_rc" -eq 0 ]]; then
-            neg_line="negative: pin $wrong_pin was served (opencode did not forward the pin)"
+            neg_line="negative: pin $wrong_pin was served (opencode did not forward the pin; it is not in the model's endpoints)"
         elif grep -q "No allowed providers are available" "$neg_events" 2>/dev/null \
             && grep -q "permits only: $wrong_pin" "$neg_events" 2>/dev/null; then
             neg_ok=1
-            neg_line="negative: pin $wrong_pin refused by OpenRouter's routing (exit $neg_rc)"
+            neg_line="negative: pin $wrong_pin refused by OpenRouter's routing (not in the model's endpoints; exit $neg_rc)"
         else
             neg_line="negative: pin $wrong_pin was inconclusive (exit $neg_rc; no routing refusal)"
         fi
     fi
+    if [[ -n "$proxy_pid" ]]; then
+        kill "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" 2>/dev/null || true
+        proxy_pid=""
+        rm -f "$work/proxy.pid"
+    fi
     local verdict
     verdict="$(python3 - "$db" "$id" "$rate_prompt" "$rate_cache_read" \
-        "$rate_cache_write" "$rate_completion" "$bill" "$session_id" <<'PY'
-import json, sqlite3, sys
+        "$rate_cache_write" "$rate_completion" "$bill" "$session_id" \
+        "$proxy_log" <<'PY'
+import json, os, sqlite3, sys
 
 (db, model_id, rate_prompt, rate_cache_read, rate_cache_write,
- rate_completion, bill_arg, session_id) = sys.argv[1:9]
+ rate_completion, bill_arg, session_id, proxy_log) = sys.argv[1:10]
 bill = float(bill_arg)
+usage_delta = bill
 con = sqlite3.connect(db)
 row = con.execute(
     "select model, cost, tokens_input, tokens_output, tokens_reasoning, "
@@ -1064,7 +1359,9 @@ row = con.execute(
 if not row:
     print(json.dumps({
         "sent": "openrouter/" + model_id, "served": "", "provider": "",
-        "bill": bill, "session_cost": 0.0, "expected": 0.0, "ratio": None,
+        "bill": bill, "session_cost": 0.0, "expected": 0.0,
+        "session_expected": 0.0, "calls": [], "usage_delta": bill,
+        "ratio": None,
         "bill_ok": None, "tokens_fresh": 0, "tokens_input": 0,
         "tokens_output": 0, "tokens_reasoning": 0, "tokens_cached": 0,
         "tokens_completion": 0, "tokens_write": 0, "tools": [],
@@ -1103,6 +1400,64 @@ for (data,) in con.execute(
             "status": st.get("status") or "",
             "text": text,
         })
+# R83 F4: price every call the proxy saw (the positive session, the
+# title/summary call, any retry), not just the session_v2 row.
+def num(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+calls = []
+if proxy_log and os.path.exists(proxy_log):
+    for line in open(proxy_log, errors="replace"):
+        try:
+            c = json.loads(line)
+        except Exception:
+            continue
+        if not str(c.get("path") or "").endswith("/chat/completions"):
+            continue
+        u = c.get("usage")
+        if not isinstance(u, dict):
+            continue
+        details = u.get("prompt_tokens_details") or {}
+        prompt_tokens = num(u.get("prompt_tokens"))
+        cached = num(details.get("cached_tokens"))
+        write = num(details.get("cache_write_tokens"))
+        completion_tokens = num(u.get("completion_tokens"))
+        fresh = max(0, prompt_tokens - cached - write)
+        snapshot = (
+            fresh * float(rate_prompt)
+            + cached * float(rate_cache_read)
+            + write * float(rate_cache_write)
+            + completion_tokens * float(rate_completion)
+        ) / 1_000_000
+        calls.append({
+            "id": c.get("id") or "",
+            "model": c.get("model") or "",
+            "prompt": prompt_tokens,
+            "fresh": fresh,
+            "cached": cached,
+            "write": write,
+            "completion": completion_tokens,
+            "cost": c.get("cost"),
+            "snapshot": snapshot,
+        })
+
+# R83 F4: the bill is the calls' own OpenRouter cost, not the key usage
+# delta. The delta can include earlier calls that land late (live
+# 2026-11-14, hy4: three calls cost $0.00084632, the delta read
+# $0.00271741 because two earlier probes landed during the poll); the
+# per-call cost is the provider's charge for this run's calls.
+bill = 0.0
+missing_cost = False
+for c in calls:
+    if isinstance(c.get("cost"), (int, float)):
+        bill += float(c["cost"])
+    else:
+        missing_cost = True
+
 reasons = []
 sent = "openrouter/" + model_id
 # R82 F2: the small model (title/summary) is the career model too; a
@@ -1137,12 +1492,20 @@ if bill <= 0:
 # R79-5: opencode's session_v2.tokens_input is the fresh input; the
 # cached tokens are reported apart (the step's input 125, cache read 5312).
 tokens_fresh = tokens_input
-expected = (
+# R83 F4: the session's own snapshot price, kept for the record; the
+# check's expected is the sum over every call the proxy saw.
+session_expected = (
     tokens_fresh * float(rate_prompt)
     + tokens_cached * float(rate_cache_read)
     + tokens_write * float(rate_cache_write)
     + completion * float(rate_completion)
 ) / 1_000_000
+expected = sum(c["snapshot"] for c in calls)
+if not calls:
+    reasons.append(
+        "no chat calls in the proxy log; the expected bill cannot count every call")
+if missing_cost:
+    reasons.append("a proxied call has no OpenRouter cost")
 ratio = None
 bill_ok = None
 if expected > 0:
@@ -1164,7 +1527,8 @@ if outcome and outcome != "succeeded":
     reasons.append("session outcome %s" % outcome)
 print(json.dumps({
     "sent": sent, "served": served, "provider": provider, "bill": bill,
-    "session_cost": session_cost,
+    "session_cost": session_cost, "session_expected": session_expected,
+    "calls": calls, "usage_delta": usage_delta,
     "expected": expected, "ratio": ratio, "bill_ok": bill_ok,
     "tokens_fresh": tokens_fresh, "tokens_input": tokens_input,
     "tokens_output": tokens_output, "tokens_reasoning": tokens_reasoning,
@@ -1175,13 +1539,21 @@ print(json.dumps({
 }))
 PY
 )"
-    local ok sent served provider bill expected ratio tokens_line reasons
+    local ok sent served provider bill expected session_expected ratio
+    local usage_delta tokens_line reasons calls_line call_lines
     ok="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["ok"] else "0")' "$verdict")"
     sent="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$verdict")"
     served="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["served"])' "$verdict")"
     provider="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["provider"])' "$verdict")"
     bill="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["bill"])' "$verdict")"
     expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["expected"])' "$verdict")"
+    session_expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_expected"])' "$verdict")"
+    usage_delta="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["usage_delta"])' "$verdict")"
+    calls_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d call(s): %s" % (len(v["calls"]), ", ".join((c["id"] or "(no id)") for c in v["calls"])))' "$verdict")"
+    call_lines="$(python3 -c 'import json,sys
+for c in json.loads(sys.argv[1])["calls"]:
+    cost = "(none)" if c["cost"] is None else "$%.8f" % float(c["cost"])
+    print("call:     %s %s prompt %d (fresh %d, cached %d, write %d), completion %d, OpenRouter %s, snapshot $%.8f" % (c["id"] or "(no id)", c["model"] or "(no model)", c["prompt"], c["fresh"], c["cached"], c["write"], c["completion"], cost, c["snapshot"]))' "$verdict")"
     ratio="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("" if v["ratio"] is None else "%.3f" % v["ratio"])' "$verdict")"
     tokens_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d fresh, %d cached, %d completion, %d cache write" % (v["tokens_fresh"], v["tokens_cached"], v["tokens_completion"], v["tokens_write"]))' "$verdict")"
     raw_row="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("input %d, output %d, reasoning %d, cache read %d, cache write %d, cost %.8f" % (v["tokens_input"], v["tokens_output"], v["tokens_reasoning"], v["tokens_cached"], v["tokens_write"], v["session_cost"]))' "$verdict")"
@@ -1212,7 +1584,12 @@ PY
         else
             echo "provider: $provider (no pin sent)"
         fi
-        echo "bill:     \$$bill (OpenRouter key usage; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"); snapshot \$$expected, ratio $ratio)"
+        echo "bill:     \$$bill (the calls' OpenRouter cost; key usage delta \$$usage_delta; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"))"
+        echo "snapshot: \$$expected for the calls (the session row alone \$$session_expected), ratio $ratio"
+        echo "calls:    $calls_line"
+        if [[ -n "$call_lines" ]]; then
+            echo "$call_lines"
+        fi
         echo "usage:    $usage_note"
         echo "tokens:   $tokens_line (opencode session)"
         echo "session:  $raw_row (session_v2)"

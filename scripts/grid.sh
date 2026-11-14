@@ -798,6 +798,11 @@ run_grid() {
         fi
     fi
     RUNNING_DIR="${LEDGER}.running"
+    # R83 F2: the reservations go on every exit, including a SIGTERM'd
+    # grid; the model check reads them as live only while their PID is.
+    trap 'rm -rf "$RUNNING_DIR"' EXIT
+    trap 'rm -rf "$RUNNING_DIR"; exit 143' TERM
+    trap 'rm -rf "$RUNNING_DIR"; exit 130' INT
     mkdir -p "$(dirname "$LEDGER")"
     # R48-7: the ledger's career column is the line index in the careers
     # file. Freeze that file next to the ledger on the first start; a later
@@ -1490,6 +1495,40 @@ EOF
         cat "$scenario/out"; exit 1; }
     [[ ! -f "$STOP" ]] || { echo "probe race: a false STOP"; exit 1; }
     MAX_PHASE=4
+
+    # 16b) R83 F2: a grid killed with SIGTERM leaves no res-* files.
+    scenario="$dir/r83term"
+    mkdir -p "$scenario"
+    printf '%s\n' c1 > "$scenario/careers.txt"
+    SDB_GRID_TRACE="$scenario/trace.tsv"
+    SDB_GRID_SKIP_PREFLIGHT=1
+    SDB_FAKE_SLEEP_ALL=1
+    SDB_FAKE_SLEEP=30
+    export SDB_GRID_TRACE SDB_GRID_SKIP_PREFLIGHT SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
+    SDB_RUNS_DIR="$scenario/runs" "$ROOT/scripts/grid.sh" \
+        --careers "$scenario/careers.txt" --lanes 1 --cell "$fake" \
+        --cap 1.0 --ledger "$scenario/ledger.tsv" >"$scenario/out" 2>&1 &
+    grid_pid=$!
+    reserved=0
+    for _ in $(seq 1 50); do
+        if ls "$scenario/ledger.tsv.running"/res-* >/dev/null 2>&1; then
+            reserved=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "$reserved" != "1" ]]; then
+        kill -TERM "$grid_pid" 2>/dev/null || true
+        echo "sigterm: the grid never reserved"; cat "$scenario/out"; exit 1
+    fi
+    kill -TERM "$grid_pid"
+    wait "$grid_pid" || true
+    if ls "$scenario/ledger.tsv.running"/res-* >/dev/null 2>&1; then
+        echo "sigterm: the grid left res-* files"; ls "$scenario/ledger.tsv.running"; exit 1
+    fi
+    unset SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP
+    export -n SDB_FAKE_SLEEP_ALL SDB_FAKE_SLEEP 2>/dev/null || true
+    echo "[self-test] a SIGTERM'd grid leaves no reservations"
 
     # 17) R68 F3: a paid grid refuses a model with no fresh PASS
     # model-check record on the current sandbox image.
