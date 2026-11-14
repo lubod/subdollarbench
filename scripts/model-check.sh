@@ -88,6 +88,49 @@ refuse_beside_running() {
     return 0
 }
 
+# R83 F1: the wrong pin is a provider that serves other models but not
+# this one. The model's endpoints API lists the providers that do serve
+# it (the tag's first segment is the provider slug); a failed call fails
+# the check, never a silent fallback to a fixed slug.
+endpoints_slugs() {
+    local id="$1" body
+    if [[ -n "${SDB_MODEL_CHECK_ENDPOINTS_JSON:-}" ]]; then
+        [[ "${SDB_MODEL_CHECK_ENDPOINTS_RC:-0}" == "0" ]] || return 1
+        body="$(cat "$SDB_MODEL_CHECK_ENDPOINTS_JSON")" || return 1
+    else
+        body="$(curl -sS --max-time 20 \
+            "https://openrouter.ai/api/v1/models/$id/endpoints" \
+            -H "Authorization: Bearer $key")" || return 1
+    fi
+    printf '%s' "$body" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+eps = (d.get("data") or {}).get("endpoints") or []
+slugs = sorted({(e.get("tag") or "").split("/")[0] for e in eps if e.get("tag")})
+if not slugs:
+    raise SystemExit(1)
+print("\n".join(slugs))'
+}
+
+wrong_pin_for() {
+    local id="$1" pin="$2" eps candidate
+    eps="$(endpoints_slugs "$id")" || {
+        echo "[model-check] FATAL: cannot read the endpoints for $id; the wrong-pin probe cannot pick a provider" >&2
+        return 1
+    }
+    for candidate in novita baidu openai anthropic google deepseek minimax \
+        tencent z-ai inclusionai xiaomi qwen; do
+        [[ "$candidate" == "$pin" ]] && continue
+        grep -qx "$candidate" <<<"$eps" && continue
+        printf '%s' "$candidate"
+        return 0
+    done
+    echo "[model-check] FATAL: no provider outside $id's endpoints to use as the wrong pin" >&2
+    return 1
+}
+
 # R79-18: a settled canned usage series for the self-test: six equal
 # reads, the 30 s settle window at the live 5 s interval.
 settled_series() {
@@ -192,6 +235,11 @@ PY
 ]}
 JSON
         export SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json"
+        # R83 F1: the wrong pin is picked from the model's endpoints; the
+        # opencode cases use a canned answer that lists only openai, so
+        # the first candidate outside it is novita.
+        printf '{"data":{"endpoints":[{"tag":"openai"}]}}\n' > "$dir/eps-openai.json"
+        export SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-openai.json"
 
         fixture() {
             local sent="$1" served="$2" provider="$3" bill="$4" fallback="$5"
@@ -634,6 +682,31 @@ EOF
             exit 1; }
         echo "[self-test] a model check beside a running unit is refused"
 
+        # R83 F1: a provider that serves the model is never the wrong
+        # pin; a provider outside its endpoints is; a failed endpoints
+        # call fails the check.
+        printf '{"data":{"endpoints":[{"tag":"novita/fp8"}]}}\n' > "$dir/eps-novita.json"
+        got="$(SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-novita.json" \
+            wrong_pin_for "openai/gpt-6-luna-pro" "openai")" || {
+            echo "[self-test] the endpoints pick failed on a novita listing" >&2; exit 1; }
+        [[ "$got" != "novita" ]] || {
+            echo "[self-test] the wrong pin was a provider that serves the model: $got" >&2
+            exit 1; }
+        got="$(SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-openai.json" \
+            wrong_pin_for "openai/gpt-6-luna-pro" "openai")" || {
+            echo "[self-test] the endpoints pick failed on an openai listing" >&2; exit 1; }
+        [[ "$got" == "novita" ]] || {
+            echo "[self-test] the wrong pin was $got, want novita" >&2; exit 1; }
+        rc=0
+        out="$(SDB_MODEL_CHECK_ENDPOINTS_JSON="$dir/eps-openai.json" \
+            SDB_MODEL_CHECK_ENDPOINTS_RC=1 \
+            wrong_pin_for "openai/gpt-6-luna-pro" "openai" 2>&1)" || rc=$?
+        [[ "$rc" -ne 0 ]] || {
+            echo "[self-test] a failed endpoints call was accepted: $out" >&2; exit 1; }
+        grep -q 'cannot read the endpoints' <<<"$out" || {
+            echo "[self-test] the failed endpoints call did not say why: $out" >&2; exit 1; }
+        echo "[self-test] the wrong pin comes from the model's endpoints"
+
         echo "[self-test] the opencode config carries the per-model pin"
 
         [[ "$("$ROOT/scripts/model-check.sh" --slug openrouter/z-ai/glm-5.3)" == "z-ai-glm-5.3" ]] || {
@@ -1007,14 +1080,12 @@ opencode_check() {
     # run succeeds, opencode did not forward the pin and the positive run
     # proves nothing. A negative run that fails for another reason is
     # inconclusive, not a pass.
-    local wrong_pin="novita" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
+    local wrong_pin="" neg_events="$work/opencode-negative.json" neg_rc=0 neg_ok=0 neg_line
     local neg_dir="$work/opencode-negative"
-    if [[ "$pin" == "novita" ]]; then
-        wrong_pin="baidu"
-    fi
     if [[ -z "$pin" ]]; then
         neg_line="negative: no pin (skipped)"
     else
+        wrong_pin="$(wrong_pin_for "$id" "$pin")" || exit 1
         if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC:-}" ]]; then
             neg_rc="$SDB_MODEL_CHECK_OPENCODE_NEGATIVE_RC"
             if [[ -n "${SDB_MODEL_CHECK_OPENCODE_NEGATIVE_EVENTS:-}" ]]; then
@@ -1039,11 +1110,11 @@ opencode_check() {
             set -e
         fi
         if [[ "$neg_rc" -eq 0 ]]; then
-            neg_line="negative: pin $wrong_pin was served (opencode did not forward the pin)"
+            neg_line="negative: pin $wrong_pin was served (opencode did not forward the pin; it is not in the model's endpoints)"
         elif grep -q "No allowed providers are available" "$neg_events" 2>/dev/null \
             && grep -q "permits only: $wrong_pin" "$neg_events" 2>/dev/null; then
             neg_ok=1
-            neg_line="negative: pin $wrong_pin refused by OpenRouter's routing (exit $neg_rc)"
+            neg_line="negative: pin $wrong_pin refused by OpenRouter's routing (not in the model's endpoints; exit $neg_rc)"
         else
             neg_line="negative: pin $wrong_pin was inconclusive (exit $neg_rc; no routing refusal)"
         fi
