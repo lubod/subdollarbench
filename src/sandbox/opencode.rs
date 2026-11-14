@@ -568,6 +568,15 @@ impl OpenCodeRunner {
                 "provider": {"only": [pin], "order": [pin]}
             });
         }
+        // R84 F2: the paid probe points the runner's own config at the
+        // local logging proxy (`scripts/opencode-proxy.py`). Only the
+        // probe sets this; a cell never does, so its config is unchanged.
+        if let Ok(base) = std::env::var("SDB_OPENCODE_BASE_URL") {
+            if !base.is_empty() {
+                config["providers"]["openrouter"]["settings"] =
+                    serde_json::json!({"baseURL": base});
+            }
+        }
         config.to_string()
     }
 
