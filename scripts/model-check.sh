@@ -30,6 +30,10 @@
 #   SDB_MODEL_CHECK_GENERATION_JSON   a canned generation response
 #   SDB_MODEL_CHECK_MODELS_JSON       a canned /api/v1/models response
 #   SDB_MODEL_CHECK_OPENCODE_DB       a canned opencode session db
+#   SDB_MODEL_CHECK_OPENCODE_PROXY_LOG a canned opencode proxy log
+#   SDB_MODEL_CHECK_ENDPOINTS_JSON    a canned /api/v1/models/<id>/endpoints
+#   SDB_MODEL_CHECK_ENDPOINTS_RC      make that canned call fail
+#   SDB_MODEL_CHECK_NOW               the fake clock for the peak gate
 #   SDB_MODEL_CHECK_USAGE_BEFORE/AFTER the OpenRouter key usage around a run
 #   SDB_ENV_FILE                      where to read OPENROUTER_API_KEY
 set -euo pipefail
@@ -184,15 +188,17 @@ settled_series() {
 # and the snapshot provider pin (the same shape the runner sends). The pin
 # is per model: a provider-wide body would pin opencode's title model too.
 opencode_config_json() {
-    python3 - "$1" "$2" <<'PY'
+    python3 - "$1" "$2" "${3:-}" <<'PY'
 import json, sys
-model_id, pin = sys.argv[1], sys.argv[2]
+model_id, pin, base_url = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = {
     "model": "openrouter/" + model_id,
     "small_model": "openrouter/" + model_id,
     "providers": {"openrouter": {"models": {model_id: {
         "variants": [{"id": "low", "settings": {"reasoning": {"effort": "low"}}}]}}}},
 }
+if base_url:
+    cfg["providers"]["openrouter"]["settings"] = {"baseURL": base_url}
 if pin:
     cfg["providers"]["openrouter"]["models"][model_id]["body"] = {
         "provider": {"only": [pin], "order": [pin]}}
@@ -532,11 +538,20 @@ PY
             printf '%s/model-check-opencode-%s.txt' "$SDB_MODEL_CHECK_DIR" \
                 "$(model_slug "$1")"
         }
+        # R83 F4: the canned proxy log; one positive call, 100 fresh and
+        # 10 completion, prices to $0.000015 at luna-pro's rates.
+        oc_proxy_one="$dir/oc-proxy-one.jsonl"
+        printf '%s\n' '{"path":"/api/v1/chat/completions","id":"gen-selftest-positive","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.000015,"status":200}' > "$oc_proxy_one"
+        oc_proxy_double="$dir/oc-proxy-double.jsonl"
+        printf '%s\n' '{"path":"/api/v1/chat/completions","id":"gen-selftest-double","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.00003,"status":200}' > "$oc_proxy_double"
+        oc_proxy_floor="$dir/oc-proxy-floor.jsonl"
+        printf '%s\n' '{"path":"/api/v1/chat/completions","id":"gen-selftest-floor","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.000001,"status":200}' > "$oc_proxy_floor"
         expect_pass_oc() {
             local name="$1" rc=0 rec
             rec="$(oc_record "$name")"
             out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
                 SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+                SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_one" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.000015)" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -563,11 +578,13 @@ PY
                 cat "$rec" >&2; exit 1; }
         }
         expect_fail_oc() {
-            local db="$1" want="$2" name="$3" series="${4:-}" rc=0 rec
+            local db="$1" want="$2" name="$3" series="${4:-}" proxy="${5:-$oc_proxy_one}"
+            local rc=0 rec
             rec="$(oc_record "$name")"
             [[ -n "$series" ]] || series="$(settled_series "${OC_BILL-0.000015}")"
             out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
                 SDB_MODEL_CHECK_OPENCODE_DB="$db" \
+                SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$proxy" \
                 SDB_MODEL_CHECK_USAGE_BEFORE=0 \
                 SDB_MODEL_CHECK_USAGE_AFTER="$series" \
                 SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -599,6 +616,55 @@ JSON
         expect_pass_oc "openrouter/openai/gpt-6-luna-pro"
         echo "[self-test] an opencode session passes (a later failed session is ignored)"
 
+        case_name=opencode-extra-calls
+        oc_proxy_extra="$dir/oc-proxy-extra.jsonl"
+        printf '%s\n' \
+            '{"path":"/api/v1/chat/completions","id":"gen-selftest-positive","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.000015,"status":200}' \
+            '{"path":"/api/v1/chat/completions","id":"gen-selftest-title","model":"openai/gpt-6-luna-pro","usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0}},"cost":0.0000045,"status":200}' \
+            > "$oc_proxy_extra"
+        rc=0
+        out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+            SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_extra" \
+            SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+            SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.0000195)" \
+            SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+            "$ROOT/scripts/model-check.sh" --harness opencode \
+            "openrouter/openai/gpt-6-luna-pro" 2>&1)" || rc=$?
+        [[ "$rc" -eq 0 ]] || {
+            echo "[self-test] opencode extra calls were refused: $out" >&2; exit 1; }
+        grep -q 'calls:    2 call(s): gen-selftest-positive, gen-selftest-title' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] opencode extra calls were not listed" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        grep -qF 'snapshot: $0.00001950 for the calls' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] opencode extra calls were not priced into the expected bill" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        echo "[self-test] the expected bill sums every proxied call"
+
+        case_name=opencode-late-charges
+        rc=0
+        out="$(SDB_MODEL_CHECK_SKIP_BESIDE=1 \
+            SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_extra" \
+            SDB_MODEL_CHECK_USAGE_BEFORE=0 \
+            SDB_MODEL_CHECK_USAGE_AFTER="$(settled_series 0.00006)" \
+            SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
+            "$ROOT/scripts/model-check.sh" --harness opencode \
+            "openrouter/openai/gpt-6-luna-pro" 2>&1)" || rc=$?
+        [[ "$rc" -eq 0 ]] || {
+            echo "[self-test] late-landing earlier charges failed the check: $out" >&2; exit 1; }
+        grep -qF 'bill:     $0.00001950' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the bill is not the calls' own cost" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        grep -qF 'key usage delta $0.00006000' \
+            "$(oc_record "openrouter/openai/gpt-6-luna-pro")" || {
+            echo "[self-test] the record does not name the polluted usage delta" >&2
+            cat "$(oc_record "openrouter/openai/gpt-6-luna-pro")" >&2; exit 1; }
+        echo "[self-test] the bill is the calls' cost, not the polluted usage delta"
+
         case_name=opencode-provider
         make_oc_db "$dir/oc-provider.db" Other 0.000015
         expect_fail_oc "$dir/oc-provider.db" "provider Other" \
@@ -608,17 +674,17 @@ JSON
         case_name=opencode-bill
         make_oc_db "$dir/oc-bill.db" openrouter 0.000030
         OC_BILL=0.000030 expect_fail_oc "$dir/oc-bill.db" "bill" \
-            "openrouter/openai/gpt-6-luna-pro"
+            "openrouter/openai/gpt-6-luna-pro" "" "$oc_proxy_double"
         echo "[self-test] an opencode 2x bill fails"
 
         case_name=opencode-lag
-        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage lags" \
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage not settled" \
             "openrouter/openai/gpt-6-luna-pro"
-        echo "[self-test] an opencode zero usage delta fails"
+        echo "[self-test] an opencode zero usage delta never settles and fails"
 
         case_name=opencode-floor
         OC_BILL=0.000001 expect_fail_oc "$dir/oc-pass.db" "floor" \
-            "openrouter/openai/gpt-6-luna-pro"
+            "openrouter/openai/gpt-6-luna-pro" "" "$oc_proxy_floor"
         echo "[self-test] an opencode bill below the floor fails"
 
         case_name=opencode-other-model
@@ -644,13 +710,13 @@ PY
         echo "[self-test] a positive session with 0 tokens fails"
 
         case_name=opencode-zero-bill
-        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" \
-            "the OpenRouter usage lags or the run was not billed" \
+        OC_BILL=0 expect_fail_oc "$dir/oc-pass.db" "usage not settled" \
             "openrouter/openai/gpt-6-luna-pro"
-        echo "[self-test] a positive run with a \$0 bill fails"
+        echo "[self-test] a positive run with a \$0 usage delta fails"
 
         case_name=opencode-settle
         out="$(SDB_MODEL_CHECK_OPENCODE_DB="$dir/oc-pass.db" \
+            SDB_MODEL_CHECK_OPENCODE_PROXY_LOG="$oc_proxy_one" \
             SDB_MODEL_CHECK_USAGE_BEFORE=0 \
             SDB_MODEL_CHECK_USAGE_AFTER="0,0,0.000005,0,0,0.000015,0.000015,0.000015,0.000015,0.000015,0.000015" \
             SDB_MODEL_CHECK_MODELS_JSON="$dir/models.json" \
@@ -900,6 +966,10 @@ fi
 
 work="$(mktemp -d /tmp/sdb-model-check.XXXXXX)"
 cleanup() {
+    # R83 F4: a logging proxy left behind by an early exit.
+    if [[ -f "$work/proxy.pid" ]]; then
+        kill "$(cat "$work/proxy.pid")" 2>/dev/null || true
+    fi
     rm -rf "$work"
 }
 trap cleanup EXIT
@@ -1066,6 +1136,11 @@ opencode_check() {
     local db="${SDB_MODEL_CHECK_OPENCODE_DB:-}" run_dir="$work/opencode"
     local events="$work/opencode-events.json" log="$work/opencode.log" rc=0
     local usage_before usage_after bill
+    # R83 F4: every request goes through a local logging proxy (the
+    # config's baseURL); the expected bill is the sum of its calls, not
+    # the positive session's row alone.
+    local proxy_log="${SDB_MODEL_CHECK_OPENCODE_PROXY_LOG:-$work/opencode-proxy.jsonl}"
+    local proxy_pid="" proxy_port=""
     # R79-15: the positive session has its own id and data dir; the
     # negative probe must never write into the db the verdict reads.
     local session_id="${SDB_MODEL_CHECK_OPENCODE_SESSION_ID:-ses_model_check_$(model_slug "$model")_$$}"
@@ -1081,10 +1156,27 @@ opencode_check() {
     fi
     if [[ -z "$db" ]]; then
         mkdir -p "$run_dir/ws" "$run_dir/cfg" "$run_dir/data"
+        proxy_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+        : > "$proxy_log"
+        python3 "$ROOT/scripts/opencode-proxy.py" "$proxy_port" "$proxy_log" &
+        proxy_pid=$!
+        echo "$proxy_pid" > "$work/proxy.pid"
+        local i proxy_ready=0
+        for i in $(seq 1 50); do
+            if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.2); sys.exit(0 if s.connect_ex(('127.0.0.1', $proxy_port)) == 0 else 1)"; then
+                proxy_ready=1
+                break
+            fi
+            sleep 0.1
+        done
+        if [[ "$proxy_ready" != "1" ]]; then
+            echo "[model-check] FATAL: the logging proxy did not start on port $proxy_port" >&2
+            exit 1
+        fi
         local cfg_json
-        cfg_json="$(opencode_config_json "$id" "$pin")"
+        cfg_json="$(opencode_config_json "$id" "$pin" "http://127.0.0.1:$proxy_port/api/v1")"
         set +e
-        timeout 300 docker run --rm --name "sdb-model-check-oc-$(model_slug "$model")-$$" \
+        timeout 300 docker run --rm --network=host --name "sdb-model-check-oc-$(model_slug "$model")-$$" \
             -v "$run_dir/ws:/workspace" \
             -v "$run_dir/cfg:/home/ubuntu/.config/opencode" \
             -v "$run_dir/data:/home/ubuntu/.local/share/opencode" \
@@ -1178,9 +1270,9 @@ opencode_check() {
         "$usage_before" "$usage_after")"
     local usage_note
     if [[ "$usage_settled" == "1" ]]; then
-        usage_note="settled after $usage_reads reads (delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+        usage_note="settled after $usage_reads reads (delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"); key usage $usage_before -> $usage_after)"
     else
-        usage_note="not settled after $usage_reads reads (last delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"))"
+        usage_note="not settled after $usage_reads reads (last delta \$$(python3 -c 'import sys; print("%.8f" % float(sys.argv[1]))' "$bill"); key usage $usage_before -> $usage_after)"
     fi
     # R79-4: the negative probe. A wrong pin must be refused by
     # OpenRouter's routing at $0 (no inference is billed); if the wrong-pin
@@ -1201,9 +1293,9 @@ opencode_check() {
         else
             local neg_cfg
             mkdir -p "$neg_dir/ws" "$neg_dir/cfg" "$neg_dir/data"
-            neg_cfg="$(opencode_config_json "$id" "$wrong_pin")"
+            neg_cfg="$(opencode_config_json "$id" "$wrong_pin" "http://127.0.0.1:$proxy_port/api/v1")"
             set +e
-            timeout 300 docker run --rm --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
+            timeout 300 docker run --rm --network=host --name "sdb-model-check-oc-neg-$(model_slug "$model")-$$" \
                 -v "$neg_dir/ws:/workspace" \
                 -v "$neg_dir/cfg:/home/ubuntu/.config/opencode" \
                 -v "$neg_dir/data:/home/ubuntu/.local/share/opencode" \
@@ -1226,14 +1318,22 @@ opencode_check() {
             neg_line="negative: pin $wrong_pin was inconclusive (exit $neg_rc; no routing refusal)"
         fi
     fi
+    if [[ -n "$proxy_pid" ]]; then
+        kill "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" 2>/dev/null || true
+        proxy_pid=""
+        rm -f "$work/proxy.pid"
+    fi
     local verdict
     verdict="$(python3 - "$db" "$id" "$rate_prompt" "$rate_cache_read" \
-        "$rate_cache_write" "$rate_completion" "$bill" "$session_id" <<'PY'
-import json, sqlite3, sys
+        "$rate_cache_write" "$rate_completion" "$bill" "$session_id" \
+        "$proxy_log" <<'PY'
+import json, os, sqlite3, sys
 
 (db, model_id, rate_prompt, rate_cache_read, rate_cache_write,
- rate_completion, bill_arg, session_id) = sys.argv[1:9]
+ rate_completion, bill_arg, session_id, proxy_log) = sys.argv[1:10]
 bill = float(bill_arg)
+usage_delta = bill
 con = sqlite3.connect(db)
 row = con.execute(
     "select model, cost, tokens_input, tokens_output, tokens_reasoning, "
@@ -1242,7 +1342,9 @@ row = con.execute(
 if not row:
     print(json.dumps({
         "sent": "openrouter/" + model_id, "served": "", "provider": "",
-        "bill": bill, "session_cost": 0.0, "expected": 0.0, "ratio": None,
+        "bill": bill, "session_cost": 0.0, "expected": 0.0,
+        "session_expected": 0.0, "calls": [], "usage_delta": bill,
+        "ratio": None,
         "bill_ok": None, "tokens_fresh": 0, "tokens_input": 0,
         "tokens_output": 0, "tokens_reasoning": 0, "tokens_cached": 0,
         "tokens_completion": 0, "tokens_write": 0, "tools": [],
@@ -1281,6 +1383,64 @@ for (data,) in con.execute(
             "status": st.get("status") or "",
             "text": text,
         })
+# R83 F4: price every call the proxy saw (the positive session, the
+# title/summary call, any retry), not just the session_v2 row.
+def num(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+calls = []
+if proxy_log and os.path.exists(proxy_log):
+    for line in open(proxy_log, errors="replace"):
+        try:
+            c = json.loads(line)
+        except Exception:
+            continue
+        if not str(c.get("path") or "").endswith("/chat/completions"):
+            continue
+        u = c.get("usage")
+        if not isinstance(u, dict):
+            continue
+        details = u.get("prompt_tokens_details") or {}
+        prompt_tokens = num(u.get("prompt_tokens"))
+        cached = num(details.get("cached_tokens"))
+        write = num(details.get("cache_write_tokens"))
+        completion_tokens = num(u.get("completion_tokens"))
+        fresh = max(0, prompt_tokens - cached - write)
+        snapshot = (
+            fresh * float(rate_prompt)
+            + cached * float(rate_cache_read)
+            + write * float(rate_cache_write)
+            + completion_tokens * float(rate_completion)
+        ) / 1_000_000
+        calls.append({
+            "id": c.get("id") or "",
+            "model": c.get("model") or "",
+            "prompt": prompt_tokens,
+            "fresh": fresh,
+            "cached": cached,
+            "write": write,
+            "completion": completion_tokens,
+            "cost": c.get("cost"),
+            "snapshot": snapshot,
+        })
+
+# R83 F4: the bill is the calls' own OpenRouter cost, not the key usage
+# delta. The delta can include earlier calls that land late (live
+# 2026-11-14, hy4: three calls cost $0.00084632, the delta read
+# $0.00271741 because two earlier probes landed during the poll); the
+# per-call cost is the provider's charge for this run's calls.
+bill = 0.0
+missing_cost = False
+for c in calls:
+    if isinstance(c.get("cost"), (int, float)):
+        bill += float(c["cost"])
+    else:
+        missing_cost = True
+
 reasons = []
 sent = "openrouter/" + model_id
 # R82 F2: the small model (title/summary) is the career model too; a
@@ -1315,12 +1475,20 @@ if bill <= 0:
 # R79-5: opencode's session_v2.tokens_input is the fresh input; the
 # cached tokens are reported apart (the step's input 125, cache read 5312).
 tokens_fresh = tokens_input
-expected = (
+# R83 F4: the session's own snapshot price, kept for the record; the
+# check's expected is the sum over every call the proxy saw.
+session_expected = (
     tokens_fresh * float(rate_prompt)
     + tokens_cached * float(rate_cache_read)
     + tokens_write * float(rate_cache_write)
     + completion * float(rate_completion)
 ) / 1_000_000
+expected = sum(c["snapshot"] for c in calls)
+if not calls:
+    reasons.append(
+        "no chat calls in the proxy log; the expected bill cannot count every call")
+if missing_cost:
+    reasons.append("a proxied call has no OpenRouter cost")
 ratio = None
 bill_ok = None
 if expected > 0:
@@ -1342,7 +1510,8 @@ if outcome and outcome != "succeeded":
     reasons.append("session outcome %s" % outcome)
 print(json.dumps({
     "sent": sent, "served": served, "provider": provider, "bill": bill,
-    "session_cost": session_cost,
+    "session_cost": session_cost, "session_expected": session_expected,
+    "calls": calls, "usage_delta": usage_delta,
     "expected": expected, "ratio": ratio, "bill_ok": bill_ok,
     "tokens_fresh": tokens_fresh, "tokens_input": tokens_input,
     "tokens_output": tokens_output, "tokens_reasoning": tokens_reasoning,
@@ -1353,13 +1522,21 @@ print(json.dumps({
 }))
 PY
 )"
-    local ok sent served provider bill expected ratio tokens_line reasons
+    local ok sent served provider bill expected session_expected ratio
+    local usage_delta tokens_line reasons calls_line call_lines
     ok="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1])["ok"] else "0")' "$verdict")"
     sent="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sent"])' "$verdict")"
     served="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["served"])' "$verdict")"
     provider="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["provider"])' "$verdict")"
     bill="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["bill"])' "$verdict")"
     expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["expected"])' "$verdict")"
+    session_expected="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_expected"])' "$verdict")"
+    usage_delta="$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["usage_delta"])' "$verdict")"
+    calls_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d call(s): %s" % (len(v["calls"]), ", ".join((c["id"] or "(no id)") for c in v["calls"])))' "$verdict")"
+    call_lines="$(python3 -c 'import json,sys
+for c in json.loads(sys.argv[1])["calls"]:
+    cost = "(none)" if c["cost"] is None else "$%.8f" % float(c["cost"])
+    print("call:     %s %s prompt %d (fresh %d, cached %d, write %d), completion %d, OpenRouter %s, snapshot $%.8f" % (c["id"] or "(no id)", c["model"] or "(no model)", c["prompt"], c["fresh"], c["cached"], c["write"], c["completion"], cost, c["snapshot"]))' "$verdict")"
     ratio="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("" if v["ratio"] is None else "%.3f" % v["ratio"])' "$verdict")"
     tokens_line="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("%d fresh, %d cached, %d completion, %d cache write" % (v["tokens_fresh"], v["tokens_cached"], v["tokens_completion"], v["tokens_write"]))' "$verdict")"
     raw_row="$(python3 -c 'import json,sys; v=json.loads(sys.argv[1]); print("input %d, output %d, reasoning %d, cache read %d, cache write %d, cost %.8f" % (v["tokens_input"], v["tokens_output"], v["tokens_reasoning"], v["tokens_cached"], v["tokens_write"], v["session_cost"]))' "$verdict")"
@@ -1390,7 +1567,12 @@ PY
         else
             echo "provider: $provider (no pin sent)"
         fi
-        echo "bill:     \$$bill (OpenRouter key usage; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"); snapshot \$$expected, ratio $ratio)"
+        echo "bill:     \$$bill (the calls' OpenRouter cost; key usage delta \$$usage_delta; opencode session \$$(python3 -c 'import json,sys; print("%.8f" % json.loads(sys.argv[1])["session_cost"])' "$verdict"))"
+        echo "snapshot: \$$expected for the calls (the session row alone \$$session_expected), ratio $ratio"
+        echo "calls:    $calls_line"
+        if [[ -n "$call_lines" ]]; then
+            echo "$call_lines"
+        fi
         echo "usage:    $usage_note"
         echo "tokens:   $tokens_line (opencode session)"
         echo "session:  $raw_row (session_v2)"
