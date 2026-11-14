@@ -321,6 +321,23 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     provider, 0-3 points per `.46` phase). Gemini 3.5 Flash-Lite was
     proposed for the Google gap and not taken. Muse Ember needs a price
     snapshot row (pin `meta`) before its model check.
+    **The `.47` rerun order** (operator, 2026-11-14: "yes" to the
+    reviewer's proposal), each model on the operator's word, one at a
+    time, 3 careers on 3 lanes:
+    1. **claude-haiku-5.5, canary: phase 1 only** of its 3 careers
+       (about $3), then the reviewer checks the build times against the
+       300 s limit (R81-5), the `[LANG]` and coverage results, the
+       health counters and round 84's cost reconcile before the rest of
+       haiku and any other model;
+    2. deepseek-v4.1-flash-1017 (off-peak only: weekdays after 17:30 CET,
+       all weekend);
+    3. mimo-v2.6-flash; 4. meta/muse-ember; 5. glm-5.3-flash;
+    6. qwen3.8-flash; 7. gpt-6-luna; 8. gpt-6-luna-pro (after luna, for
+       the comparison); 9. hy4;
+    10. minimax-m3.1-flash (off-peak only: 16:00-02:00 CET).
+    The off-peak windows may swap neighbours. About $12 per model,
+    $120 in all; the balance was $6.61 on 2026-11-14 (a top-up first).
+    Before the canary: round 84 merged and a `$0` rehearsal on it.
 
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
