@@ -170,6 +170,28 @@ pub fn ticket_turns(stage_max_turns: u32, budget_usd: f64) -> u32 {
     stage_max_turns.max(scaled)
 }
 
+/// R86 F2: a ticket's wall time-out: 120 minutes per
+/// `TICKET_BUDGET_REF_USD` ($0.20) of its budget, never below the base,
+/// never more than the phase's remaining wall (None = no wall).
+pub fn ticket_timeout_min(base_min: u64, budget_usd: f64, remaining_wall_min: Option<u64>) -> u64 {
+    let budget = if budget_usd.is_finite() && budget_usd > 0.0 {
+        budget_usd
+    } else {
+        0.0
+    };
+    let scaled = (base_min as f64 * budget / crate::config::TICKET_BUDGET_REF_USD).ceil();
+    let scaled = if scaled.is_finite() && scaled > 0.0 {
+        scaled.min(u64::MAX as f64) as u64
+    } else {
+        0
+    };
+    let scaled = scaled.max(base_min);
+    match remaining_wall_min {
+        Some(left) => scaled.min(left.max(1)),
+        None => scaled,
+    }
+}
+
 /// R26 R23-7: a repair session gets whatever remains of the guard. The old
 /// per-repair 25-turn cap is gone; the guard is shared by the sessions.
 #[derive(Debug, PartialEq, Eq)]

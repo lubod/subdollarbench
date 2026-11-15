@@ -1339,6 +1339,7 @@ async fn r43_f3_chained_mixed_image() {
         Some("prev"),
         None,
         Some("sha256:image-a"),
+        crate::config::OFFICIAL_CELL_TIMEOUT_MIN,
         |_attempt| {
             let mut o = outcome(true, &[(0, true)]);
             o.sandbox_image = Some("sha256:image-b".into());
@@ -3559,6 +3560,71 @@ async fn r86_f1_catch_up_gets_scaled_turns() {
     );
     assert!(max_turns > 200, "the catch-up kept the raw 200 turns");
     let _ = rollup;
+}
+
+/// R86 F2: a ticket's time-out is 120 minutes per $0.20 of its budget,
+/// capped by the phase's remaining wall.
+#[tokio::test]
+async fn r86_f2_timeout_scales_within_the_wall() {
+    // The rate and the floor, from the helper.
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.20, None), 120);
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.97, None), 582);
+    assert_eq!(
+        crate::scoring::ticket_timeout_min(120, 0.97, Some(300)),
+        300
+    );
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.09, Some(30)), 30);
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.09, None), 120);
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let run = |wall: Option<u64>| {
+        let lc = &lc;
+        async move {
+            let opts = CampaignRunOptions {
+                campaign_id: "r86time".into(),
+                model: "m".into(),
+                harness: "omp".into(),
+                effort: "high".into(),
+                budget_usd: 100.0,
+                wall_min: wall,
+            };
+            let seen = std::cell::RefCell::new(Vec::<(u32, u64, f64)>::new());
+            let _ = run_campaign(
+                lc,
+                &opts,
+                |attempt| {
+                    seen.borrow_mut().push((
+                        attempt.stage.id,
+                        attempt.timeout_min,
+                        attempt.budget_usd,
+                    ));
+                    let id = attempt.stage.id;
+                    async move { Ok(outcome(true, &[(id, true)])) }
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            seen.into_inner()
+        }
+    };
+    let no_wall = run(None).await;
+    let (_, timeout, budget) = no_wall[0];
+    assert!(
+        budget > crate::config::TICKET_BUDGET_REF_USD,
+        "the first ticket's budget ${budget:.2}"
+    );
+    assert_eq!(
+        timeout,
+        crate::scoring::ticket_timeout_min(120, budget, None),
+        "the first ticket's timeout"
+    );
+    assert!(timeout > 120, "the scaled timeout is {timeout}");
+    let near_end = run(Some(1)).await;
+    let (_, timeout, _) = near_end[0];
+    assert_eq!(
+        timeout, 1,
+        "a ticket at the phase's edge gets the wall left"
+    );
 }
 
 #[tokio::test]
