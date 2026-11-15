@@ -1560,6 +1560,41 @@ fn strip_cell(
     )
 }
 
+/// R85 F3: one model's bill line: the surcharge named in
+/// `PRICE_OVERRIDES` and the billed / scored ratio, when either exists.
+fn bill_item(model: &str, cost: f64, billed: Option<f64>) -> Option<String> {
+    let over = crate::cost::calculator::price_override_for(model).unwrap_or("");
+    let ratio = billed.filter(|_| cost > 0.0).map(|b| b / cost);
+    if over.is_empty() && ratio.is_none() {
+        return None;
+    }
+    // The board never shows the provider prefix (R65 F7).
+    let display = model.strip_prefix("openrouter/").unwrap_or(model);
+    let mut s = format!("<b>{}</b>", esc(display));
+    if !over.is_empty() {
+        s.push_str(&format!(": {}", esc(over)));
+    }
+    if let Some(r) = ratio {
+        s.push_str(&format!(" ({r:.2}× billed / scored)"));
+    }
+    Some(s)
+}
+
+/// R85 F3: the plain-language statement beside the scored / billed
+/// column, on the board and the results page.
+fn bill_explanation(items: &[String]) -> String {
+    let mut s = String::from(
+        "Scores and the $0.99 per phase limit use each model's <b>base</b> price list; the billed figure is what OpenRouter actually charged.",
+    );
+    if !items.is_empty() {
+        s.push_str(" The gap is the providers' surcharges: ");
+        s.push_str(&items.join("; "));
+        s.push('.');
+    }
+    s.push_str(" A whole-model bill is measured from the key, never split across careers.");
+    s
+}
+
 fn model_row(
     cells: &[CareerCell],
     g: &ModelGroup,
@@ -1794,7 +1829,15 @@ fn render_board(cells: &[CareerCell]) -> String {
         h.push_str(&format!("<div class=\"mut note\">{note}</div>"));
     }
     h.push_str(&earlier_section(cells, &groups, &colours));
-    h.push_str("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Only the current rule set is shown. A career still running is counted in the in-progress banner, never shown as a row; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li></ul></section>");
+    let bill_items: Vec<String> = groups
+        .iter()
+        .filter_map(|g| {
+            let med = &cells[g.median];
+            bill_item(&g.model, med.cost, med.billed.or(med.model_billed))
+        })
+        .collect();
+    let bill_note = bill_explanation(&bill_items);
+    h.push_str(&format!("<section class=\"methodology\"><h2>How this board is ranked</h2><ul><li><b>Careers</b>: a career is 4 phases and 21 tickets (0-20); one row per leaf phase cell of a chain. A model's row is its <b>median career</b> by the one shared board order; the best and worst careers are named next to it and the full set sits in <b>×N careers ▸</b>.</li><li><b>Points</b>: difficulty-weighted score. On equal points the <b>Perf</b> score decides (higher first; a career with no score ranks below one with a score), then <b>Pts / $</b> divides by effective spend. The perf contract is ticket 0's <a href=\"https://github.com/lubod/subdollarbench/blob/master/campaigns/sdb-sql/stages/0_genesis/prompt.md\">Performance section</a>; hover a Perf badge for each workload's reference, candidate, ratio and any floor.</li><li><b>Rank</b>: <code>#1</code> with a <code>70%</code> badge means the model holds rank 1 in 70% of all combinations of one career per model, ranked by the board order (points, then perf, then points per dollar); hover the badge for the full distribution. <code>=</code> marks two models that most likely share a rank.</li><li>Only the current rule set is shown. A career still running is counted in the in-progress banner, never shown as a row; a $0 rehearsal is a footnote.</li><li>Hidden, poisoned and harness-fault cells are never published. The ladder squares merge each phase cell's own tickets; the legend sits under the table.</li><li>{bill_note}</li></ul></section>"));
     h.push_str(&footer_html(&now, crate::report::rules::RULES_VERSION));
     h.push_str("</main></body></html>");
     h
@@ -2814,6 +2857,7 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
     }
 
     let mut metrics = String::new();
+    let mut bill_items: Vec<String> = Vec::new();
     for model in &models {
         let cs = by_model.get(model.as_str()).cloned().unwrap_or_default();
         let costs = sorted_unique(cs.iter().filter_map(|c| {
@@ -2849,7 +2893,11 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
                 .unwrap_or_else(|| "—".to_string()),
             spend
         ));
+        if let Some(item) = bill_item(model, list, billed) {
+            bill_items.push(item);
+        }
     }
+    let bill_note = bill_explanation(&bill_items);
 
     let scatter = svg_scatter(&current, &colours, &indices);
     let survival = svg_survival(&series, &colours, &indices);
@@ -2971,7 +3019,7 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
         ticket_rows.push_str(&format!("<tr>{}{cells}</tr>", model_cell(model, &colours)));
     }
     h.push_str(&format!(
-        "<section id=\"tickets\"><h2>Per-ticket pass share</h2><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div><h3>Cost and robustness</h3><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th class=\"num\">$ / ticket (min / median / max)</th><th class=\"num\">Regression-free rate</th><th class=\"num\">Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"
+        "<section id=\"tickets\"><h2>Per-ticket pass share</h2><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th></tr></thead><tbody>{ticket_rows}</tbody></table></div><h3>Cost and robustness</h3><div class=\"wrap table-scroll-y\"><table><thead><tr><th>Model</th><th class=\"num\">$ / ticket (min / median / max)</th><th class=\"num\">Regression-free rate</th><th class=\"num\">Spend (list / billed)</th></tr></thead><tbody>{metrics}</tbody></table></div><div class=\"mut\">{bill_note} The cap counts list price. Billed is the provider's own charge, recorded from round 67 on; the v2 careers ran unpinned (+11% billed over list overall). No career recorded a regression: every passed ticket stayed green, so each model's rate is 100.0%.</div></section>"
     ));
     let stability = rank_stability(cells, &groups);
     let mut h2h_rows = String::new();
@@ -5439,6 +5487,41 @@ mod tests {
         );
         assert!(board.contains("$0.04 / $0.10 (2.40×)"), "{board}");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R85 F3: the board shows the scored and billed costs, the ratio
+    /// and an explanation naming the model's surcharge; a model with no
+    /// billed figure shows `—` and no ratio.
+    #[test]
+    fn r85_f3_board_explains_the_bill() {
+        let (base, runs, out) = fixture("r85f3");
+        career(
+            &runs,
+            "m",
+            "openrouter/anthropic/claude-haiku-5.5",
+            [1.0; 4],
+            [0.01; 4],
+        );
+        for phase in 1..=4 {
+            set_billed(&runs, "m", phase, 0.024);
+        }
+        career(
+            &runs,
+            "n",
+            "openrouter/openai/gpt-6-luna",
+            [1.0; 4],
+            [0.01; 4],
+        );
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        assert!(board.contains("$0.04 / $0.10 (2.40×)"), "{board}");
+        assert!(
+            board.contains("5× the prompt rate above 100k prompt tokens"),
+            "{board}"
+        );
+        assert!(board.contains("base</b> price list"), "{board}");
+        assert!(board.contains("$0.04 / —"), "{board}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// R67 F2: the results page shows list and billed spend per model,
