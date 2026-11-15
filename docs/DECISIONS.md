@@ -806,6 +806,24 @@ The benchmark answers "what does a dollar buy" (round 23):
   OpenRouter bill next to its scored cost, with one plain explanation
   (the base-rate rule and the model's surcharges). Round 85.
 
+## 33. Rules `.48`: a ticket's turns and time scale with its budget (2026-11-15)
+
+- **Why** (operator, 2026-11-15: "bump", after the reviewer's analysis of
+  the 24 `.47` phases): a ticket's 200 turns and 120 minutes don't grow
+  with its share of the $0.99. For ordinary tickets the dollar and the
+  turns bind together, but a catch-up ticket can hold most of the phase's
+  money: deepseek's career 0, phase 4 catch-up stopped at 200 turns with
+  $0.82 of $0.97 unspent, and the phase scored 0. Deepseek hit 200 turns
+  6 times (5 stages passed anyway); haiku never did.
+- **Change:** 200 turns and 120 minutes per $0.20 of the ticket's budget,
+  never below the stage's own limits, inside the phase's 480-minute wall
+  (round 86). The dollar is the binding limit; turns and time stay loop
+  guards.
+- **Impact:** every `.47` result (haiku, deepseek, mimo-flash's stopped
+  first phase) is void and unpublished; the `.48` board starts empty;
+  the rerun restarts at haiku. #32 (base-rate scoring, the real bill
+  shown) carries over to `.48`.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

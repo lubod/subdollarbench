@@ -362,6 +362,19 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     for the next bump: scale the turn limit with the budget, so the dollar
     is the binding constraint, keeping a loop guard. Re-count the hits for
     all ten models when the `.47` rerun ends.
+    **The `.47` rerun is paused** (operator, 2026-11-15 15:45 CET, "stop
+    it"): mimo-flash's grid was stopped 20 minutes into its first phase
+    (career 0, phase 1, turn 21, about $0.04; no campaign.json, no ledger
+    row; no containers or reservations left). `runs/.grid-v47-stop` stays
+    as the pause guard. Before any further model: the turn-limit analysis
+    (hits per model, budget left, cost per turn), any other candidate rule
+    changes, one decision (keep `.47`, or one `.48` bump and rerun haiku
+    and deepseek), and round 85 merged. The free track continues ($0,
+    smoke).
+    **Decided: rules `.48`** (operator, 2026-11-15 "bump"; DECISIONS #33):
+    turns and time scale with the ticket's budget (round 86). The `.47`
+    careers are void; the rerun restarts at haiku after round 86 (and
+    round 85) merge, a new bar and a `$0` rehearsal.
 
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
