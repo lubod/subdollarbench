@@ -533,7 +533,15 @@ impl OpenCodeRunner {
     /// generates internally for effort variants (`settings.reasoning.effort`
     /// = OpenRouter's native reasoning parameter). Env-passed so no config
     /// files pollute the candidate workspace.
+    #[cfg(test)]
     fn variant_config_json(model_bare: &str) -> String {
+        Self::variant_config_json_with_base(model_bare, None)
+    }
+
+    /// R85 F1: the cell path passes the run's billing proxy as the
+    /// OpenRouter baseURL; the R84 F2 test hook (`SDB_OPENCODE_BASE_URL`)
+    /// wins when set, so the paid probe keeps its own proxy.
+    fn variant_config_json_with_base(model_bare: &str, base: Option<&str>) -> String {
         // R79-4: the snapshot pin, sent through the OpenRouter provider
         // options (`provider.only`/`order`), the same endpoint the omp
         // check pins. This one function builds the per-trial config the
@@ -568,14 +576,12 @@ impl OpenCodeRunner {
                 "provider": {"only": [pin], "order": [pin]}
             });
         }
-        // R84 F2: the paid probe points the runner's own config at the
-        // local logging proxy (`scripts/opencode-proxy.py`). Only the
-        // probe sets this; a cell never does, so its config is unchanged.
-        if let Ok(base) = std::env::var("SDB_OPENCODE_BASE_URL") {
-            if !base.is_empty() {
-                config["providers"]["openrouter"]["settings"] =
-                    serde_json::json!({"baseURL": base});
-            }
+        let base = std::env::var("SDB_OPENCODE_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| base.map(|s| s.to_string()));
+        if let Some(base) = base {
+            config["providers"]["openrouter"]["settings"] = serde_json::json!({"baseURL": base});
         }
         config.to_string()
     }
@@ -766,6 +772,116 @@ impl Drop for RunDirs {
     }
 }
 
+/// R85 F1: the run's own logging proxy in front of OpenRouter. It binds a
+/// host port the run's container reaches, forwards every request to the
+/// upstream (default `https://openrouter.ai`), and writes one
+/// `{id, model, cost, status}` line per chat call to the run dir's
+/// `billed.jsonl` — never the key or the prompt. The runner reads that
+/// sum into `billed_usd` after every attempt.
+struct BillingProxy {
+    child: std::process::Child,
+    port: u16,
+    log: PathBuf,
+    pid_file: PathBuf,
+}
+
+#[derive(Debug, Default, Clone)]
+struct BilledSummary {
+    cost: f64,
+    calls: u64,
+    missing: Vec<String>,
+}
+
+impl BillingProxy {
+    fn start(run_dir: &std::path::Path, upstream: &str) -> Result<Self> {
+        let log = run_dir.join("billed.jsonl");
+        let pid_file = run_dir.join("billed-proxy.pid");
+        let _ = std::fs::remove_file(&log);
+        let listener = std::net::TcpListener::bind("0.0.0.0:0")
+            .map_err(|e| anyhow!("billing proxy: cannot pick a port: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| anyhow!("billing proxy: cannot read its port: {e}"))?
+            .port();
+        drop(listener);
+        let script = crate::config::get_repo_root().join("scripts/opencode-proxy.py");
+        let stderr = std::fs::File::create(run_dir.join("billed-proxy.log"))
+            .map_err(|e| anyhow!("billing proxy: cannot write its log: {e}"))?;
+        let child = Command::new("python3")
+            .arg(&script)
+            .arg(port.to_string())
+            .arg(&log)
+            .arg(upstream)
+            .arg("--bind=0.0.0.0")
+            .arg("--billed")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .map_err(|e| anyhow!("billing proxy: cannot start {}: {e}", script.display()))?;
+        let mut proxy = Self {
+            child,
+            port,
+            log,
+            pid_file,
+        };
+        let _ = std::fs::write(&proxy.pid_file, proxy.child.id().to_string());
+        // A proxy that never listens is a harness fault, never a model
+        // verdict; the line names its log.
+        let deadline = SystemTime::now() + Duration::from_secs(10);
+        while SystemTime::now() < deadline {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return Ok(proxy);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = proxy.child.kill();
+        let _ = proxy.child.wait();
+        Err(anyhow!(
+            "billing proxy did not start on port {port}; see {}",
+            run_dir.join("billed-proxy.log").display()
+        ))
+    }
+
+    fn base_url(&self, host: &str) -> String {
+        format!("http://{host}:{}/api/v1", self.port)
+    }
+
+    /// Read the whole run's log (cumulative across attempts); a call with
+    /// no `usage.cost` is counted and named, never silently priced.
+    fn read(&self) -> BilledSummary {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let mut s = BilledSummary::default();
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            s.calls += 1;
+            match v.get("cost").and_then(|c| c.as_f64()) {
+                Some(c) => s.cost += c,
+                None => s.missing.push(
+                    v.get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("(no id)")
+                        .to_string(),
+                ),
+            }
+        }
+        s
+    }
+
+    fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+}
+
+impl Drop for BillingProxy {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.pid_file);
+    }
+}
+
 impl crate::sandbox::AgentRunner for OpenCodeRunner {
     fn run_agent_with_logger<F>(spec: AgentRunSpec<'_>, mut log_fn: F) -> Result<OmpSessionStats>
     where
@@ -836,6 +952,25 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // R84 F1: the data dir's db is read after each attempt, before the
         // guard removes it.
         let run_dirs = RunDirs::new(&canonical_workdir);
+        // R85 F1: one logging proxy per run. The container reaches it on
+        // the host (host.docker.internal on a run network; 127.0.0.1
+        // when the caller asks for host networking, as the tests do).
+        let run_dir = run_dirs
+            .data
+            .parent()
+            .unwrap_or(&canonical_workdir)
+            .to_path_buf();
+        let upstream = std::env::var("SDB_OPENCODE_UPSTREAM")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "https://openrouter.ai".to_string());
+        let mut billing = BillingProxy::start(&run_dir, &upstream)?;
+        let proxy_host = if network == Some("host") {
+            "127.0.0.1"
+        } else {
+            "host.docker.internal"
+        };
+        let proxy_base = billing.base_url(proxy_host);
 
         // Same task text + entrypoint contract as OMP (shared helper).
         let (base_port, base_cmd, raw_guidance) = OmpRunner::task_guidance(spec.task, prompt);
@@ -873,7 +1008,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // fail closed when the sidecar cannot start. Resolved once here so
         // resume attempts reuse the same sidecar instead of starting one
         // per attempt.
-        let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1";
+        let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1,host.docker.internal";
         let egress_on = crate::sandbox::docker::egress_filter_enabled();
         let proxy_url: Option<String> = (if egress_on { network } else { None })
             .and_then(|net| {
@@ -948,7 +1083,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .unwrap_or(&effective_model);
             cmd.arg("-e").arg(format!(
                 "OPENCODE_CONFIG_CONTENT={}",
-                Self::variant_config_json(bare)
+                Self::variant_config_json_with_base(bare, Some(&proxy_base))
             ));
             if let Some(max_turns) = limits.max_turns {
                 cmd.arg("-e")
@@ -1309,6 +1444,42 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     &effective_model,
                     &mut reconcile_log,
                 );
+            }
+            // R85 F1: the proxy's billed.jsonl is the run's real bill
+            // (cumulative across attempts); a call with no usage.cost is
+            // counted and named, never silently priced.
+            let billed = billing.read();
+            {
+                let mut stats_guard = stats.lock().unwrap();
+                stats_guard.billed_usd = billed.cost;
+            }
+            let _ = retry_tx.send(format!(
+                "[BILLED] {} call(s), ${:.8} (OpenRouter's charge)",
+                billed.calls, billed.cost
+            ));
+            for id in &billed.missing {
+                let _ = retry_tx.send(format!(
+                    "[BILLED] call {id} has no usage.cost; counted, not priced"
+                ));
+            }
+            // A proxy that died mid-run leaves the bill unknown: a harness
+            // fault with its own line, never a graded result.
+            if let Some(status) = billing.exited() {
+                let st = Self::snapshot_stats(
+                    &stats,
+                    &turns,
+                    Some(Self::resolve_effort_effective(
+                        &variant_id,
+                        variant_disabled.load(Ordering::SeqCst),
+                    )),
+                );
+                break Err(anyhow!(OmpExecutionError {
+                    message: format!(
+                        "billing proxy exited mid-run ({status}); the run's bill is unknown"
+                    ),
+                    started: st.steps_taken > 0 || st.total_tokens > 0,
+                    partial_stats: st,
+                }));
             }
             if billing_tripped.load(Ordering::SeqCst) {
                 let st = Self::snapshot_stats(

@@ -854,6 +854,249 @@ fn r84_f2_probe_openrouter_once() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// R85 F1: the two stub tests set process-global env vars; they run one
+/// at a time (the fake-docker driver's child inherits them harmlessly).
+static R85_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// R85 F1: one runner session through the round 79 stub with the run's
+/// billing proxy in front. `network=host` lets the container reach the
+/// proxy on 127.0.0.1; SDB_OPENCODE_UPSTREAM points the proxy at the stub.
+fn r85_run_with_stub(
+    base: &std::path::Path,
+    case: &str,
+    prompt: &str,
+) -> (Result<OmpSessionStats>, Vec<String>, std::path::PathBuf) {
+    let log = base.join("requests.jsonl");
+    let (_stub, port) = r82_start_stub(case, &log);
+    std::env::set_var("SDB_OPENCODE_UPSTREAM", format!("http://127.0.0.1:{port}"));
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let run_id = format!("r85-f1-{}", std::process::id());
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs_c = logs.clone();
+    let res = <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+        AgentRunSpec {
+            model: "openrouter/openai/gpt-6-luna",
+            prompt,
+            workdir: &ws,
+            api_key: Some("sk-covtest"),
+            limits: crate::sandbox::omp::AgentExecutionLimits {
+                max_turns: Some(3),
+                max_budget_usd: Some(0.05),
+                max_effective_usd: None,
+                timeout_seconds: Some(120),
+            },
+            effort: Some("high"),
+            network: Some("host"),
+            task: None,
+            run_id: Some(&run_id),
+            cancel_flag: None,
+            worker: 0,
+        },
+        move |line| logs_c.lock().unwrap().push(line),
+    );
+    std::env::remove_var("SDB_OPENCODE_UPSTREAM");
+    let logs = logs.lock().unwrap().clone();
+    (res, logs, log)
+}
+
+/// R85 F1: the run's billed_usd is the sum of the stub's usage.cost over
+/// every call, and billed.jsonl holds the id, model and cost but never
+/// the key or the prompt.
+#[test]
+fn r85_f1_billed_from_the_calls() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r85-f1");
+    let (res, logs, _) = r85_run_with_stub(
+        &base,
+        "tool",
+        "Use the shell tool once: run `echo probe-forty-two`. Then reply with the output.",
+    );
+    let st = res.expect("the stub run must succeed");
+    let billed_log = std::fs::read_to_string(base.join("billed.jsonl")).unwrap_or_default();
+    let mut calls = 0u64;
+    let mut sum = 0.0f64;
+    for line in billed_log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        calls += 1;
+        sum += v.get("cost").and_then(|c| c.as_f64()).unwrap_or(0.0);
+        assert!(
+            v.get("id").and_then(|i| i.as_str()).is_some(),
+            "a billed line has no id: {v}"
+        );
+        assert_eq!(
+            v.get("model").and_then(|m| m.as_str()),
+            Some("openai/gpt-6-luna"),
+            "a billed line has the wrong model: {v}"
+        );
+    }
+    assert!(calls >= 2, "the stub saw {calls} calls");
+    assert!(
+        (sum - calls as f64 * 0.001).abs() < 1e-12,
+        "the billed lines sum to {sum}, want {}",
+        calls as f64 * 0.001
+    );
+    assert!(
+        (st.billed_usd - sum).abs() < 1e-12,
+        "runner billed {} vs the stub's {sum}",
+        st.billed_usd
+    );
+    assert!(
+        !billed_log.contains("sk-covtest"),
+        "billed.jsonl holds the key"
+    );
+    assert!(
+        !billed_log.contains("probe-forty-two"),
+        "billed.jsonl holds the prompt"
+    );
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("[BILLED]") && l.contains("OpenRouter's charge")),
+        "{logs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R85 F1: a proxy killed mid-run is a harness fault with its own line,
+/// never a graded result. The stub holds the request open; the test kills
+/// the proxy by the PID the runner wrote.
+#[test]
+fn r85_f1_proxy_gone_fault() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r85-f1-gone");
+    let log = base.join("requests.jsonl");
+    let (_stub, port) = r82_start_stub("slow", &log);
+    std::env::set_var("SDB_OPENCODE_UPSTREAM", format!("http://127.0.0.1:{port}"));
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let run_id = format!("r85-f1-gone-{}", std::process::id());
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs_c = logs.clone();
+    let result = std::thread::scope(|s| {
+        let handle = s.spawn(|| {
+            <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+                AgentRunSpec {
+                    model: "openrouter/openai/gpt-6-luna",
+                    prompt: "Use the shell tool once: run `echo probe-forty-two`. Then reply with the output.",
+                    workdir: &ws,
+                    api_key: Some("sk-covtest"),
+                    limits: crate::sandbox::omp::AgentExecutionLimits {
+                        max_turns: Some(3),
+                        max_budget_usd: Some(0.05),
+                        max_effective_usd: None,
+                        timeout_seconds: Some(60),
+                    },
+                    effort: Some("high"),
+                    network: Some("host"),
+                    task: None,
+                    run_id: Some(&run_id),
+                    cancel_flag: None,
+                    worker: 0,
+                },
+                move |line| logs_c.lock().unwrap().push(line),
+            )
+        });
+        // The stub logs the request before its sleep: the proxy is in
+        // flight, so killing it is a mid-run death.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if log.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(log.exists(), "the stub saw no request");
+        let pid_file = base.join("billed-proxy.pid");
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("the runner wrote no proxy pid")
+            .trim()
+            .parse::<u32>()
+            .expect("a numeric proxy pid");
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .expect("kill the proxy by PID");
+        handle.join().unwrap()
+    });
+    std::env::remove_var("SDB_OPENCODE_UPSTREAM");
+    let err = result.expect_err("a dead proxy must fail the run");
+    let exec = err
+        .downcast_ref::<OmpExecutionError>()
+        .expect("a harness fault (OmpExecutionError)");
+    assert!(exec.message.contains("billing proxy"), "{}", exec.message);
+    assert!(exec.message.contains("bill is unknown"), "{}", exec.message);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R85 F1: one real short session through the runner's own proxy; the
+/// runner's billed_usd must equal the billed.jsonl costs to 1e-8. Paid:
+/// `#[ignore]`, run with SDB_ENV_FILE and --ignored.
+#[test]
+#[ignore = "paid probe: real OpenRouter calls; set SDB_ENV_FILE or OPENROUTER_API_KEY"]
+fn r85_f1_real_billed_probe() {
+    let Some(key) = r84_api_key() else {
+        eprintln!("[r85-f1] no OPENROUTER_API_KEY / SDB_ENV_FILE; skipped");
+        return;
+    };
+    let base = r79_temp_dir("r85-f1-real");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::env::remove_var("SDB_OPENCODE_UPSTREAM");
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let run_id = format!("r85-f1-real-{}", std::process::id());
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs_c = logs.clone();
+    let res = <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+        AgentRunSpec {
+            model: "openrouter/openai/gpt-6-luna",
+            prompt:
+                "Use the shell tool once: run `echo probe-forty-two`. Then reply with the output.",
+            workdir: &ws,
+            api_key: Some(&key),
+            limits: crate::sandbox::omp::AgentExecutionLimits {
+                max_turns: Some(3),
+                max_budget_usd: Some(0.05),
+                max_effective_usd: None,
+                timeout_seconds: Some(180),
+            },
+            effort: Some("high"),
+            network: Some("host"),
+            task: None,
+            run_id: Some(&run_id),
+            cancel_flag: None,
+            worker: 0,
+        },
+        move |line| logs_c.lock().unwrap().push(line),
+    );
+    let st = res.expect("the paid probe run");
+    let billed_log = std::fs::read_to_string(base.join("billed.jsonl")).unwrap_or_default();
+    let mut calls = 0u64;
+    let mut sum = 0.0f64;
+    for line in billed_log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        calls += 1;
+        if let Some(c) = v.get("cost").and_then(|c| c.as_f64()) {
+            sum += c;
+        }
+        println!("[r85-f1] call {}", serde_json::to_string(&v).unwrap());
+    }
+    let logs = logs.lock().unwrap().clone();
+    for l in logs.iter().filter(|l| l.contains("[BILLED]")) {
+        println!("[r85-f1] log {l}");
+    }
+    println!("[r85-f1] billed.jsonl calls = {calls}, sum = {sum:.10}");
+    println!("[r85-f1] runner billed_usd = {:.10}", st.billed_usd);
+    assert!(calls >= 2, "the proxy saw {calls} calls");
+    assert!(
+        (st.billed_usd - sum).abs() < 1e-8,
+        "runner billed {} vs the proxy's {sum}",
+        st.billed_usd
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn test_backoff_sleep_exits_immediately_on_deadline_or_cancel() {
     // Past deadline: no sleep, false.
