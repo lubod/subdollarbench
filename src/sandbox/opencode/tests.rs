@@ -854,6 +854,414 @@ fn r84_f2_probe_openrouter_once() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// R85 F1: the stub, isolation and paid tests set process-global env
+/// vars and a real run network; they run one at a time. The fake-docker
+/// driver takes the same lock so its child never inherits a test's env.
+static R85_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// R85 F1: the host bridge address the sidecar reaches the stub on; the
+/// agent's `--internal` run network never can.
+fn r85_bridge_ip() -> String {
+    let out = std::process::Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "-f",
+            "{{(index .IPAM.Config 0).Gateway}}",
+        ])
+        .output()
+        .expect("docker network inspect bridge");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// R85 F1: a real cell-shaped run: the run network (`--internal`, as a
+/// cell's is with the egress filter on), the egress/billing sidecar, the
+/// stub on the host bridge, and the runner pointed at the run network.
+fn r85_run_with_stub(
+    base: &std::path::Path,
+    case: &str,
+    prompt: &str,
+) -> (
+    Result<OmpSessionStats>,
+    Vec<String>,
+    std::path::PathBuf,
+    crate::sandbox::docker::SandboxManager,
+) {
+    let id = format!(
+        "r85-f1-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mgr = crate::sandbox::docker::SandboxManager::with_id(&id);
+    std::env::set_var("SDB_EGRESS_FILTER", "1");
+    mgr.ensure_network().expect("the run network");
+    let log = base.join("requests.jsonl");
+    let (_stub, port) = r82_start_stub(case, &log);
+    let bridge = r85_bridge_ip();
+    std::env::set_var("SDB_OPENCODE_UPSTREAM", format!("http://{bridge}:{port}"));
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let run_id = id.clone();
+    let net = mgr.network_name();
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs_c = logs.clone();
+    let res = <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+        AgentRunSpec {
+            model: "openrouter/openai/gpt-6-luna",
+            prompt,
+            workdir: &ws,
+            api_key: Some("sk-covtest"),
+            limits: crate::sandbox::omp::AgentExecutionLimits {
+                max_turns: Some(3),
+                max_budget_usd: Some(0.05),
+                max_effective_usd: None,
+                timeout_seconds: Some(120),
+            },
+            effort: Some("high"),
+            network: Some(&net),
+            task: None,
+            run_id: Some(&run_id),
+            cancel_flag: None,
+            worker: 0,
+        },
+        move |line| logs_c.lock().unwrap().push(line),
+    );
+    std::env::remove_var("SDB_OPENCODE_UPSTREAM");
+    std::env::remove_var("SDB_EGRESS_FILTER");
+    let logs = logs.lock().unwrap().clone();
+    (res, logs, log, mgr)
+}
+
+/// R85 F1: the run's billed_usd is the sum of the stub's usage.cost over
+/// every call, through the real run-network sidecar; billed.jsonl holds
+/// the id, model and cost but never the key or the prompt.
+#[test]
+fn r85_f1_billed_from_the_calls() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r85-f1");
+    let (res, logs, _stub_log, mgr) = r85_run_with_stub(
+        &base,
+        "tool",
+        "Use the shell tool once: run `echo probe-forty-two`. Then reply with the output.",
+    );
+    let st = res.expect("the stub run must succeed");
+    let billed_log = std::fs::read_to_string(base.join("billed.jsonl")).unwrap_or_default();
+    let mut calls = 0u64;
+    let mut sum = 0.0f64;
+    for line in billed_log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        calls += 1;
+        sum += v.get("cost").and_then(|c| c.as_f64()).unwrap_or(0.0);
+        assert!(
+            v.get("id").and_then(|i| i.as_str()).is_some(),
+            "a billed line has no id: {v}"
+        );
+        assert_eq!(
+            v.get("model").and_then(|m| m.as_str()),
+            Some("openai/gpt-6-luna"),
+            "a billed line has the wrong model: {v}"
+        );
+    }
+    assert!(calls >= 2, "the stub saw {calls} calls");
+    assert!(
+        (sum - calls as f64 * 0.001).abs() < 1e-12,
+        "the billed lines sum to {sum}, want {}",
+        calls as f64 * 0.001
+    );
+    assert!(
+        (st.billed_usd - sum).abs() < 1e-12,
+        "runner billed {} vs the stub's {sum}",
+        st.billed_usd
+    );
+    assert!(
+        !billed_log.contains("sk-covtest"),
+        "billed.jsonl holds the key"
+    );
+    assert!(
+        !billed_log.contains("probe-forty-two"),
+        "billed.jsonl holds the prompt"
+    );
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("[BILLED]") && l.contains("OpenRouter's charge")),
+        "{logs:?}"
+    );
+    mgr.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R85 F1: a sidecar killed mid-run is a harness fault with its own line,
+/// never a graded result. The stub holds the request open; the test kills
+/// the sidecar container.
+#[test]
+fn r85_f1_proxy_gone_fault() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r85-f1-gone");
+    let log = base.join("requests.jsonl");
+    let id = format!(
+        "r85-f1-gone-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mgr = crate::sandbox::docker::SandboxManager::with_id(&id);
+    std::env::set_var("SDB_EGRESS_FILTER", "1");
+    mgr.ensure_network().expect("the run network");
+    let (_stub, port) = r82_start_stub("slow", &log);
+    let bridge = r85_bridge_ip();
+    std::env::set_var("SDB_OPENCODE_UPSTREAM", format!("http://{bridge}:{port}"));
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let run_id = id.clone();
+    let net = mgr.network_name();
+    let sidecar = mgr.egress_proxy_name();
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs_c = logs.clone();
+    let result = std::thread::scope(|s| {
+        let handle = s.spawn(|| {
+            <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+                AgentRunSpec {
+                    model: "openrouter/openai/gpt-6-luna",
+                    prompt: "Use the shell tool once: run `echo probe-forty-two`. Then reply with the output.",
+                    workdir: &ws,
+                    api_key: Some("sk-covtest"),
+                    limits: crate::sandbox::omp::AgentExecutionLimits {
+                        max_turns: Some(3),
+                        max_budget_usd: Some(0.05),
+                        max_effective_usd: None,
+                        timeout_seconds: Some(60),
+                    },
+                    effort: Some("high"),
+                    network: Some(&net),
+                    task: None,
+                    run_id: Some(&run_id),
+                    cancel_flag: None,
+                    worker: 0,
+                },
+                move |line| logs_c.lock().unwrap().push(line),
+            )
+        });
+        // The stub logs the request before its sleep: the sidecar is in
+        // flight, so killing it is a mid-run death.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if log.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(log.exists(), "the stub saw no request");
+        std::process::Command::new("docker")
+            .args(["rm", "-f", &sidecar])
+            .status()
+            .expect("remove the billing sidecar");
+        handle.join().unwrap()
+    });
+    std::env::remove_var("SDB_OPENCODE_UPSTREAM");
+    std::env::remove_var("SDB_EGRESS_FILTER");
+    let err = result.expect_err("a dead sidecar must fail the run");
+    let exec = err
+        .downcast_ref::<OmpExecutionError>()
+        .expect("a harness fault (OmpExecutionError)");
+    assert!(exec.message.contains("billing proxy"), "{}", exec.message);
+    assert!(exec.message.contains("bill is unknown"), "{}", exec.message);
+    mgr.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R85 F1/R85-2: the real cell network is still isolated. The agent
+/// reaches the billing sidecar and OpenRouter through it, and cannot
+/// reach a host port or any other destination.
+#[test]
+fn r85_f1_cell_isolation() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r85-f1-iso");
+    let id = format!(
+        "r85-f1-iso-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mgr = crate::sandbox::docker::SandboxManager::with_id(&id);
+    std::env::set_var("SDB_EGRESS_FILTER", "1");
+    mgr.ensure_network().expect("the run network");
+    let log = base.join("requests.jsonl");
+    let (_stub, port) = r82_start_stub("ok", &log);
+    let bridge = r85_bridge_ip();
+    let run_dir = base.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let url = mgr
+        .start_billing_proxy(&run_dir, &format!("http://{bridge}:{port}"))
+        .expect("the billing sidecar");
+    assert!(url.contains("egress-proxy"), "{url}");
+
+    // A host port on the bridge address: the agent must not reach it.
+    let listener = std::net::TcpListener::bind((bridge.as_str(), 0)).expect("the host listener");
+    let host_port = listener.local_addr().unwrap().port();
+    let net = mgr.network_name();
+    let probe = |script: &str| {
+        let out = std::process::Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                &net,
+                "subdollar-sandbox",
+                "bash",
+                "-c",
+                script,
+            ])
+            .output()
+            .expect("the probe container");
+        out.status.success()
+    };
+    assert!(
+        probe("timeout 2 bash -c 'echo > /dev/tcp/egress-proxy/3128'"),
+        "the agent cannot reach the billing sidecar"
+    );
+    assert!(
+        !probe(&format!(
+            "timeout 2 bash -c 'echo > /dev/tcp/{bridge}/{host_port}'"
+        )),
+        "the agent reached a host port on {bridge}:{host_port}"
+    );
+    assert!(
+        !probe("timeout 2 bash -c 'echo > /dev/tcp/1.1.1.1/443'"),
+        "the agent reached an external destination"
+    );
+    let out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            &net,
+            "subdollar-sandbox",
+            "curl",
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "http://egress-proxy:3128/api/v1/chat/completions",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            "{\"model\":\"x\"}",
+        ])
+        .output()
+        .expect("the through-the-sidecar probe");
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("200"),
+        "the agent could not reach OpenRouter through the sidecar: {:?}",
+        out
+    );
+    assert!(
+        std::fs::read_to_string(run_dir.join("billed.jsonl"))
+            .unwrap_or_default()
+            .contains("\"cost\""),
+        "the sidecar wrote no billed line"
+    );
+    drop(listener);
+    std::env::remove_var("SDB_EGRESS_FILTER");
+    mgr.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R85 F1: one real short session through the runner's sidecar on a real
+/// `--internal` run network; the runner's billed_usd must equal the
+/// billed.jsonl costs to 1e-8. Paid: `#[ignore]`, run with SDB_ENV_FILE
+/// and --ignored in a gap.
+#[test]
+#[ignore = "paid probe: real OpenRouter calls; set SDB_ENV_FILE or OPENROUTER_API_KEY"]
+fn r85_f1_real_billed_probe() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let Some(key) = r84_api_key() else {
+        eprintln!("[r85-f1] no OPENROUTER_API_KEY / SDB_ENV_FILE; skipped");
+        return;
+    };
+    let base = r79_temp_dir("r85-f1-real");
+    let id = format!(
+        "r85-f1-real-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mgr = crate::sandbox::docker::SandboxManager::with_id(&id);
+    std::env::set_var("SDB_EGRESS_FILTER", "1");
+    mgr.ensure_network().expect("the run network");
+    std::env::remove_var("SDB_OPENCODE_UPSTREAM");
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let ws = base.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let run_id = id.clone();
+    let net = mgr.network_name();
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let logs_c = logs.clone();
+    let res = <OpenCodeRunner as crate::sandbox::AgentRunner>::run_agent_with_logger(
+        AgentRunSpec {
+            model: "openrouter/openai/gpt-6-luna",
+            prompt:
+                "Use the shell tool once: run `echo probe-forty-two`. Then reply with the output.",
+            workdir: &ws,
+            api_key: Some(&key),
+            limits: crate::sandbox::omp::AgentExecutionLimits {
+                max_turns: Some(3),
+                max_budget_usd: Some(0.05),
+                max_effective_usd: None,
+                timeout_seconds: Some(180),
+            },
+            effort: Some("high"),
+            network: Some(&net),
+            task: None,
+            run_id: Some(&run_id),
+            cancel_flag: None,
+            worker: 0,
+        },
+        move |line| logs_c.lock().unwrap().push(line),
+    );
+    std::env::remove_var("SDB_EGRESS_FILTER");
+    let st = res.expect("the paid probe run");
+    let billed_log = std::fs::read_to_string(base.join("billed.jsonl")).unwrap_or_default();
+    let mut calls = 0u64;
+    let mut sum = 0.0f64;
+    for line in billed_log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        calls += 1;
+        if let Some(c) = v.get("cost").and_then(|c| c.as_f64()) {
+            sum += c;
+        }
+        println!("[r85-f1] call {}", serde_json::to_string(&v).unwrap());
+    }
+    let logs = logs.lock().unwrap().clone();
+    for l in logs.iter().filter(|l| l.contains("[BILLED]")) {
+        println!("[r85-f1] log {l}");
+    }
+    println!("[r85-f1] billed.jsonl calls = {calls}, sum = {sum:.10}");
+    println!("[r85-f1] runner billed_usd = {:.10}", st.billed_usd);
+    assert!(calls >= 2, "the sidecar saw {calls} calls");
+    assert!(
+        (st.billed_usd - sum).abs() < 1e-8,
+        "runner billed {} vs the sidecar's {sum}",
+        st.billed_usd
+    );
+    mgr.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn test_backoff_sleep_exits_immediately_on_deadline_or_cancel() {
     // Past deadline: no sleep, false.
@@ -1565,6 +1973,7 @@ fn fake_docker_driver() {
 /// parallel test suite.
 #[test]
 fn test_opencode_runner_fake_docker_scenarios() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
     let root = std::env::temp_dir().join(format!("covtest-oc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("bin")).unwrap();

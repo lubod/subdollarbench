@@ -533,7 +533,15 @@ impl OpenCodeRunner {
     /// generates internally for effort variants (`settings.reasoning.effort`
     /// = OpenRouter's native reasoning parameter). Env-passed so no config
     /// files pollute the candidate workspace.
+    #[cfg(test)]
     fn variant_config_json(model_bare: &str) -> String {
+        Self::variant_config_json_with_base(model_bare, None)
+    }
+
+    /// R85 F1: the cell path passes the run's billing proxy as the
+    /// OpenRouter baseURL; the R84 F2 test hook (`SDB_OPENCODE_BASE_URL`)
+    /// wins when set, so the paid probe keeps its own proxy.
+    fn variant_config_json_with_base(model_bare: &str, base: Option<&str>) -> String {
         // R79-4: the snapshot pin, sent through the OpenRouter provider
         // options (`provider.only`/`order`), the same endpoint the omp
         // check pins. This one function builds the per-trial config the
@@ -568,14 +576,12 @@ impl OpenCodeRunner {
                 "provider": {"only": [pin], "order": [pin]}
             });
         }
-        // R84 F2: the paid probe points the runner's own config at the
-        // local logging proxy (`scripts/opencode-proxy.py`). Only the
-        // probe sets this; a cell never does, so its config is unchanged.
-        if let Ok(base) = std::env::var("SDB_OPENCODE_BASE_URL") {
-            if !base.is_empty() {
-                config["providers"]["openrouter"]["settings"] =
-                    serde_json::json!({"baseURL": base});
-            }
+        let base = std::env::var("SDB_OPENCODE_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| base.map(|s| s.to_string()));
+        if let Some(base) = base {
+            config["providers"]["openrouter"]["settings"] = serde_json::json!({"baseURL": base});
         }
         config.to_string()
     }
@@ -766,6 +772,140 @@ impl Drop for RunDirs {
     }
 }
 
+/// R85 F1/R85-1: the run's billing proxy lives in the egress sidecar on
+/// the run's own network (alias `egress-proxy`), never on the host. The
+/// sidecar forwards the agent's `/api/v1` requests to OpenRouter over
+/// TLS and writes `{id, model, cost, status}` to the run dir's
+/// `billed.jsonl`; nothing on the host listens, and the agent keeps no
+/// route to the host (the run network is `--internal` when the egress
+/// filter is on). The round 84 paid probe's `SDB_OPENCODE_BASE_URL` hook
+/// bypasses the sidecar (it brings its own proxy); a cell never sets it.
+struct BillingProxy {
+    name: String,
+    log: PathBuf,
+    url: String,
+}
+
+#[derive(Debug, Default, Clone)]
+struct BilledSummary {
+    cost: f64,
+    calls: u64,
+    missing: Vec<String>,
+}
+
+impl BillingProxy {
+    fn start(network: Option<&str>, run_dir: &std::path::Path, upstream: &str) -> Result<Self> {
+        let log = run_dir.join("billed.jsonl");
+        let _ = std::fs::remove_file(&log);
+        if std::env::var("SDB_OPENCODE_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            // R84 F2's paid probe brings its own proxy and points the
+            // config at it; a cell never sets this.
+            return Ok(Self {
+                name: String::new(),
+                log,
+                url: String::new(),
+            });
+        }
+        let Some(net) = network else {
+            if crate::sandbox::docker::egress_filter_enabled() {
+                return Err(anyhow!(
+                    "refusing to run the agent unfiltered: billing proxy needs the run network"
+                ));
+            }
+            // A standalone run (the fake-docker tests) has no run network;
+            // a cell always does.
+            return Ok(Self {
+                name: String::new(),
+                log,
+                url: String::new(),
+            });
+        };
+        let Some(id) = net.strip_prefix("subdollar-net-") else {
+            // A caller-supplied test network (the fake-docker driver).
+            return Ok(Self {
+                name: String::new(),
+                log,
+                url: String::new(),
+            });
+        };
+        let mgr = crate::sandbox::docker::SandboxManager::with_id(id);
+        let url = mgr.start_billing_proxy(run_dir, upstream).ok_or_else(|| {
+            if crate::sandbox::docker::egress_filter_enabled() {
+                anyhow!(
+                    "refusing to run the agent unfiltered: billing proxy sidecar did not start on {net}"
+                )
+            } else {
+                anyhow!("billing proxy sidecar did not start on {net}; see its container log")
+            }
+        })?;
+        Ok(Self {
+            name: mgr.egress_proxy_name(),
+            log,
+            url,
+        })
+    }
+
+    fn base_url(&self) -> String {
+        if self.url.is_empty() {
+            String::new()
+        } else {
+            format!("{}/api/v1", self.url)
+        }
+    }
+
+    /// Read the whole run's log (cumulative across attempts); a call with
+    /// no `usage.cost` is counted and named, never silently priced.
+    fn read(&self) -> BilledSummary {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let mut s = BilledSummary::default();
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            s.calls += 1;
+            match v.get("cost").and_then(|c| c.as_f64()) {
+                Some(c) => s.cost += c,
+                None => s.missing.push(
+                    v.get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("(no id)")
+                        .to_string(),
+                ),
+            }
+        }
+        s
+    }
+
+    /// True when the sidecar is gone (a mid-run death is a harness fault,
+    /// never a graded result).
+    fn exited(&self) -> bool {
+        if self.name.is_empty() {
+            return false;
+        }
+        let out = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", &self.name])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() != "true",
+            _ => true,
+        }
+    }
+}
+
+impl Drop for BillingProxy {
+    fn drop(&mut self) {
+        if !self.name.is_empty() {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &self.name])
+                .output();
+        }
+    }
+}
+
 impl crate::sandbox::AgentRunner for OpenCodeRunner {
     fn run_agent_with_logger<F>(spec: AgentRunSpec<'_>, mut log_fn: F) -> Result<OmpSessionStats>
     where
@@ -836,6 +976,20 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // R84 F1: the data dir's db is read after each attempt, before the
         // guard removes it.
         let run_dirs = RunDirs::new(&canonical_workdir);
+        // R85 F1: one logging proxy per run. The container reaches it on
+        // the host (host.docker.internal on a run network; 127.0.0.1
+        // when the caller asks for host networking, as the tests do).
+        let run_dir = run_dirs
+            .data
+            .parent()
+            .unwrap_or(&canonical_workdir)
+            .to_path_buf();
+        let upstream = std::env::var("SDB_OPENCODE_UPSTREAM")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "https://openrouter.ai".to_string());
+        let billing = BillingProxy::start(network, &run_dir, &upstream)?;
+        let proxy_base = billing.base_url();
 
         // Same task text + entrypoint contract as OMP (shared helper).
         let (base_port, base_cmd, raw_guidance) = OmpRunner::task_guidance(spec.task, prompt);
@@ -874,20 +1028,11 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // resume attempts reuse the same sidecar instead of starting one
         // per attempt.
         let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1";
+        // R85-1: the billing sidecar is also the egress allowlist proxy;
+        // when the filter is on, the agent's proxy env points at it.
         let egress_on = crate::sandbox::docker::egress_filter_enabled();
-        let proxy_url: Option<String> = (if egress_on { network } else { None })
-            .and_then(|net| {
-                net.strip_prefix("subdollar-net-").map(|id| {
-                    crate::sandbox::docker::SandboxManager::with_id(id).start_egress_proxy()
-                })
-            })
-            .flatten();
-        if proxy_url.is_none() && egress_on {
-            anyhow::bail!(
-                "egress filter is enabled but the allowlist proxy sidecar failed to start; \
-                 refusing to run the agent unfiltered"
-            );
-        }
+        let proxy_url: Option<String> =
+            (egress_on && !billing.url.is_empty()).then(|| billing.url.clone());
 
         let make_cmd = || {
             let mut cmd = Command::new("docker");
@@ -907,7 +1052,6 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .arg("--pids-limit=512")
                 .arg("--cap-drop=ALL")
                 .arg("--security-opt=no-new-privileges")
-                .arg("--add-host=host.docker.internal:host-gateway")
                 .arg("-v")
                 .arg(format!("{}:/workspace", canonical_workdir.display()))
                 .arg("-w")
@@ -948,7 +1092,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .unwrap_or(&effective_model);
             cmd.arg("-e").arg(format!(
                 "OPENCODE_CONFIG_CONTENT={}",
-                Self::variant_config_json(bare)
+                Self::variant_config_json_with_base(bare, Some(&proxy_base))
             ));
             if let Some(max_turns) = limits.max_turns {
                 cmd.arg("-e")
@@ -1309,6 +1453,40 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     &effective_model,
                     &mut reconcile_log,
                 );
+            }
+            // R85 F1: the proxy's billed.jsonl is the run's real bill
+            // (cumulative across attempts); a call with no usage.cost is
+            // counted and named, never silently priced.
+            let billed = billing.read();
+            {
+                let mut stats_guard = stats.lock().unwrap();
+                stats_guard.billed_usd = billed.cost;
+            }
+            let _ = retry_tx.send(format!(
+                "[BILLED] {} call(s), ${:.8} (OpenRouter's charge)",
+                billed.calls, billed.cost
+            ));
+            for id in &billed.missing {
+                let _ = retry_tx.send(format!(
+                    "[BILLED] call {id} has no usage.cost; counted, not priced"
+                ));
+            }
+            // A proxy that died mid-run leaves the bill unknown: a harness
+            // fault with its own line, never a graded result.
+            if billing.exited() {
+                let st = Self::snapshot_stats(
+                    &stats,
+                    &turns,
+                    Some(Self::resolve_effort_effective(
+                        &variant_id,
+                        variant_disabled.load(Ordering::SeqCst),
+                    )),
+                );
+                break Err(anyhow!(OmpExecutionError {
+                    message: "billing proxy exited mid-run; the run's bill is unknown".to_string(),
+                    started: st.steps_taken > 0 || st.total_tokens > 0,
+                    partial_stats: st,
+                }));
             }
             if billing_tripped.load(Ordering::SeqCst) {
                 let st = Self::snapshot_stats(

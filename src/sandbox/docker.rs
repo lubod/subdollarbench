@@ -561,6 +561,19 @@ impl SandboxManager {
     /// filtering (agent runs unfiltered, logged), never fails the run.
     /// Returns the proxy URL for agent env, or None when unavailable.
     pub fn start_egress_proxy(&self) -> Option<String> {
+        self.start_proxy_sidecar(None)
+    }
+
+    /// R85 F1: the same sidecar, with the run dir mounted at `/billed`
+    /// and the OpenRouter billing path enabled. It is the run's only
+    /// route to the model API: the sidecar joins the run network (which
+    /// is `--internal` when the egress filter is on), and nothing
+    /// listens on the host. Returns the sidecar's run-network URL.
+    pub fn start_billing_proxy(&self, run_dir: &Path, upstream: &str) -> Option<String> {
+        self.start_proxy_sidecar(Some((run_dir, upstream)))
+    }
+
+    fn start_proxy_sidecar(&self, billing: Option<(&Path, &str)>) -> Option<String> {
         let name = self.egress_proxy_name();
         let net = self.network_name();
         if self.ensure_network().is_err() {
@@ -575,34 +588,43 @@ impl SandboxManager {
             return None;
         }
         let allow = EGRESS_ALLOWLIST.join(",");
-        let out = std::process::Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--rm",
-                "--label",
-                &format!("sdb.run={}", self.instance_id),
-                "--label",
-                "sdb.role=egress",
-                "--name",
-                &name,
-                // Start on the default bridge: the sidecar is the one thing
-                // that needs real egress. It joins the run network below,
-                // which is created --internal and so has no route out.
-                "--network",
-                "bridge",
-                "--memory=128m",
-                "--cpus=0.25",
-                "--pids-limit=64",
-                "-v",
-                &format!("{}:/proxy.py:ro", script.display()),
-                "-e",
-                &format!("ALLOWLIST={allow}"),
-                EGRESS_PROXY_IMAGE,
-                "python3",
-                "/proxy.py",
-                "3128",
-            ])
+        let mut cmd = std::process::Command::new("docker");
+        cmd.args([
+            "run",
+            "-d",
+            "--rm",
+            "--label",
+            &format!("sdb.run={}", self.instance_id),
+            "--label",
+            "sdb.role=egress",
+            "--name",
+            &name,
+            // Start on the default bridge: the sidecar is the one thing
+            // that needs real egress. It joins the run network below,
+            // which is created --internal and so has no route out.
+            "--network",
+            "bridge",
+            "--memory=128m",
+            "--cpus=0.25",
+            "--pids-limit=64",
+        ]);
+        if let Some((run_dir, upstream)) = billing {
+            cmd.arg("-v")
+                .arg(format!("{}:/billed", run_dir.display()))
+                .arg("-e")
+                .arg("BILL_LOG=/billed/billed.jsonl")
+                .arg("-e")
+                .arg(format!("BILL_UPSTREAM={upstream}"));
+        }
+        let out = cmd
+            .arg("-v")
+            .arg(format!("{}:/proxy.py:ro", script.display()))
+            .arg("-e")
+            .arg(format!("ALLOWLIST={allow}"))
+            .arg(EGRESS_PROXY_IMAGE)
+            .arg("python3")
+            .arg("/proxy.py")
+            .arg("3128")
             .output();
         // Disarm Drop-cleanup: this handle is ephemeral (created just to
         // start the sidecar). The sidecar's lifetime belongs to the run,
@@ -635,7 +657,26 @@ impl SandboxManager {
                 let _ = std::process::Command::new("docker")
                     .args(["exec", &name, "sh", "-c", "cp /tmp/rc.ok /etc/resolv.conf"])
                     .output();
-                Some("http://egress-proxy:3128".to_string())
+                // R85-1: the sidecar's Python binds asynchronously; wait
+                // for 3128 inside the container before the agent starts.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while std::time::Instant::now() < deadline {
+                    let ready = std::process::Command::new("docker")
+                        .args([
+                            "exec",
+                            &name,
+                            "python3",
+                            "-c",
+                            "import socket; s=socket.socket(); s.settimeout(0.2); raise SystemExit(0 if s.connect_ex(('127.0.0.1', 3128)) == 0 else 1)",
+                        ])
+                        .output();
+                    if matches!(ready, Ok(o) if o.status.success()) {
+                        return Some("http://egress-proxy:3128".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                self.stop_egress_proxy();
+                None
             }
             _ => None,
         }

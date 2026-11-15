@@ -16,6 +16,7 @@ Usage: scripts/opencode-stub.py <port> <request-log> <case>
 import http.server
 import json
 import sys
+import time
 
 PORT = int(sys.argv[1])
 LOG = sys.argv[2]
@@ -36,7 +37,7 @@ def text_sse(wfile, text):
          "finish_reason": None}]},
         {"id": "gen-stub", "choices": [{"index": 0, "delta": {},
          "finish_reason": "stop"}],
-         "usage": {"prompt_tokens": 10, "completion_tokens": 1}},
+         "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost": 0.001}},
     ])
 
 
@@ -50,7 +51,7 @@ def tool_sse(wfile):
         }, "finish_reason": None}]},
         {"id": "gen-stub", "choices": [{"index": 0, "delta": {},
          "finish_reason": "tool_calls"}],
-         "usage": {"prompt_tokens": 10, "completion_tokens": 1}},
+         "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost": 0.001}},
     ])
 
 
@@ -59,6 +60,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         COUNT["n"] += 1
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n)
+        if CASE == "slow":
+            # R85 F1: the proxy-gone test kills the proxy while this
+            # request is in flight.
+            time.sleep(3)
         with open(LOG, "a") as f:
             f.write(json.dumps({"case": CASE, "n": COUNT["n"], "path": self.path,
                                 "body": body.decode("utf-8", "replace")}) + "\n")
@@ -104,4 +109,4 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-http.server.HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+http.server.HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
