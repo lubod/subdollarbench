@@ -4,9 +4,12 @@ Env ALLOWLIST (comma hosts); the default is the .47 model API only
 (R81 F2: no registries, no GitHub).
 NO_PROXY semantics: client-side (agent env); this proxy 403s anything off-list.
 """
+import http.client
+import json
 import os
 import socket
 import threading
+import urllib.parse
 
 PORT = int(__import__("sys").argv[1]) if len(__import__("sys").argv) > 1 else 3128
 ALLOW = set(
@@ -14,6 +17,121 @@ ALLOW = set(
     .get("ALLOWLIST", "openrouter.ai,api.openrouter.ai")
     .split(",")
 )
+# R85 F1: the run's billing proxy lives in this sidecar. The agent's
+# baseURL is http://egress-proxy:<port>/api/v1; a request on that path
+# (origin-form or absolute-form) is forwarded to the upstream over TLS
+# and one {id, model, cost, status} line is written to BILL_LOG. Only
+# the runner's sidecar sets BILL_LOG; the egress-only sidecar keeps the
+# plain allowlist proxy behaviour.
+BILL_LOG = os.environ.get("BILL_LOG", "")
+BILL_UPSTREAM = os.environ.get("BILL_UPSTREAM", "https://openrouter.ai")
+UP = urllib.parse.urlsplit(BILL_UPSTREAM)
+
+
+def billing_record(body, status, request_model):
+    text = body.decode("utf-8", "replace")
+    values = []
+    for line in text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        chunk = line[6:].strip()
+        if chunk == "[DONE]":
+            continue
+        try:
+            values.append(json.loads(chunk))
+        except Exception:
+            continue
+    if not values:
+        try:
+            one = json.loads(text)
+        except Exception:
+            one = None
+        if isinstance(one, dict):
+            values.append(one)
+    record = {"id": None, "model": None, "cost": None, "status": status}
+    for v in values:
+        record["id"] = record["id"] or v.get("id")
+        record["model"] = record["model"] or v.get("model")
+        usage = v.get("usage")
+        if isinstance(usage, dict) and isinstance(usage.get("cost"), (int, float)):
+            record["cost"] = usage["cost"]
+    record["model"] = record["model"] or request_model
+    return record
+
+
+def billing_path(target):
+    """The /api/v1 path of an origin- or absolute-form request."""
+    if target.startswith("http://") or target.startswith("https://"):
+        return urllib.parse.urlsplit(target).path
+    return target
+
+
+def handle_billing(client, head, method, path):
+    # `head` may already hold the first body bytes (the recv read past
+    # the blank line); split them out before reading the rest.
+    parts = head.split(b"\r\n\r\n", 1)
+    head = parts[0] + b"\r\n\r\n"
+    body = parts[1] if len(parts) > 1 else b""
+    lines = parts[0].decode("latin1").split("\r\n")
+    headers = {}
+    for ln in lines[1:]:
+        if not ln:
+            break
+        k, _, v = ln.partition(":")
+        headers[k.strip().lower()] = v.strip()
+    try:
+        clen = int(headers.get("content-length") or 0)
+    except ValueError:
+        clen = 0
+    while len(body) < clen:
+        chunk = client.recv(min(65536, clen - len(body)))
+        if not chunk:
+            break
+        body += chunk
+    request_model = None
+    if method == "POST" and body:
+        try:
+            request_model = json.loads(
+                body.decode("utf-8", "replace")).get("model")
+        except Exception:
+            request_model = None
+    fwd = {k: headers[k] for k in ("authorization", "content-type", "accept")
+           if k in headers}
+    fwd_path = (UP.path.rstrip("/") + path) if UP.path else path
+    if UP.scheme == "https":
+        conn = http.client.HTTPSConnection(
+            UP.hostname, UP.port or 443, timeout=180)
+    else:
+        conn = http.client.HTTPConnection(
+            UP.hostname, UP.port or 80, timeout=180)
+    try:
+        conn.request(method, fwd_path, body, fwd)
+        resp = conn.getresponse()
+        data = resp.read()
+        status = resp.status
+        reason = resp.reason or "OK"
+        ctype = resp.getheader("Content-Type") or "application/json"
+    except Exception as exc:
+        data = ("billing proxy error: %s" % exc).encode()
+        status = 502
+        reason = "Bad Gateway"
+        ctype = "text/plain"
+    finally:
+        conn.close()
+    if method == "POST":
+        try:
+            with open(BILL_LOG, "a") as f:
+                f.write(json.dumps(
+                    billing_record(data, status, request_model)) + "\n")
+        except OSError:
+            pass
+    try:
+        client.sendall(
+            ("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+             "Connection: close\r\n\r\n" % (status, reason, ctype, len(data))
+             ).encode("latin1") + data)
+    except OSError:
+        pass
 
 
 def allowed(host):
@@ -56,6 +174,14 @@ def handle(client):
                 break
         if method.upper() == "CONNECT":
             host = target
+        # R85 F1: the billing path, before the allowlist (the sidecar's
+        # own host is not on it).
+        if BILL_LOG and host.split(":")[0] in (
+                "egress-proxy", "localhost", "127.0.0.1"):
+            path = billing_path(target)
+            if path.startswith("/api/v1/"):
+                handle_billing(client, head, method, path)
+                return
         if not host or not allowed(host):
             client.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nFORBIDDEN")
             client.close()

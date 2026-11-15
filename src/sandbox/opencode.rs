@@ -772,17 +772,18 @@ impl Drop for RunDirs {
     }
 }
 
-/// R85 F1: the run's own logging proxy in front of OpenRouter. It binds a
-/// host port the run's container reaches, forwards every request to the
-/// upstream (default `https://openrouter.ai`), and writes one
-/// `{id, model, cost, status}` line per chat call to the run dir's
-/// `billed.jsonl` — never the key or the prompt. The runner reads that
-/// sum into `billed_usd` after every attempt.
+/// R85 F1/R85-1: the run's billing proxy lives in the egress sidecar on
+/// the run's own network (alias `egress-proxy`), never on the host. The
+/// sidecar forwards the agent's `/api/v1` requests to OpenRouter over
+/// TLS and writes `{id, model, cost, status}` to the run dir's
+/// `billed.jsonl`; nothing on the host listens, and the agent keeps no
+/// route to the host (the run network is `--internal` when the egress
+/// filter is on). The round 84 paid probe's `SDB_OPENCODE_BASE_URL` hook
+/// bypasses the sidecar (it brings its own proxy); a cell never sets it.
 struct BillingProxy {
-    child: std::process::Child,
-    port: u16,
+    name: String,
     log: PathBuf,
-    pid_file: PathBuf,
+    url: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -793,57 +794,67 @@ struct BilledSummary {
 }
 
 impl BillingProxy {
-    fn start(run_dir: &std::path::Path, upstream: &str) -> Result<Self> {
+    fn start(network: Option<&str>, run_dir: &std::path::Path, upstream: &str) -> Result<Self> {
         let log = run_dir.join("billed.jsonl");
-        let pid_file = run_dir.join("billed-proxy.pid");
         let _ = std::fs::remove_file(&log);
-        let listener = std::net::TcpListener::bind("0.0.0.0:0")
-            .map_err(|e| anyhow!("billing proxy: cannot pick a port: {e}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| anyhow!("billing proxy: cannot read its port: {e}"))?
-            .port();
-        drop(listener);
-        let script = crate::config::get_repo_root().join("scripts/opencode-proxy.py");
-        let stderr = std::fs::File::create(run_dir.join("billed-proxy.log"))
-            .map_err(|e| anyhow!("billing proxy: cannot write its log: {e}"))?;
-        let child = Command::new("python3")
-            .arg(&script)
-            .arg(port.to_string())
-            .arg(&log)
-            .arg(upstream)
-            .arg("--bind=0.0.0.0")
-            .arg("--billed")
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .map_err(|e| anyhow!("billing proxy: cannot start {}: {e}", script.display()))?;
-        let mut proxy = Self {
-            child,
-            port,
-            log,
-            pid_file,
-        };
-        let _ = std::fs::write(&proxy.pid_file, proxy.child.id().to_string());
-        // A proxy that never listens is a harness fault, never a model
-        // verdict; the line names its log.
-        let deadline = SystemTime::now() + Duration::from_secs(10);
-        while SystemTime::now() < deadline {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return Ok(proxy);
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        if std::env::var("SDB_OPENCODE_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            // R84 F2's paid probe brings its own proxy and points the
+            // config at it; a cell never sets this.
+            return Ok(Self {
+                name: String::new(),
+                log,
+                url: String::new(),
+            });
         }
-        let _ = proxy.child.kill();
-        let _ = proxy.child.wait();
-        Err(anyhow!(
-            "billing proxy did not start on port {port}; see {}",
-            run_dir.join("billed-proxy.log").display()
-        ))
+        let Some(net) = network else {
+            if crate::sandbox::docker::egress_filter_enabled() {
+                return Err(anyhow!(
+                    "refusing to run the agent unfiltered: billing proxy needs the run network"
+                ));
+            }
+            // A standalone run (the fake-docker tests) has no run network;
+            // a cell always does.
+            return Ok(Self {
+                name: String::new(),
+                log,
+                url: String::new(),
+            });
+        };
+        let Some(id) = net.strip_prefix("subdollar-net-") else {
+            // A caller-supplied test network (the fake-docker driver).
+            return Ok(Self {
+                name: String::new(),
+                log,
+                url: String::new(),
+            });
+        };
+        let mgr = crate::sandbox::docker::SandboxManager::with_id(id);
+        let url = mgr.start_billing_proxy(run_dir, upstream).ok_or_else(|| {
+            if crate::sandbox::docker::egress_filter_enabled() {
+                anyhow!(
+                    "refusing to run the agent unfiltered: billing proxy sidecar did not start on {net}"
+                )
+            } else {
+                anyhow!("billing proxy sidecar did not start on {net}; see its container log")
+            }
+        })?;
+        Ok(Self {
+            name: mgr.egress_proxy_name(),
+            log,
+            url,
+        })
     }
 
-    fn base_url(&self, host: &str) -> String {
-        format!("http://{host}:{}/api/v1", self.port)
+    fn base_url(&self) -> String {
+        if self.url.is_empty() {
+            String::new()
+        } else {
+            format!("{}/api/v1", self.url)
+        }
     }
 
     /// Read the whole run's log (cumulative across attempts); a call with
@@ -869,16 +880,29 @@ impl BillingProxy {
         s
     }
 
-    fn exited(&mut self) -> Option<std::process::ExitStatus> {
-        self.child.try_wait().ok().flatten()
+    /// True when the sidecar is gone (a mid-run death is a harness fault,
+    /// never a graded result).
+    fn exited(&self) -> bool {
+        if self.name.is_empty() {
+            return false;
+        }
+        let out = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", &self.name])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() != "true",
+            _ => true,
+        }
     }
 }
 
 impl Drop for BillingProxy {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.pid_file);
+        if !self.name.is_empty() {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &self.name])
+                .output();
+        }
     }
 }
 
@@ -964,13 +988,8 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "https://openrouter.ai".to_string());
-        let mut billing = BillingProxy::start(&run_dir, &upstream)?;
-        let proxy_host = if network == Some("host") {
-            "127.0.0.1"
-        } else {
-            "host.docker.internal"
-        };
-        let proxy_base = billing.base_url(proxy_host);
+        let billing = BillingProxy::start(network, &run_dir, &upstream)?;
+        let proxy_base = billing.base_url();
 
         // Same task text + entrypoint contract as OMP (shared helper).
         let (base_port, base_cmd, raw_guidance) = OmpRunner::task_guidance(spec.task, prompt);
@@ -1008,21 +1027,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // fail closed when the sidecar cannot start. Resolved once here so
         // resume attempts reuse the same sidecar instead of starting one
         // per attempt.
-        let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1,host.docker.internal";
+        let no_proxy = "ref-redis,ref-http,egress-proxy,localhost,127.0.0.1";
+        // R85-1: the billing sidecar is also the egress allowlist proxy;
+        // when the filter is on, the agent's proxy env points at it.
         let egress_on = crate::sandbox::docker::egress_filter_enabled();
-        let proxy_url: Option<String> = (if egress_on { network } else { None })
-            .and_then(|net| {
-                net.strip_prefix("subdollar-net-").map(|id| {
-                    crate::sandbox::docker::SandboxManager::with_id(id).start_egress_proxy()
-                })
-            })
-            .flatten();
-        if proxy_url.is_none() && egress_on {
-            anyhow::bail!(
-                "egress filter is enabled but the allowlist proxy sidecar failed to start; \
-                 refusing to run the agent unfiltered"
-            );
-        }
+        let proxy_url: Option<String> =
+            (egress_on && !billing.url.is_empty()).then(|| billing.url.clone());
 
         let make_cmd = || {
             let mut cmd = Command::new("docker");
@@ -1042,7 +1052,6 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                 .arg("--pids-limit=512")
                 .arg("--cap-drop=ALL")
                 .arg("--security-opt=no-new-privileges")
-                .arg("--add-host=host.docker.internal:host-gateway")
                 .arg("-v")
                 .arg(format!("{}:/workspace", canonical_workdir.display()))
                 .arg("-w")
@@ -1464,7 +1473,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             }
             // A proxy that died mid-run leaves the bill unknown: a harness
             // fault with its own line, never a graded result.
-            if let Some(status) = billing.exited() {
+            if billing.exited() {
                 let st = Self::snapshot_stats(
                     &stats,
                     &turns,
@@ -1474,9 +1483,7 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     )),
                 );
                 break Err(anyhow!(OmpExecutionError {
-                    message: format!(
-                        "billing proxy exited mid-run ({status}); the run's bill is unknown"
-                    ),
+                    message: "billing proxy exited mid-run; the run's bill is unknown".to_string(),
                     started: st.steps_taken > 0 || st.total_tokens > 0,
                     partial_stats: st,
                 }));
