@@ -371,6 +371,10 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     changes, one decision (keep `.47`, or one `.48` bump and rerun haiku
     and deepseek), and round 85 merged. The free track continues ($0,
     smoke).
+    **Decided: rules `.48`** (operator, 2026-11-15 "bump"; DECISIONS #33):
+    turns and time scale with the ticket's budget (round 86). The `.47`
+    careers are void; the rerun restarts at haiku after round 86 (and
+    round 85) merge, a new bar and a `$0` rehearsal.
 
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
