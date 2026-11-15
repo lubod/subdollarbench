@@ -815,7 +815,8 @@ The benchmark answers "what does a dollar buy" (round 23):
   money: deepseek's career 0, phase 4 catch-up stopped at 200 turns with
   $0.82 of $0.97 unspent, and the phase scored 0. Deepseek hit 200 turns
   6 times (5 stages passed anyway); haiku never did.
-- **Change:** 200 turns and 120 minutes per $0.20 of the ticket's budget,
+- **Change:** 300 turns (operator, "300": 1,500 per dollar, so the dollar
+  binds even for deepseek) and 120 minutes per $0.20 of the ticket's budget,
   never below the stage's own limits, inside the phase's 480-minute wall
   (round 86). The dollar is the binding limit; turns and time stay loop
   guards.
