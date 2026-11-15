@@ -352,6 +352,16 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     at least 900 requests left today, and a phase is stopped if the day's
     remainder falls to 25. About one phase a day: 8 phases, about 8 days.
     Started 2026-11-15 10:20 CET.
+    **Next rules version (not `.47`): the turn limit** (operator,
+    2026-11-15 "just log it"). Each ticket has `max_turns` 200 besides its
+    share of the $0.99. Cheap models reach 200 turns with budget left, so
+    the turn limit, not the dollar, caps them. On `.47` so far deepseek
+    hit 200 turns 6 times (5 of those stages still passed; 1 failure,
+    career 0's phase-4 catch-up of stage 5, which scored the phase 0);
+    haiku never hit it (its stages stopped on dollars 4 times). Candidate
+    for the next bump: scale the turn limit with the budget, so the dollar
+    is the binding constraint, keeping a loop guard. Re-count the hits for
+    all ten models when the `.47` rerun ends.
 
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
