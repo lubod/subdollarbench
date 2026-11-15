@@ -1395,6 +1395,7 @@ fn test_run_agent_rejects_non_openrouter_model_before_docker() {
 const DRIVER_ENV: &str = "SDB_COVTEST_OC_DRIVER";
 const BIN_ENV: &str = "SDB_COVTEST_OC_BIN";
 const WORK_ENV: &str = "SDB_COVTEST_OC_WORK";
+const R86_DRIVER_ENV: &str = "SDB_COVTEST_R86_DRIVER";
 
 fn covtest_limits(
     max_turns: u32,
@@ -2004,6 +2005,73 @@ fn test_opencode_runner_fake_docker_scenarios() {
     assert!(
         stdout.contains("fake-docker opencode scenarios passed"),
         "driver must report its scenarios; got:\n{stdout}\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// R86 F3: a $0.97 ticket's session states the scaled turn limit
+/// (`Max turns: 1455`) in the runner's log. The fake-docker child keeps
+/// PATH/HOME out of the parallel suite.
+#[test]
+fn r86_f3_the_session_states_the_scaled_limit() {
+    // The child must not inherit another test's SDB_EGRESS_FILTER; the
+    // R85 tests set it under this lock.
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    if std::env::var(R86_DRIVER_ENV).ok().as_deref() == Some("1") {
+        let bin = std::env::var(BIN_ENV).expect("SDB_COVTEST_OC_BIN");
+        let work = PathBuf::from(std::env::var(WORK_ENV).expect("SDB_COVTEST_OC_WORK"));
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{bin}:{old_path}"));
+        let home = work.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let root = work.join("r86-f3");
+        std::fs::create_dir_all(&root).unwrap();
+        let turns = crate::scoring::ticket_turns(200, 0.97);
+        assert_eq!(turns, 1455, "a $0.97 ticket's scaled turns");
+        let (res, logs) = run_oc_scenario("success", &root, covtest_limits(turns, 1.0, 10), None);
+        res.expect("the fake session must succeed");
+        assert!(
+            logs.iter().any(|l| l.contains("Max turns: 1455")),
+            "the session does not state the scaled limit: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l.contains("max_turns=1455")),
+            "the telemetry does not state the scaled limit: {logs:?}"
+        );
+        println!("r86-f3 session limit passed");
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("covtest-oc-r86f3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let docker = root.join("bin/docker");
+    std::fs::write(&docker, FAKE_DOCKER).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sandbox::opencode::tests::r86_f3_the_session_states_the_scaled_limit",
+            "--nocapture",
+        ])
+        .env(R86_DRIVER_ENV, "1")
+        .env(BIN_ENV, root.join("bin"))
+        .env(WORK_ENV, &root)
+        .output()
+        .expect("spawn the r86 f3 child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the r86 f3 child failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("r86-f3 session limit passed"),
+        "{stdout}\n{stderr}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

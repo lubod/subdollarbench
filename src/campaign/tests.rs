@@ -1339,6 +1339,7 @@ async fn r43_f3_chained_mixed_image() {
         Some("prev"),
         None,
         Some("sha256:image-a"),
+        crate::config::OFFICIAL_CELL_TIMEOUT_MIN,
         |_attempt| {
             let mut o = outcome(true, &[(0, true)]);
             o.sandbox_image = Some("sha256:image-b".into());
@@ -3135,7 +3136,7 @@ fn r45_f3_prompt_names_the_perf_score() {
 /// the current rules; a same-version phase does.
 #[test]
 fn r45_f4_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-13.47");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-15.48");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.43".to_string();
@@ -3152,7 +3153,7 @@ fn r45_f4_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
-    assert!(msg.contains("not 2026-11-13.47"), "{msg}");
+    assert!(msg.contains("not 2026-11-15.48"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -3170,7 +3171,7 @@ fn r45_f4_no_chain_across_the_bump() {
 /// current `.47` rules; a current phase chains normally.
 #[test]
 fn r49_f5_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-13.47");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-15.48");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.44".to_string();
@@ -3187,7 +3188,7 @@ fn r49_f5_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.44"), "{msg}");
-    assert!(msg.contains("not 2026-11-13.47"), "{msg}");
+    assert!(msg.contains("not 2026-11-15.48"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -3509,6 +3510,121 @@ async fn a_catch_up_scores_four_tenths_and_unblocks_the_phase() {
     let tier = lc.spec.stages.iter().find(|s| s.id == 8).unwrap().tier as f64;
     assert!((rec.points - tier * 0.4).abs() < 1e-9, "{}", rec.points);
     assert!(rollup.stages.iter().any(|r| r.id == 15 && r.passed));
+}
+
+/// R86 F1: a catch-up with most of the phase's money gets the scaled
+/// turns, not the stage's raw 200.
+#[tokio::test]
+async fn r86_f1_catch_up_gets_scaled_turns() {
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+    let mut state = phase_state_with_failed(&[8]);
+    state.hints = None;
+    let opts = CampaignRunOptions {
+        campaign_id: "r86turns".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let seen = std::cell::RefCell::new(Vec::<(u32, u32, f64)>::new());
+    let rollup = run_campaign_phase(
+        &lc,
+        &opts,
+        Some(phase),
+        Some(&state),
+        Some("prev"),
+        None,
+        |attempt| {
+            seen.borrow_mut()
+                .push((attempt.stage.id, attempt.max_turns, attempt.budget_usd));
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let seen = seen.into_inner();
+    let (id, max_turns, budget) = seen[0];
+    assert_eq!(id, 8, "the catch-up runs first: {seen:?}");
+    assert!(
+        budget > crate::config::TICKET_BUDGET_REF_USD,
+        "the catch-up budget ${budget:.2} must exceed the reference"
+    );
+    assert_eq!(
+        max_turns,
+        crate::scoring::ticket_turns(200, budget),
+        "the catch-up's turns follow its budget"
+    );
+    assert!(max_turns > 200, "the catch-up kept the raw 200 turns");
+    let _ = rollup;
+}
+
+/// R86 F2: a ticket's time-out is 120 minutes per $0.20 of its budget,
+/// capped by the phase's remaining wall.
+#[tokio::test]
+async fn r86_f2_timeout_scales_within_the_wall() {
+    // The rate and the floor, from the helper.
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.20, None), 120);
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.97, None), 582);
+    assert_eq!(
+        crate::scoring::ticket_timeout_min(120, 0.97, Some(300)),
+        300
+    );
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.09, Some(30)), 30);
+    assert_eq!(crate::scoring::ticket_timeout_min(120, 0.09, None), 120);
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let run = |wall: Option<u64>| {
+        let lc = &lc;
+        async move {
+            let opts = CampaignRunOptions {
+                campaign_id: "r86time".into(),
+                model: "m".into(),
+                harness: "omp".into(),
+                effort: "high".into(),
+                budget_usd: 100.0,
+                wall_min: wall,
+            };
+            let seen = std::cell::RefCell::new(Vec::<(u32, u64, f64)>::new());
+            let _ = run_campaign(
+                lc,
+                &opts,
+                |attempt| {
+                    seen.borrow_mut().push((
+                        attempt.stage.id,
+                        attempt.timeout_min,
+                        attempt.budget_usd,
+                    ));
+                    let id = attempt.stage.id;
+                    async move { Ok(outcome(true, &[(id, true)])) }
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            seen.into_inner()
+        }
+    };
+    let no_wall = run(None).await;
+    let (_, timeout, budget) = no_wall[0];
+    assert!(
+        budget > crate::config::TICKET_BUDGET_REF_USD,
+        "the first ticket's budget ${budget:.2}"
+    );
+    assert_eq!(
+        timeout,
+        crate::scoring::ticket_timeout_min(120, budget, None),
+        "the first ticket's timeout"
+    );
+    assert!(timeout > 120, "the scaled timeout is {timeout}");
+    let near_end = run(Some(1)).await;
+    let (_, timeout, _) = near_end[0];
+    assert_eq!(
+        timeout, 1,
+        "a ticket at the phase's edge gets the wall left"
+    );
 }
 
 #[tokio::test]

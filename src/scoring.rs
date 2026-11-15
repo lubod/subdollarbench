@@ -148,6 +148,50 @@ pub fn initial_turn_limit(max_turns: u32) -> Option<u32> {
     (max_turns > 0).then_some(max_turns)
 }
 
+/// R86 F1: a ticket's turn rate: 300 turns per
+/// `TICKET_BUDGET_REF_USD` ($0.20) of its own budget. The stage's own
+/// limit is the floor, so an ordinary ticket keeps it and a catch-up with
+/// most of the phase's money gets the scaled turns.
+pub const TICKET_TURNS_PER_REF: u32 = 300;
+
+pub fn ticket_turns(stage_max_turns: u32, budget_usd: f64) -> u32 {
+    let budget = if budget_usd.is_finite() && budget_usd > 0.0 {
+        budget_usd
+    } else {
+        0.0
+    };
+    let scaled =
+        (TICKET_TURNS_PER_REF as f64 * budget / crate::config::TICKET_BUDGET_REF_USD).ceil();
+    let scaled = if scaled.is_finite() && scaled > 0.0 {
+        scaled.min(u32::MAX as f64) as u32
+    } else {
+        0
+    };
+    stage_max_turns.max(scaled)
+}
+
+/// R86 F2: a ticket's wall time-out: 120 minutes per
+/// `TICKET_BUDGET_REF_USD` ($0.20) of its budget, never below the base,
+/// never more than the phase's remaining wall (None = no wall).
+pub fn ticket_timeout_min(base_min: u64, budget_usd: f64, remaining_wall_min: Option<u64>) -> u64 {
+    let budget = if budget_usd.is_finite() && budget_usd > 0.0 {
+        budget_usd
+    } else {
+        0.0
+    };
+    let scaled = (base_min as f64 * budget / crate::config::TICKET_BUDGET_REF_USD).ceil();
+    let scaled = if scaled.is_finite() && scaled > 0.0 {
+        scaled.min(u64::MAX as f64) as u64
+    } else {
+        0
+    };
+    let scaled = scaled.max(base_min);
+    match remaining_wall_min {
+        Some(left) => scaled.min(left.max(1)),
+        None => scaled,
+    }
+}
+
 /// R26 R23-7: a repair session gets whatever remains of the guard. The old
 /// per-repair 25-turn cap is gone; the guard is shared by the sessions.
 #[derive(Debug, PartialEq, Eq)]

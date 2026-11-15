@@ -1048,6 +1048,9 @@ pub struct StageAttempt<'a> {
     pub prompt_path: std::path::PathBuf,
     pub budget_usd: f64,
     pub max_turns: u32,
+    /// R86 F2: the ticket's wall time-out in minutes: 120 per $0.20 of
+    /// its budget, capped by the phase's remaining wall.
+    pub timeout_min: u64,
     /// Feature flags of the lite variant (`LiteSpec.profile`), empty for a
     /// full attempt: the verifier uses them to grade the lite suite.
     pub lite_profile: Vec<String>,
@@ -2822,6 +2825,21 @@ pub struct CampaignRunOptions {
     pub wall_min: Option<u64>,
 }
 
+/// R86 F2: the phase's remaining wall in whole minutes (None when the
+/// wall is off); at least 1 so a ticket at the edge still has a positive
+/// time-out.
+pub fn remaining_wall_min(
+    elapsed: std::time::Duration,
+    wall_min: Option<u64>,
+    grading_wait_s: f64,
+) -> Option<u64> {
+    let m = wall_min.filter(|m| *m > 0)?;
+    let wait = std::time::Duration::from_secs_f64(grading_wait_s.max(0.0));
+    let worked = elapsed.saturating_sub(wait);
+    let left_s = (m * 60).saturating_sub(worked.as_secs());
+    Some((left_s / 60).max(1))
+}
+
 /// R48 F2 (D2 a): the wall cap is charged only for time spent working,
 /// not for time spent waiting for the grading lock.
 pub fn wall_exceeded(
@@ -3001,7 +3019,19 @@ where
     F: FnMut(&StageAttempt<'_>) -> Fut,
     Fut: std::future::Future<Output = Result<StageOutcome>>,
 {
-    run_campaign_ctx(lc, opts, None, None, None, None, None, exec, on_stage).await
+    run_campaign_ctx(
+        lc,
+        opts,
+        None,
+        None,
+        None,
+        None,
+        None,
+        crate::config::OFFICIAL_CELL_TIMEOUT_MIN,
+        exec,
+        on_stage,
+    )
+    .await
 }
 
 /// Career-phase run (P1): the ladder is filtered to `phase`, the state comes
@@ -3022,7 +3052,16 @@ where
     Fut: std::future::Future<Output = Result<StageOutcome>>,
 {
     run_campaign_phase_on_image(
-        lc, opts, phase, chain, chain_from, career, None, exec, on_stage,
+        lc,
+        opts,
+        phase,
+        chain,
+        chain_from,
+        career,
+        None,
+        crate::config::OFFICIAL_CELL_TIMEOUT_MIN,
+        exec,
+        on_stage,
     )
     .await
 }
@@ -3039,6 +3078,7 @@ pub async fn run_campaign_phase_on_image<F, Fut>(
     chain_from: Option<&str>,
     career: Option<&CareerRollup>,
     chain_image: Option<&str>,
+    timeout_min: u64,
     exec: F,
     on_stage: Option<&dyn Fn(&CampaignRollup)>,
 ) -> Result<CampaignRollup>
@@ -3054,6 +3094,7 @@ where
         chain_from,
         career,
         chain_image,
+        timeout_min,
         exec,
         on_stage,
     )
@@ -3069,6 +3110,7 @@ async fn run_campaign_ctx<F, Fut>(
     chain_from: Option<&str>,
     career: Option<&CareerRollup>,
     chain_image: Option<&str>,
+    timeout_min: u64,
     mut exec: F,
     on_stage: Option<&dyn Fn(&CampaignRollup)>,
 ) -> Result<CampaignRollup>
@@ -3201,12 +3243,21 @@ where
                 stage.tier as f64
             };
             let catch_up_weight = runnable_weight_sum(&stage_list, &outcomes) + target_weight;
+            // R86 F1: the catch-up's turns follow its own (large) share.
+            let catch_up_budget = pool_budget(headroom, target_weight, catch_up_weight);
+            let remaining_wall =
+                remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
             let attempt = StageAttempt {
                 stage,
                 variant,
                 prompt_path,
-                budget_usd: pool_budget(headroom, target_weight, catch_up_weight),
-                max_turns,
+                budget_usd: catch_up_budget,
+                max_turns: crate::scoring::ticket_turns(max_turns, catch_up_budget),
+                timeout_min: crate::scoring::ticket_timeout_min(
+                    timeout_min,
+                    catch_up_budget,
+                    remaining_wall,
+                ),
                 lite_profile: lite_profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
                 passed: passed_all.iter().copied().collect(),
@@ -3372,14 +3423,23 @@ where
         }
 
         // Full attempt.
+        // R86 F1: the turn limit follows the ticket's own dollars.
+        let full_budget = pool_budget(headroom, stage.tier as f64, phase_weight);
+        let remaining_wall =
+            remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
         let attempt_full = StageAttempt {
             stage,
             variant: StageVariant::Full,
             prompt_path: lc.prompt_path(stage),
             // D3 + finding 1: the cap's effective headroom converts to the
             // API dollars OMP actually enforces.
-            budget_usd: pool_budget(headroom, stage.tier as f64, phase_weight),
-            max_turns: stage.max_turns,
+            budget_usd: full_budget,
+            max_turns: crate::scoring::ticket_turns(stage.max_turns, full_budget),
+            timeout_min: crate::scoring::ticket_timeout_min(
+                timeout_min,
+                full_budget,
+                remaining_wall,
+            ),
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
             passed: passed_all.iter().copied().collect(),
@@ -3467,16 +3527,25 @@ where
             } else {
                 // R23 D2: the lite is the same ticket, so it draws the same
                 // pool share after the failed full attempt.
+                // R86 F1: its turns follow its own share too.
+                let lite_budget = pool_budget(
+                    headroom2,
+                    stage_lite_weight(stage),
+                    runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
+                );
+                let remaining_wall =
+                    remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
                 let attempt_lite = StageAttempt {
                     stage,
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
-                    budget_usd: pool_budget(
-                        headroom2,
-                        stage_lite_weight(stage),
-                        runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
+                    budget_usd: lite_budget,
+                    max_turns: crate::scoring::ticket_turns(lite.max_turns, lite_budget),
+                    timeout_min: crate::scoring::ticket_timeout_min(
+                        timeout_min,
+                        lite_budget,
+                        remaining_wall,
                     ),
-                    max_turns: lite.max_turns,
                     lite_profile: lite.profile.clone(),
                     passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
                     passed: passed_all.iter().copied().collect(),

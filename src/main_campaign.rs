@@ -794,6 +794,7 @@ pub async fn run(
         chain.as_deref(),
         chain_career.as_ref(),
         chain_image.as_deref(),
+        timeout_min,
         |attempt| {
             let lanes = concurrent_cells_at(&RunArchiver::resolve_runs_dir(), worker, env_cells);
             concurrent_max_stage.fetch_max(lanes, std::sync::atomic::Ordering::SeqCst);
@@ -803,6 +804,7 @@ pub async fn run(
                 prompt_path: attempt.prompt_path.clone(),
                 budget_usd: attempt.budget_usd,
                 max_turns: attempt.max_turns,
+                timeout_min: attempt.timeout_min,
                 lite_profile: attempt.lite_profile.clone(),
                 passed_lite: attempt.passed_lite.clone(),
                 passed: attempt.passed.clone(),
@@ -832,7 +834,6 @@ pub async fn run(
                     worker,
                     harness,
                     api_key,
-                    timeout_min,
                     &cdir,
                     &workdir,
                     eval_only,
@@ -965,6 +966,8 @@ struct StageJob {
     prompt_path: std::path::PathBuf,
     budget_usd: f64,
     max_turns: u32,
+    /// R86 F2: the ticket's wall time-out (scaled, wall-capped).
+    timeout_min: u64,
     /// Feature flags of the lite variant (`LiteSpec.profile`), empty for a
     /// full attempt.
     lite_profile: Vec<String>,
@@ -1036,7 +1039,6 @@ async fn run_one_stage(
     worker: u8,
     harness: Harness,
     api_key: Option<String>,
-    timeout_min: u64,
     cdir: &Path,
     workdir: &Path,
     eval_only: bool,
@@ -1217,7 +1219,7 @@ async fn run_one_stage(
         harness,
         max_turns: job.max_turns,
         budget_usd: job.budget_usd,
-        timeout_min,
+        timeout_min: job.timeout_min,
         api_key,
         workdir: workdir.to_path_buf(),
         eval_only,
@@ -1865,6 +1867,7 @@ mod tests {
             prompt_path: lc.prompt_path(&stage),
             budget_usd: stage.budget_usd,
             max_turns: stage.max_turns,
+            timeout_min: 5,
             lite_profile: Vec::new(),
             passed_lite: Vec::new(),
             passed: Vec::new(),
@@ -1884,7 +1887,6 @@ mod tests {
             0,
             Harness::Omp,
             None,
-            5,
             &cdir,
             &workdir,
             true,
