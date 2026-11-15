@@ -338,6 +338,20 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     The off-peak windows may swap neighbours. About $12 per model,
     $120 in all; the balance was $6.61 on 2026-11-14 (a top-up first).
     Before the canary: round 84 merged and a `$0` rehearsal on it.
+    **The `.47` free-model side track** (operator, 2026-11-15: "b, ernie
+    and ling, plan it according to limits"): one career each of
+    `baidu/ernie-5.5-flash-preview:free` (pin `baidu`) and
+    `inclusionai/ling-3.2-flash:free` (pin `antdigital/fp8`), smoke
+    cells on opencode (never on the board; at $0 the budget never binds,
+    so the result is not comparable with the $0.99 board), on worker 4
+    beside the paid grid, from a local worktree `free47` (master + the two
+    $0 price rows, never pushed). OpenRouter's free limits: 1000 requests
+    a day shared by all free models (reset 00:00 UTC), 20 a minute. The
+    driver (`~/sdb-cmp/free47.sh`, unit `sdb-free47`) runs phases in the
+    order ernie 1, ling 1, ernie 2, ling 2 ...; a phase starts only with
+    at least 900 requests left today, and a phase is stopped if the day's
+    remainder falls to 25. About one phase a day: 8 phases, about 8 days.
+    Started 2026-11-15 10:20 CET.
 
   - **Each model on the operator's approval** (operator, 2026-11-10):
     nothing chains; after each model the reviewer reports and waits for
