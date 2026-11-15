@@ -15,6 +15,16 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-15.48`: round 86. A ticket's turn limit and time-out
+///   scale with its own budget: 300 turns and 120 minutes per $0.20 of
+///   the ticket's share, the stage's own limit as the floor, and the
+///   time-out capped by the phase's remaining wall. Why: the reviewer's
+///   turn-limit analysis of the 24 `.47` phases (a catch-up with $0.82
+///   of $0.97 unspent stopped at 200 turns and 67 minutes) and the
+///   operator's "bump" (DECISIONS #33). Score impact: every career
+///   restarts at phase 1; the `.47` results (haiku, deepseek, and
+///   mimo-flash's stopped first phase) are void and stay unpublished;
+///   the `.48` board starts empty.
 /// - `2026-11-13.47`: rounds 81 and 82 (one .47; round 82 amends this
 ///   entry instead of bumping). The sandbox is Rust-only: the image pins
 ///   Rust 1.100.0 (rustup 1.29.3, llvm-tools-preview) and drops the other
@@ -841,7 +851,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-13.47";
+pub const RULES_VERSION: &str = "2026-11-15.48";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
