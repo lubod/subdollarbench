@@ -3201,12 +3201,14 @@ where
                 stage.tier as f64
             };
             let catch_up_weight = runnable_weight_sum(&stage_list, &outcomes) + target_weight;
+            // R86 F1: the catch-up's turns follow its own (large) share.
+            let catch_up_budget = pool_budget(headroom, target_weight, catch_up_weight);
             let attempt = StageAttempt {
                 stage,
                 variant,
                 prompt_path,
-                budget_usd: pool_budget(headroom, target_weight, catch_up_weight),
-                max_turns,
+                budget_usd: catch_up_budget,
+                max_turns: crate::scoring::ticket_turns(max_turns, catch_up_budget),
                 lite_profile: lite_profile.clone(),
                 passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
                 passed: passed_all.iter().copied().collect(),
@@ -3372,14 +3374,16 @@ where
         }
 
         // Full attempt.
+        // R86 F1: the turn limit follows the ticket's own dollars.
+        let full_budget = pool_budget(headroom, stage.tier as f64, phase_weight);
         let attempt_full = StageAttempt {
             stage,
             variant: StageVariant::Full,
             prompt_path: lc.prompt_path(stage),
             // D3 + finding 1: the cap's effective headroom converts to the
             // API dollars OMP actually enforces.
-            budget_usd: pool_budget(headroom, stage.tier as f64, phase_weight),
-            max_turns: stage.max_turns,
+            budget_usd: full_budget,
+            max_turns: crate::scoring::ticket_turns(stage.max_turns, full_budget),
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
             passed: passed_all.iter().copied().collect(),
@@ -3467,16 +3471,18 @@ where
             } else {
                 // R23 D2: the lite is the same ticket, so it draws the same
                 // pool share after the failed full attempt.
+                // R86 F1: its turns follow its own share too.
+                let lite_budget = pool_budget(
+                    headroom2,
+                    stage_lite_weight(stage),
+                    runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
+                );
                 let attempt_lite = StageAttempt {
                     stage,
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
-                    budget_usd: pool_budget(
-                        headroom2,
-                        stage_lite_weight(stage),
-                        runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
-                    ),
-                    max_turns: lite.max_turns,
+                    budget_usd: lite_budget,
+                    max_turns: crate::scoring::ticket_turns(lite.max_turns, lite_budget),
                     lite_profile: lite.profile.clone(),
                     passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
                     passed: passed_all.iter().copied().collect(),

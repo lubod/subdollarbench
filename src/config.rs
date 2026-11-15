@@ -48,6 +48,9 @@ pub fn version_line_static() -> &'static str {
 pub const OFFICIAL_CELL_BUDGET_USD: f64 = 0.99;
 pub const OFFICIAL_CELL_WALL_MIN: u64 = 480;
 pub const OFFICIAL_CELL_TIMEOUT_MIN: u64 = 120;
+/// R86 F1/F2: the ticket budget the turn and time-out rates are quoted
+/// per ($0.20): 300 turns and 120 minutes.
+pub const TICKET_BUDGET_REF_USD: f64 = 0.20;
 
 /// The note a run prints when its budget/wall differ from the official
 /// cell in the direction that changes what it measures (larger, or no

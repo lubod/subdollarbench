@@ -3511,6 +3511,56 @@ async fn a_catch_up_scores_four_tenths_and_unblocks_the_phase() {
     assert!(rollup.stages.iter().any(|r| r.id == 15 && r.passed));
 }
 
+/// R86 F1: a catch-up with most of the phase's money gets the scaled
+/// turns, not the stage's raw 200.
+#[tokio::test]
+async fn r86_f1_catch_up_gets_scaled_turns() {
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let phase = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+    let mut state = phase_state_with_failed(&[8]);
+    state.hints = None;
+    let opts = CampaignRunOptions {
+        campaign_id: "r86turns".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let seen = std::cell::RefCell::new(Vec::<(u32, u32, f64)>::new());
+    let rollup = run_campaign_phase(
+        &lc,
+        &opts,
+        Some(phase),
+        Some(&state),
+        Some("prev"),
+        None,
+        |attempt| {
+            seen.borrow_mut()
+                .push((attempt.stage.id, attempt.max_turns, attempt.budget_usd));
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let seen = seen.into_inner();
+    let (id, max_turns, budget) = seen[0];
+    assert_eq!(id, 8, "the catch-up runs first: {seen:?}");
+    assert!(
+        budget > crate::config::TICKET_BUDGET_REF_USD,
+        "the catch-up budget ${budget:.2} must exceed the reference"
+    );
+    assert_eq!(
+        max_turns,
+        crate::scoring::ticket_turns(200, budget),
+        "the catch-up's turns follow its budget"
+    );
+    assert!(max_turns > 200, "the catch-up kept the raw 200 turns");
+    let _ = rollup;
+}
+
 #[tokio::test]
 async fn a_catch_up_is_capped_at_two_and_skipped_without_headroom() {
     let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");

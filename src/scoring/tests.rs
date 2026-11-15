@@ -9,6 +9,19 @@ fn r26_first_session_gets_the_full_guard_not_50() {
     assert_eq!(initial_turn_limit(0), None);
 }
 
+/// R86 F1: 300 turns per $0.20 of a ticket's budget; the stage's own
+/// limit is the floor.
+#[test]
+fn r86_f1_turns_scale_with_budget() {
+    for (budget, want) in [(0.09, 200), (0.20, 300), (0.41, 615), (0.97, 1455)] {
+        assert_eq!(ticket_turns(TURN_GUARD, budget), want, "budget {budget}");
+    }
+    // A lite ticket uses its own floor; a catch-up's budget is the pool
+    // share (the campaign test checks that attempt). The rate is one.
+    assert_eq!(ticket_turns(120, 0.20), 300);
+    assert_eq!(ticket_turns(TURN_GUARD, 0.0), TURN_GUARD);
+}
+
 /// R26 R23-7 acceptance: a repair's turn bound is the guard remainder,
 /// not the retired 25-turn cap.
 #[test]
