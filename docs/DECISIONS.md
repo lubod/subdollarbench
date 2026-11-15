@@ -790,6 +790,22 @@ The benchmark answers "what does a dollar buy" (round 23):
   2026-11-13 change, round 81). The bar, the model checks and a $0 rehearsal run on it before
   any `.47` cell.
 
+## 32. Base-rate scoring stays for `.47`; the board shows the real bill (2026-11-15)
+
+- **Why** (operator, 2026-11-15: "keep as it is and state real spending
+  + explanation"): on `.47` haiku's 12 phases scored $4.58 at base rates
+  (#22) while the key was billed $11.16 for them (2.4x; the key's spend
+  at haiku's first campaign, $91.0495, against deepseek's first,
+  $102.2086, with no other paid run between). Anthropic bills haiku 5x
+  the prompt rate above 100k prompt tokens per request, and opencode
+  resends the whole conversation each call. Deepseek, off-peak, bills
+  about 1x.
+- **Kept:** #22, scoring and the $0.99 cap at each model's base rates,
+  for every `.47` career. No rules bump; haiku is not rerun.
+- **Added:** the board and the results page show each model's real
+  OpenRouter bill next to its scored cost, with one plain explanation
+  (the base-rate rule and the model's surcharges). Round 85.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
