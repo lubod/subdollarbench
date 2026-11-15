@@ -69,6 +69,10 @@ pub struct CareerCell {
     /// R67 F2: the provider bill summed over the career's phases; None on
     /// careers that recorded no bill (the v2 grid ran unpinned).
     pub billed: Option<f64>,
+    /// R85 F2: a whole-model bill from `runs/billed-models.json`, for
+    /// careers that ran before the per-call bill; None when the file has
+    /// no measured figure for the model.
+    pub model_billed: Option<f64>,
     pub over_budget: bool,
     pub cap_reached: bool,
     pub over_wall: bool,
@@ -647,6 +651,7 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         perf,
         cost,
         billed,
+        model_billed: None,
         over_budget: leaf.rollup["over_budget"].as_bool().unwrap_or(false),
         cap_reached: leaf.rollup["cap_reached"].as_bool().unwrap_or(false),
         over_wall: leaf.rollup["over_wall"].as_bool().unwrap_or(false),
@@ -696,6 +701,16 @@ pub fn careers(runs_dir: &str) -> Vec<CareerCell> {
         }
         let cells = chain_for(leaf, &by_name);
         out.push(career_from_leaf(leaf, &cells));
+    }
+    // R85 F2: attach the whole-model bills from runs/billed-models.json.
+    let file = crate::report::billed::load(Path::new(runs_dir));
+    let by_model: HashMap<String, f64> = file
+        .models
+        .iter()
+        .filter_map(|m| m.billed_usd.map(|b| (m.model.clone(), b)))
+        .collect();
+    for c in &mut out {
+        c.model_billed = by_model.get(&c.model).copied();
     }
     out
 }
@@ -1656,8 +1671,23 @@ fn model_row(
         g.median,
         career_table_head()
     );
+    // R85 F2/F3: the median career's list price and the provider's bill
+    // (a career's own bill, or the whole-model figure from the key).
+    let med_billed = med.billed.or(med.model_billed);
+    let spend_title = if med.billed.is_none() && med.model_billed.is_some() {
+        "billed, whole model, measured from the key"
+    } else {
+        "effective spend at list price / what OpenRouter billed"
+    };
+    let spend_text = match med_billed {
+        Some(b) if med.cost > 0.0 => {
+            format!("${:.2} / ${:.2} ({:.2}×)", med.cost, b, b / med.cost)
+        }
+        Some(b) => format!("${:.2} / ${:.2}", med.cost, b),
+        None => format!("${:.2} / —", med.cost),
+    };
     html.push_str(&format!(
-        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div></td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"effective spend at list price\">${:.2}</span></td><td class=\"col-agree\">{link}</td></tr>",
+        "<tr class=\"model-row\"><td class=\"num col-rank\">{}</td><td class=\"col-model\"><div class=\"model-name\">{}<b title=\"{}\">{}</b>{}</div>{}<div class=\"mut range\">{} - {} · {} {word}</div></td><td class=\"num col-points\"><div class=\"hero\">{} / {}</div>{bar}</td><td class=\"num col-perf\">{}</td><td class=\"num col-spend\"><span class=\"badge spend\" title=\"{spend_title}\">{spend_text}</span></td><td class=\"col-agree\">{link}</td></tr>",
         rank_badge(g, stability),
         swatch(&g.model, colours),
         esc(&g.model),
@@ -1674,7 +1704,6 @@ fn model_row(
         fmt_pts1(med.points),
         med.max_points as u32,
         perf_badge(med),
-        med.cost
     ));
     // R72 F1: the careers span the board's six columns in their own row.
     html.push_str(&format!(
@@ -2795,8 +2824,18 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
         let regfree: u32 = cs.iter().map(|c| c.regression_free).sum();
         let rate = (passed > 0).then(|| regfree as f64 / passed as f64);
         let list: f64 = cs.iter().map(|c| c.cost).sum();
-        let billed: Option<f64> = cs.iter().filter_map(|c| c.billed).reduce(|a, b| a + b);
+        let billed: Option<f64> = cs
+            .iter()
+            .filter_map(|c| c.billed)
+            .reduce(|a, b| a + b)
+            .or_else(|| cs.iter().find_map(|c| c.model_billed));
+        let whole = cs.iter().all(|c| c.billed.is_none()) && billed.is_some();
         let spend = match billed {
+            Some(b) if list > 0.0 => format!(
+                "${list:.2} / ${b:.2} ({:.2}×{})",
+                b / list,
+                if whole { ", whole model" } else { "" }
+            ),
             Some(b) => format!("${list:.2} / ${b:.2}"),
             None => format!("${list:.2} / —"),
         };
@@ -5306,6 +5345,99 @@ mod tests {
         let meta: Value = serde_json::from_str(&read(&out.join("grid.json"))).unwrap();
         assert_eq!(meta["fingerprint_careers"]["fp-a"], 3, "{meta}");
         assert_eq!(meta["fingerprint_careers"]["fp-b"], 2, "{meta}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// R85 F2: the model-level backfill reads the key's spend at each
+    /// model's first campaign start; two models in turn give each bill,
+    /// overlapping paid models are refused, and the board shows the
+    /// whole-model figure as such (never split across careers).
+    #[test]
+    fn r85_f2_backfill_from_key_readings() {
+        let (base, runs, out) = fixture("r85f2");
+        let tool = base.join("tool-runs");
+        fs::create_dir_all(&tool).unwrap();
+        let write = |name: &str, model: &str, started: &str, finished: &str, spend: f64| {
+            let d = tool.join(name);
+            fs::create_dir_all(&d).unwrap();
+            let v = serde_json::json!({
+                "name": "sdb-sql",
+                "model": model,
+                "rules_version": crate::report::rules::RULES_VERSION,
+                "started_at": started,
+                "finished_at": finished,
+            });
+            fs::write(d.join("campaign.json"), v.to_string()).unwrap();
+            fs::write(
+                d.join("live.log"),
+                format!("[10:00:00] [KEY] initial account-key spend: ${spend:.4} USD\n"),
+            )
+            .unwrap();
+        };
+        write(
+            "campaign_a",
+            "openrouter/a/model",
+            "2026-11-15T10:00:00+00:00",
+            "2026-11-15T11:00:00+00:00",
+            10.0,
+        );
+        write(
+            "campaign_b",
+            "openrouter/b/model",
+            "2026-11-15T12:00:00+00:00",
+            "2026-11-15T13:00:00+00:00",
+            12.5,
+        );
+        let bills = crate::report::billed::backfill(&tool, Some(13.2)).unwrap();
+        assert_eq!(bills.len(), 2);
+        assert_eq!(bills[0].model, "openrouter/a/model");
+        assert!((bills[0].billed_usd.unwrap() - 2.5).abs() < 1e-9);
+        assert_eq!(bills[0].evidence.len(), 2);
+        assert_eq!(bills[0].evidence[0].spend_usd, 10.0);
+        assert_eq!(bills[0].evidence[1].spend_usd, 12.5);
+        assert_eq!(bills[1].model, "openrouter/b/model");
+        assert!((bills[1].billed_usd.unwrap() - 0.7).abs() < 1e-9);
+        // Two paid models' campaigns overlap: the readings cannot be
+        // attributed, so the tool refuses.
+        write(
+            "campaign_c",
+            "openrouter/c/model",
+            "2026-11-15T10:30:00+00:00",
+            "2026-11-15T12:30:00+00:00",
+            11.0,
+        );
+        let err = crate::report::billed::backfill(&tool, None).unwrap_err();
+        assert!(err.contains("overlap"), "{err}");
+        // The board shows a whole-model bill as such, and the career
+        // table keeps its own (unbilled) spend.
+        career(
+            &runs,
+            "m",
+            "openrouter/anthropic/claude-haiku-5.5",
+            [1.0; 4],
+            [0.01; 4],
+        );
+        let file = crate::report::billed::BilledFile {
+            source: "test".into(),
+            models: vec![crate::report::billed::ModelBill {
+                model: "openrouter/anthropic/claude-haiku-5.5".into(),
+                billed_usd: Some(0.096),
+                whole_model: true,
+                evidence: vec![],
+            }],
+        };
+        fs::write(
+            runs.join("billed-models.json"),
+            serde_json::to_string(&file).unwrap(),
+        )
+        .unwrap();
+        export(runs.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let board = read(&out.join("index.html"));
+        assert!(
+            board.contains("billed, whole model, measured from the key"),
+            "{board}"
+        );
+        assert!(board.contains("$0.04 / $0.10 (2.40×)"), "{board}");
         let _ = fs::remove_dir_all(&base);
     }
 

@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod billed;
 pub mod canary;
 pub mod cost_annotate;
 pub mod cutoff_annotate;
