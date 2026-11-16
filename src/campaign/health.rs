@@ -104,6 +104,20 @@ impl PhaseHealth {
     }
 }
 
+/// R87 F2: a turn's duration from two `HH:MM:SS` clocks. A wrap to the
+/// next day is real only when the end is more than 12 hours "before" the
+/// start (a midnight crossing); any other backwards step -- a resume's
+/// lines -- is 0 s, not 86,394 s.
+fn turn_secs(start: u64, end: u64) -> u64 {
+    if end >= start {
+        end - start
+    } else if start - end > 12 * 3600 {
+        end + 86_400 - start
+    } else {
+        0
+    }
+}
+
 fn clock(line: &str) -> Option<u64> {
     // `[HH:MM:SS] ...`
     let rest = line.strip_prefix('[')?;
@@ -151,7 +165,7 @@ fn judge_open_turn(
 ) {
     let Some(start) = start else { return };
     let end = now.unwrap_or(start);
-    deltas.push(((end + 86_400 - start) % 86_400) as f64);
+    deltas.push(turn_secs(start, end) as f64);
     if !has_response && !has_tool {
         h.empty_responses += 1;
     }
@@ -260,7 +274,7 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
         if line.contains("[TELEMETRY] turn=") {
             if let Some(start) = turn_start.take() {
                 let now = clock(line).or(last_event).unwrap_or(start);
-                deltas.push(((now + 86_400 - start) % 86_400) as f64);
+                deltas.push(turn_secs(start, now) as f64);
                 if !has_response && !has_tool {
                     h.empty_responses += 1;
                 }
@@ -271,7 +285,7 @@ pub fn health_from_live_log(text: &str) -> PhaseHealth {
             h.turns += 1;
             let now = clock(line).or(last_turn).or(session_start);
             if let (Some(prev), Some(now)) = (last_turn.or(session_start), now) {
-                deltas.push(((now + 86_400 - prev) % 86_400) as f64);
+                deltas.push(turn_secs(prev, now) as f64);
             }
             last_turn = now;
             if !has_response && !has_tool {
