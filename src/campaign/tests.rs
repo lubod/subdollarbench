@@ -4712,6 +4712,79 @@ fn r79_f2_health_reads_opencode_log() {
     assert_eq!(empty.empty_responses, 1, "the empty turn is counted");
 }
 
+/// R87 F2: a turn interval never wraps backwards to a day. A real
+/// midnight crossing still wraps (23:59:50 -> 00:00:10 is 20 s); an end
+/// a few seconds before its start (a resume's lines) is 0 s, not
+/// 86,394 s, so the p50 warning is not raised.
+#[test]
+fn r87_f2_no_backwards_day() {
+    // The omp [BENCH-POLICY] path: a midnight crossing is 20 s, and a
+    // backwards step is 0 s.
+    let midnight = health_from_live_log(
+        "[23:59:50] [BENCH-POLICY] active maxTurns=200 cwd=/work\n\
+         [00:00:10] [BENCH-POLICY] turn=1 idle=0\n",
+    );
+    assert_eq!(
+        midnight.turn_secs_max, 20.0,
+        "the midnight crossing: {midnight:?}"
+    );
+    assert_eq!(
+        midnight.turn_secs_p50, 20.0,
+        "the midnight crossing: {midnight:?}"
+    );
+
+    let backwards = health_from_live_log(
+        "[02:51:51] [BENCH-POLICY] active maxTurns=200 cwd=/work\n\
+         [02:51:45] [BENCH-POLICY] turn=1 idle=0\n",
+    );
+    assert_eq!(
+        backwards.turn_secs_max, 0.0,
+        "a backwards step is 0 s: {backwards:?}"
+    );
+    assert_eq!(
+        backwards.turn_secs_p50, 0.0,
+        "a backwards step is 0 s: {backwards:?}"
+    );
+    assert_eq!(
+        backwards.severity(),
+        "green",
+        "a backwards step must not raise the p50 warning: {backwards:?}"
+    );
+
+    // The opencode [TELEMETRY] path: the step's end takes the same
+    // interval.
+    let oc_midnight = health_from_live_log(
+        "[23:59:50] [LIVE] Turn 1 started\n\
+         [00:00:10] [TELEMETRY] turn=1 max_turns=200 spent=0.000000 tokens=1\n",
+    );
+    assert_eq!(oc_midnight.turn_secs_max, 20.0, "{oc_midnight:?}");
+
+    let oc_backwards = health_from_live_log(
+        "[02:51:51] [LIVE] Turn 1 started\n\
+         [02:51:45] [TELEMETRY] turn=1 max_turns=200 spent=0.000000 tokens=1\n",
+    );
+    assert_eq!(
+        oc_backwards.turn_secs_max, 0.0,
+        "a backwards step is 0 s: {oc_backwards:?}"
+    );
+    assert_eq!(
+        oc_backwards.turn_secs_p50, 0.0,
+        "a backwards step is 0 s: {oc_backwards:?}"
+    );
+
+    // The open turn judged by a new Turn: 02:51:51 -> 02:51:45 is 0 s and
+    // the next turn 02:51:45 -> 02:51:50 is 5 s.
+    let retried = health_from_live_log(
+        "[02:51:51] [LIVE] Turn 1 started\n\
+         [02:51:45] [LIVE] Turn 2 started\n\
+         [02:51:50] [TELEMETRY] turn=2 max_turns=200 spent=0.000000 tokens=1\n",
+    );
+    assert_eq!(
+        retried.turn_secs_max, 5.0,
+        "the open turn is 0 s, the next 5 s: {retried:?}"
+    );
+}
+
 /// R79-2: the local stub's captured opencode lines. The stub answered
 /// 429-then-200, 429-always, 402 and a broken stream; the counters read
 /// what opencode actually printed.

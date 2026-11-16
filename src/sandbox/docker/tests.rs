@@ -1257,3 +1257,253 @@ fn r81_f3_process_check_unit() {
     sm.cleanup();
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// R87 F1: the billing proxy streams.
+// ---------------------------------------------------------------------------
+
+/// The proxy child; the tests kill it on drop.
+struct R87Proxy(std::process::Child);
+
+impl Drop for R87Proxy {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Start `extensions/egress_proxy.py` with the billing path on, forwarding
+/// to `upstream`, and wait for it to listen.
+fn r87_start_proxy(upstream: &str, log: &std::path::Path) -> (R87Proxy, u16) {
+    let port = free_port();
+    let script = crate::config::get_repo_root().join("extensions/egress_proxy.py");
+    let child = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(port.to_string())
+        .env("BILL_LOG", log)
+        .env("BILL_UPSTREAM", upstream)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start the egress proxy");
+    let proxy = R87Proxy(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (proxy, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the egress proxy did not start on {port}");
+}
+
+fn r87_request(client: &mut std::net::TcpStream, port: u16, body: &str) {
+    use std::io::Write;
+    let req = format!(
+        "POST /api/v1/chat/completions HTTP/1.1\r\nHost: egress-proxy:{port}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    client.write_all(req.as_bytes()).unwrap();
+}
+
+/// Read until `needle` appears (or 5 s), returning the text and the wait.
+fn r87_read_first(client: &mut std::net::TcpStream, needle: &str) -> (String, std::time::Duration) {
+    use std::io::Read;
+    let started = std::time::Instant::now();
+    let mut text = String::new();
+    let mut buf = [0u8; 8192];
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        let n = client.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        text.push_str(&String::from_utf8_lossy(&buf[..n]));
+        if text.contains(needle) {
+            break;
+        }
+    }
+    (text, started.elapsed())
+}
+
+/// A stub upstream: the headers and the first SSE chunk at once, the final
+/// `usage` chunk after `final_delay_ms`.
+fn r87_stub_streaming(final_delay_ms: u64) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        let _ = sock.read(&mut buf);
+        sock.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .unwrap();
+        sock.write_all(
+            b"data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        )
+        .unwrap();
+        sock.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(final_delay_ms));
+        sock.write_all(
+            b"data: {\"id\":\"gen-1\",\"usage\":{\"prompt_tokens\":10,\
+              \"completion_tokens\":1,\"cost\":0.001}}\n\n",
+        )
+        .unwrap();
+        sock.write_all(b"data: [DONE]\n\n").unwrap();
+        sock.flush().unwrap();
+    });
+    (port, handle)
+}
+
+/// A stub upstream: one plain JSON answer with `Content-Length`.
+fn r87_stub_json() -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 65536];
+        let _ = sock.read(&mut buf);
+        let body = b"{\"id\":\"gen-json\",\"model\":\"openai/gpt-6-luna\",\
+                      \"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\
+                      \"cost\":0.002}}";
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        sock.write_all(head.as_bytes()).unwrap();
+        sock.write_all(body).unwrap();
+        sock.flush().unwrap();
+    });
+    (port, handle)
+}
+
+fn r87_log_record(log: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let line = text.lines().next().unwrap_or("");
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("no billing record ({e}): {text:?}"))
+}
+
+fn r87_temp(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("r87-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn r87_f1_billing_proxy_streams() {
+    use std::io::Read;
+    let dir = r87_temp("stream");
+    let log = dir.join("billed.jsonl");
+    let (stub_port, stub) = r87_stub_streaming(3000);
+    let (_proxy, port) = r87_start_proxy(&format!("http://127.0.0.1:{stub_port}"), &log);
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    r87_request(
+        &mut client,
+        port,
+        "{\"model\":\"openai/gpt-6-luna\",\"stream\":true}",
+    );
+    let (first, elapsed) = r87_read_first(&mut client, "gen-1");
+    assert!(first.contains("HTTP/1.1 200"), "the headers: {first}");
+    assert!(first.contains("gen-1"), "the first SSE chunk: {first}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the first chunk waited {elapsed:?} for the whole answer"
+    );
+    let mut rest = Vec::new();
+    client.read_to_end(&mut rest).unwrap();
+    stub.join().unwrap();
+    let rec = r87_log_record(&log);
+    assert_eq!(rec["id"], "gen-1");
+    assert!((rec["cost"].as_f64().unwrap() - 0.001).abs() < 1e-12);
+    assert_eq!(rec["model"], "openai/gpt-6-luna");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn r87_f1_billing_proxy_plain_json() {
+    use std::io::Read;
+    let dir = r87_temp("json");
+    let log = dir.join("billed.jsonl");
+    let (stub_port, stub) = r87_stub_json();
+    let (_proxy, port) = r87_start_proxy(&format!("http://127.0.0.1:{stub_port}"), &log);
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    r87_request(&mut client, port, "{\"model\":\"openai/gpt-6-luna\"}");
+    let mut text = String::new();
+    client.read_to_string(&mut text).unwrap();
+    stub.join().unwrap();
+    assert!(text.contains("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("gen-json"), "the JSON body: {text}");
+    let rec = r87_log_record(&log);
+    assert_eq!(rec["id"], "gen-json");
+    assert!((rec["cost"].as_f64().unwrap() - 0.002).abs() < 1e-12);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn r87_f1_client_hangup_still_billed() {
+    use std::io::Read;
+    let dir = r87_temp("hangup");
+    let log = dir.join("billed.jsonl");
+    // The upstream's last chunk is 3 s away: the client must be gone
+    // while the stream is still open, which a buffering proxy cannot do.
+    let (stub_port, stub) = r87_stub_streaming(3000);
+    let (_proxy, port) = r87_start_proxy(&format!("http://127.0.0.1:{stub_port}"), &log);
+    {
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        r87_request(
+            &mut client,
+            port,
+            "{\"model\":\"openai/gpt-6-luna\",\"stream\":true}",
+        );
+        let (first, elapsed) = r87_read_first(&mut client, "gen-1");
+        assert!(first.contains("gen-1"), "the first chunk: {first}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the client was not mid-stream: {elapsed:?}"
+        );
+        // Dropping the socket is the hangup; the proxy must finish the
+        // upstream read and bill it.
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut record = None;
+    while std::time::Instant::now() < deadline {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = text.lines().next() {
+            record = Some(serde_json::from_str::<serde_json::Value>(line).unwrap());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let rec = record.expect("no billing record after the hangup");
+    assert_eq!(rec["id"], "gen-1");
+    assert!((rec["cost"].as_f64().unwrap() - 0.001).abs() < 1e-12);
+    stub.join().unwrap();
+    // The proxy still serves the next request (the stub is gone: a 502 is
+    // a response, not a crash).
+    let mut next = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    next.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    r87_request(&mut next, port, "{\"model\":\"openai/gpt-6-luna\"}");
+    let mut text = String::new();
+    next.read_to_string(&mut text).unwrap();
+    assert!(
+        text.contains("HTTP/1.1"),
+        "the proxy did not answer the next request: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
