@@ -85,3 +85,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [84](84.md) | The scored cost counts every opencode call (the end-of-run summary call) | merged |
 | [85](85.md) | The board shows the real bill: opencode phases record OpenRouter's per-call cost; a model-level backfill; the page explains the gap | merged |
 | [86](86.md) | Rules `.48`: a ticket's turns and time scale with its budget | merged |
+| [87](87.md) | The billing proxy streams | open |

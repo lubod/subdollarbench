@@ -436,3 +436,11 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
 Items for retired campaigns (sdb-kv redis suites, sdb-edge, sdb-http, HA
 for redis: old slices B, C, E, F, I6b, J, L) stay in the archive and are
 not planned.
+
+- **2026-11-16, `.48` haiku stopped (operator "87"):** careers 0 and 2,
+  phase 2, hung 20 min on stage 10 because the round-85 billing proxy
+  buffers whole responses (`extensions/egress_proxy.py:110`); the live
+  check held the grid at 03:58 CET. Grid and free track stopped. Ledger
+  `runs/.grid-v48-haiku-ledger.tsv` is a record only (never published).
+  Round 87 fixes the proxy; then bar, rehearsal, and haiku restarts from
+  scratch on a new ledger.
