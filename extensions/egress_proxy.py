@@ -104,34 +104,75 @@ def handle_billing(client, head, method, path):
     else:
         conn = http.client.HTTPConnection(
             UP.hostname, UP.port or 80, timeout=180)
+    resp_body = bytearray()
+    status = 502
+    reason = "Bad Gateway"
+    ctype = "text/plain"
+    headers_sent = False
+    client_ok = True
+
+    def send_client(data):
+        nonlocal client_ok
+        if not client_ok:
+            return
+        try:
+            client.sendall(data)
+        except OSError:
+            # R87 F1: a client that hangs up mid-stream must not stop the
+            # upstream read; the bill is still owed.
+            client_ok = False
+
     try:
         conn.request(method, fwd_path, body, fwd)
         resp = conn.getresponse()
-        data = resp.read()
         status = resp.status
         reason = resp.reason or "OK"
         ctype = resp.getheader("Content-Type") or "application/json"
+        cenc = resp.getheader("Content-Encoding")
+        # R87 F1: forward the status line and headers at once, then each
+        # body chunk as it arrives (SSE or chunked or close-delimited),
+        # never buffering the whole answer.
+        head = "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n" % (
+            status, reason, ctype)
+        if cenc:
+            head += "Content-Encoding: %s\r\n" % cenc
+        head += "Connection: close\r\n\r\n"
+        send_client(head.encode("latin1"))
+        headers_sent = True
+        while True:
+            try:
+                # `read1` returns as soon as some bytes are available; a
+                # plain `read(n)` would wait for n bytes (or EOF) and
+                # buffer the stream again.
+                chunk = resp.read1(65536)
+            except Exception:
+                # The 180 s socket timeout is a per-read guard; a timeout
+                # ends the stream (the log keeps what arrived).
+                break
+            if not chunk:
+                break
+            resp_body += chunk
+            send_client(chunk)
     except Exception as exc:
-        data = ("billing proxy error: %s" % exc).encode()
-        status = 502
-        reason = "Bad Gateway"
-        ctype = "text/plain"
+        if not headers_sent:
+            status = 502
+            reason = "Bad Gateway"
+            ctype = "text/plain"
+            resp_body += ("billing proxy error: %s" % exc).encode()
+            send_client(
+                ("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n"
+                 "Connection: close\r\n\r\n").encode("latin1")
+                + bytes(resp_body))
     finally:
         conn.close()
     if method == "POST":
         try:
             with open(BILL_LOG, "a") as f:
                 f.write(json.dumps(
-                    billing_record(data, status, request_model)) + "\n")
+                    billing_record(bytes(resp_body), status, request_model))
+                    + "\n")
         except OSError:
             pass
-    try:
-        client.sendall(
-            ("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-             "Connection: close\r\n\r\n" % (status, reason, ctype, len(data))
-             ).encode("latin1") + data)
-    except OSError:
-        pass
 
 
 def allowed(host):
