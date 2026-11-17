@@ -1147,6 +1147,18 @@ r90_case_done() {
     echo "[self-test] $name"
 }
 
+# End a background grid by its stop file and wait for it, so no lane or
+# cell outlives the case holding the cargo-test lock.
+r90_stop_grid() {
+    local pid="$1"
+    : > "$STOP"
+    for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    wait "$pid" 2>/dev/null || true
+}
+
 # R90 M1: a killed phase's ledger row carries what it spent (status.json
 # and billed.jsonl), and the cap's next reservation counts it.
 r90_m1_killed_phase_spend_counts() {
@@ -1291,10 +1303,10 @@ r90_m3_recovered_canary_opens_lanes() {
         sleep 0.1
     done
     [[ -f "$HOLD" ]] || {
-        kill "$pid" 2>/dev/null || true
+        r90_stop_grid "$pid"
         echo "canary: the faulted phase did not hold"; return 1; }
     [[ -f "$RUNS/.canary_failed" ]] || {
-        kill "$pid" 2>/dev/null || true
+        r90_stop_grid "$pid"
         echo "canary: the fault did not record .canary_failed"; return 1; }
     rm -f "$HOLD"
     rc=0
@@ -1329,17 +1341,17 @@ r90_m3_post_phase_fault_reads_health() {
         sleep 0.1
     done
     [[ -f "$HOLD" ]] || {
-        kill "$pid" 2>/dev/null || true
+        r90_stop_grid "$pid"
         echo "health fault: no hold"; return 1; }
     grep -q 'provider fault' "$R90_DIR/out" || {
-        kill "$pid" 2>/dev/null || true
+        r90_stop_grid "$pid"
         echo "health fault: the grid did not name the provider fault"; return 1; }
     id="$(awk -F'\t' 'NR == 2 { print $5 }' "$LEDGER")"
     [[ -f "$RUNS/$id/.portal_hidden" ]] || {
-        kill "$pid" 2>/dev/null || true
+        r90_stop_grid "$pid"
         echo "health fault: the phase was not hidden"; return 1; }
     grep -q '5 errors in 33 turns' "$RUNS/$id/.portal_hidden" || {
-        kill "$pid" 2>/dev/null || true
+        r90_stop_grid "$pid"
         echo "health fault: the hidden file's counts are wrong: $(cat "$RUNS/$id/.portal_hidden")"
         return 1; }
     : > "$STOP"
