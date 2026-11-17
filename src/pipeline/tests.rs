@@ -1349,7 +1349,9 @@ async fn test_pipeline_eval_only_sql_stage4_persistence_live() {
 /// -9, a mid-flight 50k-row UPDATE, a torn newest file, and a double
 /// restart — and the stage result stays green.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
 async fn test_pipeline_eval_only_sql_stage5_crash_live() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let worker = 80u8;
     let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
     let dir = covtest_dir("sqlcrash");

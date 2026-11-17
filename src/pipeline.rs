@@ -233,14 +233,18 @@ fn crash_ladder(
             // in place and grows nothing (or nothing tearable), so retry with
             // another victim instead of skipping.
             let mut torn: Option<(std::path::PathBuf, u64)> = None;
+            // R89 F1: the baseline is the step's start, not each retry's:
+            // a re-taken baseline absorbed the previous attempt's growth,
+            // so an unflushed first append made every retry look like it
+            // changed nothing (seen in the full gate under load).
+            let before_c = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
             for attempt in 0..3 {
-                let before = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
                 crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
                     .map_err(|e| format!("(c) {e}"))?;
                 victims += 1;
                 let _ = sandbox.kill_candidate();
                 if let Some((path, grew)) =
-                    crash::changed_file(&scratch, &before).map_err(|e| format!("(c) {e}"))?
+                    crash::changed_file(&scratch, &before_c).map_err(|e| format!("(c) {e}"))?
                 {
                     // R89 F1: cut at most what this commit grew, so the
                     // record before the newest one survives even in a
