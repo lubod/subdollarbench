@@ -103,9 +103,12 @@ pub fn check_acked_prefix(
     extra: usize,
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    // R89 F2: no ORDER BY here; ticket 2 is not in this stage's needs.
+    // Sort the keys in the harness instead.
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows, .. } => {
-            let got: Vec<String> = rows.into_iter().flatten().collect();
+            let mut got: Vec<String> = rows.into_iter().flatten().collect();
+            got.sort_by_key(|k| k.parse::<u128>().unwrap_or(u128::MAX));
             let want: Vec<String> = (0..keep).map(|k| k.to_string()).collect();
             if got.len() < keep || got[..keep] != want[..] {
                 return Err(format!(
@@ -141,7 +144,9 @@ pub fn check_keys(
     maybe: &[usize],
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    // R89 F2: the checks are order-independent; no ORDER BY (ticket 2 is
+    // not in this stage's needs).
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows, .. } => {
             let got: Vec<u128> = rows
                 .iter()
@@ -186,9 +191,11 @@ pub fn check_acked_rows(
     acked: usize,
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    // R89 F2: sort in the harness, not in the query (ticket 2 is absent).
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows, .. } => {
-            let got: Vec<String> = rows.into_iter().flatten().collect();
+            let mut got: Vec<String> = rows.into_iter().flatten().collect();
+            got.sort_by_key(|k| k.parse::<u128>().unwrap_or(u128::MAX));
             let want: Vec<String> = (0..acked).map(|k| k.to_string()).collect();
             if got != want {
                 return Err(format!(
@@ -260,19 +267,20 @@ pub fn check_uniform(
 ) -> Result<String, String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
     let value;
-    match c.exec(&format!("SELECT DISTINCT c FROM {table} ORDER BY c"))? {
-        Response::Rows { rows: distinct, .. } => {
+    // R89 F2: DISTINCT/ORDER BY are ticket 2's grammar, absent from this
+    // stage's needs; dedup the column in the harness.
+    match c.exec(&format!("SELECT c FROM {table}"))? {
+        Response::Rows { rows, .. } => {
+            let mut distinct: Vec<String> = rows.into_iter().flatten().collect();
+            distinct.sort();
+            distinct.dedup();
             if distinct.len() != 1 {
                 return Err(format!(
                     "{} distinct values after the kill: the update applied partially",
                     distinct.len()
                 ));
             }
-            value = distinct
-                .into_iter()
-                .next()
-                .and_then(|r| r.into_iter().next())
-                .unwrap_or_default();
+            value = distinct.into_iter().next().unwrap_or_default();
             if owed && value != "1" {
                 return Err(format!(
                     "the update was acknowledged before the kill but the column is {value}, \
@@ -280,9 +288,9 @@ pub fn check_uniform(
                 ));
             }
         }
-        other => return Err(format!("SELECT DISTINCT answered {other:?}")),
+        other => return Err(format!("SELECT c answered {other:?}")),
     }
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows: all, .. } => {
             if all.len() != rows {
                 return Err(format!("{} of {rows} rows survived the kill", all.len()));
@@ -296,15 +304,20 @@ pub fn check_uniform(
 /// The keys present in `table`, ascending.
 pub fn read_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<usize>, String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
-        Response::Rows { rows, .. } => rows
-            .iter()
-            .flatten()
-            .map(|v| {
-                v.parse::<usize>()
-                    .map_err(|_| format!("key {v:?} is not a number"))
-            })
-            .collect(),
+    match c.exec(&format!("SELECT k FROM {table}"))? {
+        Response::Rows { rows, .. } => {
+            let mut keys = rows
+                .iter()
+                .flatten()
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| format!("key {v:?} is not a number"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // R89 F2: the caller reads "the keys, ascending"; sort here.
+            keys.sort_unstable();
+            Ok(keys)
+        }
         other => Err(format!("SELECT k answered {other:?}")),
     }
 }

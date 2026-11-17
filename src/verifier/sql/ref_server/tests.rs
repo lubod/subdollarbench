@@ -1,7 +1,9 @@
-use super::super::compare::{compare, render_expected};
+use super::super::client::TcpCandidate;
+use super::super::compare::{compare, render_expected, render_response};
 use super::super::driver::{run_stage, stage_seed};
 use super::super::generator::{build_script, Profile};
 use super::super::oracle::Oracle;
+use super::super::run::Candidate;
 use super::super::scenarios::pipeline;
 use super::*;
 use std::process::{Child, Command, Stdio};
@@ -623,5 +625,217 @@ fn reference_answers_a_pipelined_script() {
         compare(&expected, reply, c.stmt.ordered).unwrap_or_else(|m| {
             panic!("{line:?}: {m:?} (expected {})", render_expected(&expected))
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R89 F2: the late checks use only the grammar their stage's needs allow.
+// ---------------------------------------------------------------------------
+
+/// The ticket-2 grammar a late check must not use when ticket 2 is outside
+/// the stage's needs.
+fn r89_ticket2_features(sql: &str) -> Vec<&'static str> {
+    let u = sql.to_ascii_uppercase();
+    let mut out = Vec::new();
+    for (needle, name) in [
+        ("ORDER BY", "ORDER BY"),
+        ("DISTINCT", "DISTINCT"),
+        ("LIMIT ", "LIMIT"),
+        ("OFFSET ", "OFFSET"),
+    ] {
+        if u.contains(needle) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The transitive needs of `stage` (the stage itself included).
+fn r89_needs_closure(root: &std::path::Path, stage: u32) -> std::collections::BTreeSet<u32> {
+    let text = std::fs::read_to_string(root.join("campaigns/sdb-sql/campaign.json"))
+        .expect("the campaign spec");
+    let spec: serde_json::Value = serde_json::from_str(&text).expect("the campaign json");
+    let mut needs = std::collections::HashMap::new();
+    for s in spec["stages"].as_array().expect("stages") {
+        let id = s["id"].as_u64().expect("a stage id") as u32;
+        let list: Vec<u32> = s["needs"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n.as_u64())
+                    .map(|n| n as u32)
+                    .collect()
+            })
+            .unwrap_or_default();
+        needs.insert(id, list);
+    }
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![stage];
+    while let Some(s) = stack.pop() {
+        if !out.insert(s) {
+            continue;
+        }
+        if let Some(list) = needs.get(&s) {
+            stack.extend(list.iter().copied());
+        }
+    }
+    out
+}
+
+/// A TCP proxy in front of the reference server: it can refuse the
+/// ticket-2 grammar (answering `ERR syntax`) and/or record every
+/// statement the checks send.
+fn r89_proxy(
+    upstream_port: u16,
+    refuse: bool,
+    log: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+) -> u16 {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut client) = stream else { break };
+            let log = log.clone();
+            std::thread::spawn(move || {
+                let up = format!("127.0.0.1:{upstream_port}");
+                let Ok(mut upstream) = TcpCandidate::connect(&up, Duration::from_secs(30)) else {
+                    return;
+                };
+                let mut reader = BufReader::new(client.try_clone().unwrap());
+                let mut line = String::new();
+                while matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                    let sql = line.trim_end().to_string();
+                    if sql.is_empty() {
+                        continue;
+                    }
+                    if let Some(ref log) = log {
+                        log.lock().unwrap().push(sql.clone());
+                    }
+                    let text = if refuse && !r89_ticket2_features(&sql).is_empty() {
+                        "ERR syntax".to_string()
+                    } else {
+                        render_response(&upstream.exec(&sql))
+                    };
+                    if client.write_all(format!("{text}\n").as_bytes()).is_err() {
+                        return;
+                    }
+                    line.clear();
+                }
+            });
+        }
+    });
+    port
+}
+
+/// The stage 5, 6 and 11 reads against `addr` (one crash round).
+fn r89_late_reads(addr: &str, proc: &mut RefProc, t: Duration) {
+    use super::super::driver::wait_until_answering;
+    use super::super::{crash, perf, txn};
+    let out = {
+        let mut kill = || {
+            proc.kill();
+            Ok(())
+        };
+        crash::ack_kill(addr, t, "r89_f2_a", 12, &mut kill).expect("ack_kill")
+    };
+    proc.restart().unwrap();
+    wait_until_answering(addr, t).expect("answers after a SIGKILL");
+    if out.completed {
+        crash::check_acked_rows(addr, t, "r89_f2_a", out.acked + 1).expect("acked rows");
+    } else {
+        crash::check_acked_prefix(addr, t, "r89_f2_a", out.acked, 1).expect("acked prefix");
+    }
+    let completed = {
+        let mut kill = || {
+            proc.kill();
+            Ok(())
+        };
+        crash::bulk_update_and_kill(addr, t, "r89_f2_b", 500, 100, &mut kill).expect("bulk update")
+    };
+    proc.restart().unwrap();
+    wait_until_answering(addr, t).expect("answers after the killed update");
+    crash::check_uniform(addr, t, "r89_f2_b", 500, completed).expect("uniform");
+    crash::append_row(addr, t, "r89_f2_a", out.acked + 1).expect("victim");
+    let keys = crash::read_keys(addr, t, "r89_f2_a").expect("keys");
+    // Only the acked rows are owed here: the in-flight row and the victim
+    // may or may not have survived the later bulk kill.
+    let must: Vec<usize> = (0..out.acked).collect();
+    assert!(keys.len() >= must.len(), "the keys read back: {keys:?}");
+    crash::check_keys(addr, t, "r89_f2_a", &must, &[out.acked, out.acked + 1])
+        .expect("keys after the victim");
+    txn::isolation(addr, t, "r89_f2_iso").expect("stage 6 isolation");
+    perf::perf_gate(addr, t, 0x5E89, false, None).expect("stage 11 perf gate");
+}
+
+/// R89 F2: a candidate that refuses `ORDER BY` and `DISTINCT` (ticket 2
+/// absent) passes the stage 5, 6 and 11 reads.
+#[test]
+fn r89_f2_late_checks_need_only_their_tickets() {
+    let port = free_port();
+    let mut proc = start_reference(port);
+    let proxy = r89_proxy(port, true, None);
+    let addr = format!("127.0.0.1:{proxy}");
+    r89_late_reads(&addr, &mut proc, Duration::from_secs(30));
+    drop(proc);
+}
+
+/// R89 F2: every late check's SQL only uses the grammar its stage's needs
+/// closure allows. The stage 5, 6 and 11 reads run through a recording
+/// proxy; the audited late modules (14, 17-20) are checked at the source
+/// for ticket-2 syntax.
+#[test]
+fn r89_f2_every_late_check_query_is_in_its_needs() {
+    let root = crate::config::get_repo_root();
+    let port = free_port();
+    let mut proc = start_reference(port);
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let proxy = r89_proxy(port, false, Some(log.clone()));
+    let addr = format!("127.0.0.1:{proxy}");
+    r89_late_reads(&addr, &mut proc, Duration::from_secs(30));
+    drop(proc);
+
+    let captured = log.lock().unwrap().clone();
+    assert!(!captured.is_empty(), "the late reads sent no SQL");
+    for stage in [5u32, 6, 11] {
+        let closure = r89_needs_closure(&root, stage);
+        assert!(
+            !closure.contains(&2),
+            "stage {stage}'s needs unexpectedly include ticket 2"
+        );
+    }
+    for sql in &captured {
+        let features = r89_ticket2_features(sql);
+        assert!(
+            features.is_empty(),
+            "the stage 5/6/11 reads sent {features:?} outside their needs: {sql}"
+        );
+    }
+
+    // The late modules whose stages' needs exclude ticket 2: no executed
+    // SQL literal may use it. (Stages 12 and 16 do need ticket 2.)
+    let files = [
+        "src/verifier/sql/security.rs",
+        "src/verifier/sql/disk.rs",
+        "src/verifier/sql/replication.rs",
+        "src/verifier/sql/pgwire.rs",
+        "src/verifier/sql/observability.rs",
+    ];
+    for file in files {
+        let text = std::fs::read_to_string(root.join(file)).expect(file);
+        for (no, line) in text.lines().enumerate() {
+            let code = line.trim();
+            if code.starts_with("//") {
+                continue;
+            }
+            if code.contains('"') {
+                assert!(
+                    r89_ticket2_features(code).is_empty(),
+                    "{file}:{} sends ticket-2 SQL outside the stage's needs: {line}",
+                    no + 1
+                );
+            }
+        }
     }
 }
