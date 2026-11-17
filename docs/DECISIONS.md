@@ -895,7 +895,9 @@ The benchmark answers "what does a dollar buy" (round 23):
   ledger able to write a PASS.
 - **Change:** the armed `.49` bar and deepseek career stopped (nothing
   paid ran on `.49`); round 89 (rules `.50`, grader, with regression
-  tests and two class-wide live proofs) and round 90 (money and grid,
+  tests and two class-wide live proofs; plus, operator "cap catchup":
+  a catch-up takes only its tier's share of the phase, and tickets a
+  phase never reached carry to later phases) and round 90 (money and grid,
   plumbing), then one bar.
 - **Impact:** `.50` careers start at phase 1; the stage-5 results of
   every earlier run are suspect (none is published under `.48`/`.49`).
