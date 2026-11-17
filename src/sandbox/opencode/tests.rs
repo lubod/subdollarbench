@@ -1866,6 +1866,10 @@ case "$1" in
         printf 'false\n'
         exit 0
         ;;
+      inspect_removed)
+        printf 'Error: No such object: covtest-egress\n' >&2
+        exit 1
+        ;;
       *)
         printf 'true\n'
         exit 0
@@ -2167,33 +2171,6 @@ fn oc_driver() {
         passed += 1;
     }
 
-    // 5c. R90 M4: one failed `docker inspect` is not a sidecar death; a
-    //     successful State.Running == false is.
-    {
-        std::env::set_var("SDB_COVTEST_STATE", root.join("state-inspect"));
-        let log = root.join("billed.jsonl");
-        std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_blip");
-        let proxy = BillingProxy {
-            name: "covtest-egress".to_string(),
-            log: log.clone(),
-            start_offset: 0,
-            url: String::new(),
-        };
-        assert!(
-            !proxy.exited(),
-            "one inspect failure must not read as the sidecar's death"
-        );
-        std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_dead");
-        let dead = BillingProxy {
-            name: "covtest-egress".to_string(),
-            log,
-            start_offset: 0,
-            url: String::new(),
-        };
-        assert!(dead.exited(), "a running=false inspect is a death");
-        passed += 1;
-    }
-
     // 6b. Rate-limit phrase inside a text event with real token usage:
     //     still a normal Ok (the resume arm only takes non-zero exits).
     {
@@ -2426,6 +2403,88 @@ fn oc_driver() {
     }
 
     println!("fake-docker opencode scenarios passed ({passed})");
+}
+
+/// R90 M4: one failed `docker inspect` is not a sidecar death; only a
+/// removed container or a successful `State.Running == false` is. The
+/// fake `docker` lives in a child so PATH stays out of the parallel suite.
+#[test]
+fn r90_m4_inspect_blip_is_not_a_death() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let root = std::env::temp_dir().join(format!("r90-inspect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let docker = root.join("bin/docker");
+    std::fs::write(&docker, FAKE_DOCKER).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sandbox::opencode::tests::r90_m4_inspect_driver",
+            "--nocapture",
+        ])
+        .env("SDB_R90_INSPECT_DRIVER", "1")
+        .env(BIN_ENV, root.join("bin"))
+        .env(WORK_ENV, &root)
+        .output()
+        .expect("spawn the inspect driver");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the inspect driver failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("inspect blip scenarios passed"),
+        "the driver must report its scenarios; got:\n{stdout}\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The child entry of `r90_m4_inspect_blip_is_not_a_death`.
+#[test]
+fn r90_m4_inspect_driver() {
+    if std::env::var("SDB_R90_INSPECT_DRIVER").ok().as_deref() != Some("1") {
+        return;
+    }
+    let bin = std::env::var(BIN_ENV).expect("bin");
+    let work = PathBuf::from(std::env::var(WORK_ENV).expect("work"));
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{bin}:{old_path}"));
+    std::env::set_var("SDB_COVTEST_STATE", work.join("state-inspect"));
+    let log = work.join("billed.jsonl");
+    std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_blip");
+    let proxy = BillingProxy {
+        name: "covtest-egress".to_string(),
+        log: log.clone(),
+        start_offset: 0,
+        url: String::new(),
+    };
+    assert!(
+        !proxy.exited(),
+        "one inspect failure must not read as the sidecar's death"
+    );
+    std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_dead");
+    let dead = BillingProxy {
+        name: "covtest-egress".to_string(),
+        log,
+        start_offset: 0,
+        url: String::new(),
+    };
+    assert!(dead.exited(), "a running=false inspect is a death");
+    std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_removed");
+    let removed = BillingProxy {
+        name: "covtest-egress".to_string(),
+        log: work.join("billed.jsonl"),
+        start_offset: 0,
+        url: String::new(),
+    };
+    assert!(removed.exited(), "a removed sidecar is a death");
+    println!("inspect blip scenarios passed");
 }
 
 /// Re-exec'd child entry point: the parent sets DRIVER_ENV, so a normal
