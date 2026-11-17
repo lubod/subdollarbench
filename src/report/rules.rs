@@ -15,6 +15,28 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-17.50`: round 89. The code audit's grader fixes. Stage 5's
+///   torn tail cuts at most what the victim commit grew (a compact
+///   checksummed log no longer loses the 1000-row statement before the
+///   newest one); the stage 5, 6 and 11 checks read unsorted and
+///   sort/dedup in the harness (and the audited late checks 14 and 17-20
+///   carry no ticket-2 SQL), so a ticket-2 skip is not graded; the
+///   model's own prose is never a provider fault (only structured error
+///   events and the raw provider payload are); ticket 15's revert check
+///   builds its own copy without the candidate's `target/`, an
+///   uncompilable revert is inconclusive, and a coverage time-out is an
+///   infra error; a catch-up takes only its share of the phase (blocked
+///   tickets count in the divisor), and a ticket a phase never reached
+///   (cap or wall stop) is carried to later phases as `NotReached`. Why:
+///   the reviewer's read-only audit of the grader, harness and budget
+///   logic, with run evidence in all 206 campaign dirs (35 rounds/23
+///   campaigns of the torn tail; 18/7 of the late checks' ticket-2
+///   syntax; 11 stopped phases with unreachable tickets), and the
+///   operator's "stop and fix also add more tests" (DECISIONS #36).
+///   Score impact: every career restarts at phase 1; nothing on `.49`
+///   was run (the armed bar and the deepseek career were stopped); the
+///   `.50` board starts empty. Scoring and the $0.99 cap stay at base
+///   rates (DECISIONS #32).
 /// - `2026-11-17.49`: round 88. Ticket 15's coverage merges every
 ///   instrumented test binary: `llvm-cov export` read only the first one
 ///   passed positionally, so the reading depended on cargo's binary
@@ -867,7 +889,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-17.49";
+pub const RULES_VERSION: &str = "2026-11-17.50";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.

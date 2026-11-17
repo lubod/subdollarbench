@@ -3136,7 +3136,7 @@ fn r45_f3_prompt_names_the_perf_score() {
 /// the current rules; a same-version phase does.
 #[test]
 fn r45_f4_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-17.49");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-17.50");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.43".to_string();
@@ -3153,7 +3153,7 @@ fn r45_f4_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
-    assert!(msg.contains("not 2026-11-17.49"), "{msg}");
+    assert!(msg.contains("not 2026-11-17.50"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -3171,7 +3171,7 @@ fn r45_f4_no_chain_across_the_bump() {
 /// current `.47` rules; a current phase chains normally.
 #[test]
 fn r49_f5_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-17.49");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-17.50");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.44".to_string();
@@ -3188,7 +3188,7 @@ fn r49_f5_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.44"), "{msg}");
-    assert!(msg.contains("not 2026-11-17.49"), "{msg}");
+    assert!(msg.contains("not 2026-11-17.50"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -4886,4 +4886,189 @@ fn r82_f4_fixtures_match_events() {
         checked += 1;
     }
     assert!(checked >= 6, "checked {checked} fixture(s)");
+}
+
+/// R89 F4: the ticket-15 revert copy never carries the candidate's stale
+/// build cache (a start.sh that builds only when the binary is missing
+/// ran the un-reverted binary).
+#[test]
+fn r89_f4_revert_builds_without_the_old_target() {
+    let src = tmp_dir("r89-f4-copy");
+    std::fs::create_dir_all(src.join("src")).unwrap();
+    std::fs::create_dir_all(src.join("target")).unwrap();
+    std::fs::write(src.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+    std::fs::write(src.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(src.join("target/stale-binary"), "old").unwrap();
+    let dst = tmp_dir("r89-f4-copy-dst");
+    copy_dir_with_git(&src, &dst).unwrap();
+    assert!(dst.join("src/lib.rs").is_file(), "the source is copied");
+    assert!(
+        !dst.join("target").exists(),
+        "the candidate's build cache must not be copied: {:?}",
+        std::fs::read_dir(&dst).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&dst);
+}
+
+/// R89 F6: a catch-up takes only its share of the phase. Ticket 5's full
+/// catch-up before stages 16-20 (all never run, because the failure
+/// blocked their chain) gets target/(target + the phase's whole weight)
+/// of the headroom, not all of it.
+#[tokio::test]
+async fn r89_f6_catch_up_takes_its_share() {
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let phase = lc.spec.phases.iter().find(|p| p.id == 4).unwrap();
+    let mut state = LadderState::default();
+    for id in 0..=4u32 {
+        state.passed.push(id);
+        state.outcomes.insert(id, LadderOutcome::Full);
+        state.best.insert(id, true);
+    }
+    state.outcomes.insert(5, LadderOutcome::Failed);
+    state.best.insert(5, false);
+    state.outcomes.insert(6, LadderOutcome::Skipped);
+    state.dirty = true;
+    state.last_green = Some("abc1234".into());
+    let opts = CampaignRunOptions {
+        campaign_id: "r89share".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let seen = std::cell::RefCell::new(Vec::<(u32, f64)>::new());
+    let _ = run_campaign_phase(
+        &lc,
+        &opts,
+        Some(phase),
+        Some(&state),
+        Some("prev"),
+        None,
+        |attempt| {
+            seen.borrow_mut()
+                .push((attempt.stage.id, attempt.budget_usd));
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let seen = seen.into_inner();
+    let (id, budget) = seen[0];
+    assert_eq!(id, 5, "the catch-up runs first: {seen:?}");
+    // The catch-up takes the stage's lite (it has one) or full weight;
+    // the divisor adds the whole phase's unrun weight.
+    let stage5 = &lc.spec.stages[5];
+    let target = if stage5.lite.is_some() {
+        stage_lite_weight(stage5)
+    } else {
+        stage_weight(stage5)
+    };
+    let phase_weight: f64 = phase
+        .stages
+        .iter()
+        .map(|id| stage_weight(&lc.spec.stages[*id as usize]))
+        .sum();
+    let headroom = cap_headroom(10.0, 0.0, 0.0).unwrap();
+    let want = pool_budget(headroom, target, target + phase_weight);
+    assert!(
+        (budget - want).abs() < 1e-9,
+        "the catch-up's budget {budget} is not {want} (target {target}, phase {phase_weight})"
+    );
+    assert!(
+        budget < 9.0,
+        "the catch-up took most of the phase headroom: {budget}"
+    );
+}
+
+/// R89 F7: a phase stopped at the cap records its unrun tickets as not
+/// reached; the next phase catches them up, and a ticket blocked only by
+/// the unreached one runs once it passes.
+#[tokio::test]
+async fn r89_f7_unreached_ticket_is_caught_up_later() {
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let phase3 = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+    let mut state = LadderState::default();
+    for id in 0..=10u32 {
+        state.passed.push(id);
+        state.outcomes.insert(id, LadderOutcome::Full);
+        state.best.insert(id, true);
+    }
+    state.dirty = true;
+    state.last_green = Some("abc1234".into());
+    let tight = CampaignRunOptions {
+        campaign_id: "r89stop".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 0.01,
+        wall_min: None,
+    };
+    let stopped = run_campaign_phase(
+        &lc,
+        &tight,
+        Some(phase3),
+        Some(&state),
+        Some("prev"),
+        None,
+        |_attempt| async {
+            Err(anyhow::anyhow!(
+                "the phase must stop before its first ticket"
+            ))
+        },
+        None,
+    )
+    .await
+    .expect("the stopped phase");
+    let carried = stopped
+        .ladder_state
+        .clone()
+        .expect("the stopped phase records its ladder");
+    for id in 11..=15u32 {
+        assert_eq!(
+            carried.outcomes.get(&id),
+            Some(&LadderOutcome::NotReached),
+            "ticket {id} is not reached"
+        );
+    }
+    // The next phase catches the unreached tickets up; the 11's pass
+    // unblocks the 16, which could not run before.
+    let phase4 = lc.spec.phases.iter().find(|p| p.id == 4).unwrap();
+    let loose = CampaignRunOptions {
+        campaign_id: "r89catch".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let seen = std::cell::RefCell::new(Vec::<u32>::new());
+    let _ = run_campaign_phase(
+        &lc,
+        &loose,
+        Some(phase4),
+        Some(&carried),
+        Some("prev2"),
+        None,
+        |attempt| {
+            seen.borrow_mut().push(attempt.stage.id);
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .expect("the later phase");
+    let seen = seen.into_inner();
+    assert!(
+        seen.contains(&11),
+        "the not-reached 11 is caught up: {seen:?}"
+    );
+    assert!(
+        seen.contains(&16),
+        "the 16 runs once the 11 passes: {seen:?}"
+    );
 }

@@ -103,9 +103,12 @@ pub fn check_acked_prefix(
     extra: usize,
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    // R89 F2: no ORDER BY here; ticket 2 is not in this stage's needs.
+    // Sort the keys in the harness instead.
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows, .. } => {
-            let got: Vec<String> = rows.into_iter().flatten().collect();
+            let mut got: Vec<String> = rows.into_iter().flatten().collect();
+            got.sort_by_key(|k| k.parse::<u128>().unwrap_or(u128::MAX));
             let want: Vec<String> = (0..keep).map(|k| k.to_string()).collect();
             if got.len() < keep || got[..keep] != want[..] {
                 return Err(format!(
@@ -141,7 +144,9 @@ pub fn check_keys(
     maybe: &[usize],
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    // R89 F2: the checks are order-independent; no ORDER BY (ticket 2 is
+    // not in this stage's needs).
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows, .. } => {
             let got: Vec<u128> = rows
                 .iter()
@@ -186,9 +191,11 @@ pub fn check_acked_rows(
     acked: usize,
 ) -> Result<(), String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    // R89 F2: sort in the harness, not in the query (ticket 2 is absent).
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows, .. } => {
-            let got: Vec<String> = rows.into_iter().flatten().collect();
+            let mut got: Vec<String> = rows.into_iter().flatten().collect();
+            got.sort_by_key(|k| k.parse::<u128>().unwrap_or(u128::MAX));
             let want: Vec<String> = (0..acked).map(|k| k.to_string()).collect();
             if got != want {
                 return Err(format!(
@@ -260,19 +267,20 @@ pub fn check_uniform(
 ) -> Result<String, String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
     let value;
-    match c.exec(&format!("SELECT DISTINCT c FROM {table} ORDER BY c"))? {
-        Response::Rows { rows: distinct, .. } => {
+    // R89 F2: DISTINCT/ORDER BY are ticket 2's grammar, absent from this
+    // stage's needs; dedup the column in the harness.
+    match c.exec(&format!("SELECT c FROM {table}"))? {
+        Response::Rows { rows, .. } => {
+            let mut distinct: Vec<String> = rows.into_iter().flatten().collect();
+            distinct.sort();
+            distinct.dedup();
             if distinct.len() != 1 {
                 return Err(format!(
                     "{} distinct values after the kill: the update applied partially",
                     distinct.len()
                 ));
             }
-            value = distinct
-                .into_iter()
-                .next()
-                .and_then(|r| r.into_iter().next())
-                .unwrap_or_default();
+            value = distinct.into_iter().next().unwrap_or_default();
             if owed && value != "1" {
                 return Err(format!(
                     "the update was acknowledged before the kill but the column is {value}, \
@@ -280,9 +288,9 @@ pub fn check_uniform(
                 ));
             }
         }
-        other => return Err(format!("SELECT DISTINCT answered {other:?}")),
+        other => return Err(format!("SELECT c answered {other:?}")),
     }
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
+    match c.exec(&format!("SELECT k FROM {table}"))? {
         Response::Rows { rows: all, .. } => {
             if all.len() != rows {
                 return Err(format!("{} of {rows} rows survived the kill", all.len()));
@@ -296,16 +304,57 @@ pub fn check_uniform(
 /// The keys present in `table`, ascending.
 pub fn read_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<usize>, String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("SELECT k FROM {table} ORDER BY k"))? {
-        Response::Rows { rows, .. } => rows
-            .iter()
-            .flatten()
-            .map(|v| {
-                v.parse::<usize>()
-                    .map_err(|_| format!("key {v:?} is not a number"))
-            })
-            .collect(),
+    match c.exec(&format!("SELECT k FROM {table}"))? {
+        Response::Rows { rows, .. } => {
+            let mut keys = rows
+                .iter()
+                .flatten()
+                .map(|v| {
+                    v.parse::<usize>()
+                        .map_err(|_| format!("key {v:?} is not a number"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // R89 F2: the caller reads "the keys, ascending"; sort here.
+            keys.sort_unstable();
+            Ok(keys)
+        }
         other => Err(format!("SELECT k answered {other:?}")),
+    }
+}
+
+/// R89 F1 and the operator's answer to spec question 1: the torn tail of
+/// the victim commit. The victim is [`changed_file`]'s pick. A file the
+/// commit **grew** is cut at most by its growth, so a compact log keeps
+/// every older record; a file the commit **rewrote in place** (SQLite
+/// reuses its WAL's frames, so the length does not grow) takes the
+/// old-style tail cut `min(256, len / 2)`, which only reaches its stale
+/// tail. Returns the path, the growth (0 for a rewrite) and the cut;
+/// `None` when there is no safe tear and the caller retries.
+pub fn tear_victim(
+    dir: &Path,
+    before: &BTreeMap<PathBuf, FileStamp>,
+) -> Result<Option<(PathBuf, u64, u64)>, String> {
+    let Some((path, grew)) = changed_file(dir, before)? else {
+        return Ok(None);
+    };
+    let cut = if grew > 0 {
+        torn_tail(&path, 256.min(grew))?
+    } else {
+        torn_tail(&path, 256)?
+    };
+    if cut == 0 {
+        return Ok(None);
+    }
+    Ok(Some((path, grew, cut)))
+}
+
+/// R89 F1: the `[CRASH] (c)` line's account of the cut: a grown file
+/// says how much it grew, a rewritten one names the old-style tail cut.
+pub fn cut_line(path: &Path, grew: u64, cut: u64) -> String {
+    if grew > 0 {
+        format!("grew {grew} bytes, cut {cut} off {}", path.display())
+    } else {
+        format!("rewritten in place, tail cut {cut} off {}", path.display())
     }
 }
 
@@ -382,10 +431,12 @@ fn collect_stamps(dir: &Path, out: &mut BTreeMap<PathBuf, FileStamp>) -> Result<
     Ok(())
 }
 
-/// The store file the torn tail should hit: the *log*, never the database
-/// itself (truncating a database's tail destroys committed pages; truncating
-/// a write-ahead log's tail destroys at most the newest transaction).
-/// Preference order:
+/// The store file the torn tail should hit, and how many bytes the commit
+/// grew it by (0 when it changed without growing: a checkpoint or a
+/// rewrite has no tearable tail). The *log* is preferred, never the
+/// database itself (truncating a database's tail destroys committed
+/// pages; truncating a write-ahead log's tail destroys at most the newest
+/// transaction). Preference order:
 /// 1. a changed file whose name marks it as a log (`*wal*`, `*log*`,
 ///    `*journal*`, `*aof*`), newest mtime first;
 /// 2. the changed file that grew the most (an append-only store);
@@ -393,11 +444,13 @@ fn collect_stamps(dir: &Path, out: &mut BTreeMap<PathBuf, FileStamp>) -> Result<
 ///    is not the largest (a checkpointed database plus a wrapped log).
 ///
 /// `None` means no safe victim: an acked commit changed nothing the harness
-/// can reasonably tear, and the caller retries.
+/// can reasonably tear, and the caller retries. The caller cuts at most
+/// `grew` bytes (R89 F1): a 256-byte cut into a compact log would tear
+/// the record before the newest one, which a correct store owes.
 pub fn changed_file(
     dir: &Path,
     before: &BTreeMap<PathBuf, FileStamp>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<(PathBuf, u64)>, String> {
     let mut now = BTreeMap::new();
     collect_stamps(dir, &mut now)?;
     let changed: Vec<(PathBuf, FileStamp, u64)> = now
@@ -415,14 +468,14 @@ pub fn changed_file(
             (path, stamp, grew)
         })
         .collect();
-    let newest = |mut v: Vec<(PathBuf, FileStamp, u64)>| -> Option<PathBuf> {
+    let newest = |mut v: Vec<(PathBuf, FileStamp, u64)>| -> Option<(PathBuf, u64)> {
         v.sort_by(|a, b| {
             b.1.mtime
                 .cmp(&a.1.mtime)
                 .then_with(|| b.2.cmp(&a.2))
                 .then_with(|| a.0.cmp(&b.0))
         });
-        v.into_iter().next().map(|(p, _, _)| p)
+        v.into_iter().next().map(|(p, _, grew)| (p, grew))
     };
     let is_log = |p: &Path| {
         let n = p
@@ -443,8 +496,8 @@ pub fn changed_file(
     }
     let mut grown: Vec<_> = changed.iter().filter(|(_, _, g)| *g > 0).cloned().collect();
     grown.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-    if let Some((p, _, _)) = grown.into_iter().next() {
-        return Ok(Some(p));
+    if let Some((p, _, grew)) = grown.into_iter().next() {
+        return Ok(Some((p, grew)));
     }
     if changed.len() >= 2 {
         let largest = changed

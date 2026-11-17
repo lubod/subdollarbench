@@ -233,7 +233,7 @@ fn mutation_checks(addr: &str, cfg: &SecurityConfig) -> Result<(), String> {
         "SELECT 1",
         "CREATE TABLE mut (a INTEGER)",
         "INSERT INTO mut VALUES (1)",
-        "SELECT a FROM mut ORDER BY a",
+        "SELECT a FROM mut",
         "SELECT COUNT(*) FROM mut",
     ];
     for (i, base) in bases.iter().enumerate() {

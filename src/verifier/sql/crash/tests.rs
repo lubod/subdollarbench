@@ -1,7 +1,7 @@
 use super::super::compare::render_expected;
 use super::super::oracle::Oracle;
 use super::*;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 
 /// One oracle-backed server with a shared database.
@@ -176,13 +176,15 @@ fn changed_file_finds_the_commit_and_torn_tail_cuts_safely() {
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::write(dir.join("x-shm"), vec![0u8; 11]).unwrap();
-    let path = changed_file(&dir, &before)
+    let (path, grew) = changed_file(&dir, &before)
         .unwrap()
         .expect("the commit changed a file");
     assert_eq!(path, nested, "a nested store is found, -shm is skipped");
-    // At most half the file, never empty.
-    assert_eq!(torn_tail(&path, 256).unwrap(), 65);
-    assert_eq!(std::fs::metadata(&nested).unwrap().len(), 65);
+    assert_eq!(grew, 30, "the commit grew the nested file by 30");
+    // R89 F1: at most the commit's growth (and half the file), never the
+    // fixed 256 bytes.
+    assert_eq!(torn_tail(&path, 256.min(grew)).unwrap(), 30);
+    assert_eq!(std::fs::metadata(&nested).unwrap().len(), 100);
     assert_eq!(
         std::fs::metadata(dir.join("old.dat")).unwrap().len(),
         64,
@@ -199,7 +201,7 @@ fn changed_file_finds_the_commit_and_torn_tail_cuts_safely() {
     std::fs::write(&wal2, vec![1u8; 200]).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::write(&db2, vec![0u8; 4000]).unwrap();
-    let picked = changed_file(&dir, &before2).unwrap().expect("a victim");
+    let (picked, _) = changed_file(&dir, &before2).unwrap().expect("a victim");
     assert_eq!(picked, wal2, "the log is torn, not the database");
     // A commit that changed nothing is a failure the caller sees.
     let now = snapshot_files(&dir).unwrap();
@@ -209,6 +211,189 @@ fn changed_file_finds_the_commit_and_torn_tail_cuts_safely() {
     std::fs::write(&tiny, vec![0u8; 1]).unwrap();
     assert_eq!(torn_tail(&tiny, 4096).unwrap(), 0);
     assert_eq!(std::fs::metadata(&tiny).unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R89 F1: a compact append-only statement log (records under 256 bytes)
+/// keeps every older record across the torn tail. The test's "store" is
+/// the log itself: six 40-byte records, then the newest statement's
+/// 40-byte record; the cut is the growth, not the fixed 256 bytes.
+fn r89_compact_log(dir: &Path) -> (PathBuf, Vec<u8>) {
+    let path = dir.join("store.journal");
+    let mut log = Vec::new();
+    for i in 0..6u8 {
+        log.extend(std::iter::repeat_n(i, 40));
+    }
+    std::fs::write(&path, &log).unwrap();
+    (path, log)
+}
+
+/// True when the first `records` records of `path` are intact (each is
+/// `record_len` bytes of its record number).
+fn r89_log_prefix_intact(path: &Path, records: usize, record_len: usize) -> bool {
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    if data.len() < records * record_len {
+        return false;
+    }
+    (0..records).all(|i| {
+        let want = i as u8;
+        data[i * record_len..(i + 1) * record_len]
+            .iter()
+            .all(|b| *b == want)
+    })
+}
+
+/// R89 F1: the (c) cut never exceeds what the victim commit grew: a
+/// 30-byte INSERT into a 100-byte store must not tear the record before
+/// it (the old fixed-256 cut took 65 bytes).
+#[test]
+fn r89_f1_cut_never_exceeds_the_commit() {
+    let dir = std::env::temp_dir().join(format!("sdb-r89-f1-cut-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.log");
+    std::fs::write(&path, vec![0u8; 100]).unwrap();
+    let before = snapshot_files(&dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[7u8; 30])
+        .unwrap();
+    let (victim, grew) = changed_file(&dir, &before)
+        .unwrap()
+        .expect("the commit changed the log");
+    assert_eq!(victim, path);
+    assert_eq!(grew, 30, "the commit grew the file by 30 bytes");
+    let cut = torn_tail(&victim, 256.min(grew)).unwrap();
+    assert_eq!(cut, 30, "the cut is the growth, never 256");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        100,
+        "the older 100 bytes survive"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R89 F1: a store whose log records are smaller than 256 bytes passes
+/// the tear: only the newest record may be lost.
+#[test]
+fn r89_f1_compact_log_store_passes_the_tear() {
+    let dir = std::env::temp_dir().join(format!("sdb-r89-f1-compact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (path, log) = r89_compact_log(&dir);
+    let before = snapshot_files(&dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[6u8; 40])
+        .unwrap();
+    let (victim, grew) = changed_file(&dir, &before)
+        .unwrap()
+        .expect("the commit changed the log");
+    assert_eq!(grew, 40, "the newest statement's record");
+    let cut = torn_tail(&victim, 256.min(grew)).unwrap();
+    assert_eq!(cut, 40, "the cut is the newest record only");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        log.len() as u64,
+        "the older records survive"
+    );
+    assert!(
+        r89_log_prefix_intact(&path, 6, 40),
+        "every older record is intact"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R89 F1: the check still discriminates. The compact store passes; a
+/// store that lost an older record across the tear fails, so a fix that
+/// over-relaxes the invariant to make compact logs pass is caught.
+#[test]
+fn r89_f1_losing_an_older_record_still_fails() {
+    let dir = std::env::temp_dir().join(format!("sdb-r89-f1-lossy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (path, log) = r89_compact_log(&dir);
+    let before = snapshot_files(&dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[6u8; 40])
+        .unwrap();
+    let (victim, grew) = changed_file(&dir, &before)
+        .unwrap()
+        .expect("the commit changed the log");
+    assert_eq!(torn_tail(&victim, 256.min(grew)).unwrap(), 40);
+    assert!(
+        r89_log_prefix_intact(&path, 6, 40),
+        "the compact store keeps every older record"
+    );
+    // The lossy variant: the tear reached an older record (what the old
+    // 256-byte cut did to this log).
+    let lossy = dir.join("lossy.journal");
+    std::fs::write(&lossy, &log[..140]).unwrap();
+    assert!(
+        !r89_log_prefix_intact(&lossy, 6, 40),
+        "an older record lost across the tear must fail the check"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R89 F1 + the operator's answer to spec question 1: a log the commit
+/// **rewrote in place** (SQLite reuses its WAL's frames, so the length
+/// does not grow) takes the old-style tail cut `min(256, len / 2)`, and
+/// the committed records below its stale tail survive.
+#[test]
+fn r89_f1_rewritten_log_keeps_older_records() {
+    let dir = std::env::temp_dir().join(format!("sdb-r89-f1-rewritten-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.wal");
+    // Five committed 40-byte records, then 200 bytes of stale frames past
+    // the last checkpoint (SQLite's reused WAL tail).
+    let mut data = Vec::new();
+    for i in 0..5u8 {
+        data.extend(std::iter::repeat_n(i, 40));
+    }
+    data.extend(std::iter::repeat_n(0xFFu8, 200));
+    std::fs::write(&path, &data).unwrap();
+    let before = snapshot_files(&dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // The commit reuses the stale tail in place: same length, new bytes.
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(200)).unwrap();
+        f.write_all(&[5u8; 40]).unwrap();
+        f.flush().unwrap();
+    }
+    let (victim, grew, cut) = tear_victim(&dir, &before).unwrap().expect("a victim");
+    assert_eq!(victim, path);
+    assert_eq!(grew, 0, "the commit rewrote the log, it did not grow it");
+    assert_eq!(cut, 200, "the old-style tail cut is min(256, len / 2)");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 200);
+    assert!(
+        r89_log_prefix_intact(&path, 5, 40),
+        "every older committed record survives the rewritten log's tail cut"
+    );
+    let line = cut_line(&path, grew, cut);
+    assert!(
+        line.contains("rewritten in place, tail cut 200"),
+        "the (c) line names the cut: {line}"
+    );
+    // A grown log still reports its growth.
+    assert!(
+        cut_line(&path, 40, 40).contains("grew 40 bytes, cut 40"),
+        "a grown log's (c) line names its growth"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

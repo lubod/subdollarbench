@@ -29,11 +29,17 @@ fn ok_n(got: Response, n: u64, what: &str) -> Result<(), String> {
 /// The keys visible on a fresh connection, in order.
 fn visible_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<String>, PeerErr> {
     let mut c = TcpCandidate::connect(addr, timeout).map_err(|e| PeerErr::Other(e.to_string()))?;
+    // R89 F2: stage 6's needs do not include ticket 2, so no ORDER BY;
+    // the peers' key lists are compared after sorting here.
     let got = c
-        .exec(&format!("SELECT k FROM {table} ORDER BY k"))
+        .exec(&format!("SELECT k FROM {table}"))
         .map_err(PeerErr::Other)?;
     match got {
-        Response::Rows { rows, .. } => Ok(rows.into_iter().flatten().collect()),
+        Response::Rows { rows, .. } => {
+            let mut keys: Vec<String> = rows.into_iter().flatten().collect();
+            keys.sort_by_key(|k| k.parse::<u128>().unwrap_or(u128::MAX));
+            Ok(keys)
+        }
         // The *class* decides retryability, never the text.
         Response::Err { class, .. } if class == "busy" => Err(PeerErr::Busy),
         other => Err(PeerErr::Other(format!("SELECT k answered {other:?}"))),

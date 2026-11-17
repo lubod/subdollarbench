@@ -280,9 +280,11 @@ fn perf_gate_with(
         let mut floor_ms = Vec::with_capacity(params.ranges);
         for i in 0..params.ranges {
             let a = (i as u64 * 1993) % (params.rows - params.range_rows);
+            // R89 F2: stage 11's needs do not include ticket 2; the
+            // rows are sorted in the harness after the timed query.
             let sql = |t: &str| {
                 format!(
-                    "SELECT v FROM {t} WHERE k >= {a} AND k < {} ORDER BY k",
+                    "SELECT v FROM {t} WHERE k >= {a} AND k < {}",
                     a + params.range_rows
                 )
             };
@@ -291,12 +293,26 @@ fn perf_gate_with(
                 let t0 = Instant::now();
                 let r = c.exec(&q).map_err(|e| format!("{q}: {e}"))?;
                 out.push(as_ms(t0.elapsed()));
-                match &r {
-                    Response::Rows { rows, .. }
-                        if rows.len() == params.range_rows as usize
-                            && rows[0].first() == Some(&format!("r{a}"))
-                            && rows[rows.len() - 1].first()
-                                == Some(&format!("r{}", a + params.range_rows - 1)) => {}
+                match r {
+                    Response::Rows { mut rows, .. } => {
+                        rows.sort_by_key(|row| {
+                            row.first()
+                                .and_then(|v| v.strip_prefix('r'))
+                                .and_then(|k| k.parse::<u128>().ok())
+                                .unwrap_or(u128::MAX)
+                        });
+                        if rows.len() != params.range_rows as usize
+                            || rows[0].first() != Some(&format!("r{a}"))
+                            || rows[rows.len() - 1].first()
+                                != Some(&format!("r{}", a + params.range_rows - 1))
+                        {
+                            return Err(format!(
+                                "{q}: expected {} rows r{a}..r{}, got {rows:?}",
+                                params.range_rows,
+                                a + params.range_rows - 1
+                            ));
+                        }
+                    }
                     other => {
                         return Err(format!(
                             "{q}: expected {} rows r{a}..r{}, got {other:?}",

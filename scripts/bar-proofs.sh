@@ -6,7 +6,7 @@
 # proofs. The fast-gate skip list is scripts/live-proofs.sh, which is the
 # SQL_PERF_LIVE holders only; the bar must not shrink to that list.
 bar_proofs_from_source() {
-    { grep -oE 'fn (test_pipeline_eval_only_sql_stage[0-9a-z_]*_live|r4[59]_[a-z0-9_]*)' || true; } \
+    { grep -oE 'fn (test_pipeline_eval_only_sql_stage[0-9a-z_]*_live|r4[59]_[a-z0-9_]*|r89_f5_[a-z0-9_]*)' || true; } \
         | sed 's/^fn //' | sort -u
 }
 

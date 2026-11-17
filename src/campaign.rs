@@ -301,6 +301,10 @@ impl LoadedCampaign {
                     "\n---\n\n<!-- ticket {}: {} - SKIPPED, not attempted; not graded, not required -->\n\n> Ticket {} ({}) was **skipped** (a prerequisite ticket did not pass): it is not graded and not required by this ticket.\n",
                     s.id, s.title, s.id, s.title
                 )),
+                Some(LadderOutcome::NotReached) => out.push_str(&format!(
+                    "\n---\n\n<!-- ticket {}: {} - not reached, not attempted; not graded, not required -->\n\n> Ticket {} ({}) was **not reached** (the phase stopped before it): it is not graded and not required by this ticket.\n",
+                    s.id, s.title, s.id, s.title
+                )),
                 None => out.push_str(&format!(
                     "\n---\n\n<!-- ticket {}: {} - not attempted; not graded, not required -->\n\n> Ticket {} ({}) was **not attempted**: it is not graded and not required by this ticket.\n",
                     s.id, s.title, s.id, s.title
@@ -2561,6 +2565,7 @@ pub fn phase_ladder(
                 Some(LadderOutcome::Lite) => "lite",
                 Some(LadderOutcome::Failed) => "failed",
                 Some(LadderOutcome::Skipped) => "skipped",
+                Some(LadderOutcome::NotReached) => "not reached",
                 None => "unknown",
             };
             e.status = "carried".to_string();
@@ -2859,6 +2864,20 @@ pub fn wall_exceeded(
 /// and unit-tested with a mock executor. `on_stage` receives the
 /// rollup-so-far after every ticket (and on budget stop) so callers can
 /// publish live progress.
+/// R89 F6: the weight of every phase ticket not yet run in this phase,
+/// blocked ones included. The catch-up's divisor uses it, so a catch-up
+/// takes its tier's share and the phase's own tickets keep theirs.
+fn phase_unrun_weight_sum(
+    stage_list: &[&StageSpec],
+    outcomes: &HashMap<u32, LadderOutcome>,
+) -> f64 {
+    stage_list
+        .iter()
+        .filter(|s| matches!(outcomes.get(&s.id), None | Some(LadderOutcome::NotReached)))
+        .map(|s| stage_weight(s))
+        .sum()
+}
+
 fn needs_closure_contains(spec: &CampaignSpec, stage: u32, target: u32) -> bool {
     let mut stack = vec![stage];
     let mut seen = HashSet::new();
@@ -2891,7 +2910,10 @@ pub fn catch_up_targets(
 ) -> Vec<(u32, f64)> {
     let mut out = Vec::new();
     for (id, outcome) in outcomes {
-        if !matches!(outcome, LadderOutcome::Failed | LadderOutcome::Skipped) {
+        if !matches!(
+            outcome,
+            LadderOutcome::Failed | LadderOutcome::Skipped | LadderOutcome::NotReached
+        ) {
             continue;
         }
         let Some(stage) = spec.stages.iter().find(|s| s.id == *id) else {
@@ -3242,7 +3264,12 @@ where
             } else {
                 stage.tier as f64
             };
-            let catch_up_weight = runnable_weight_sum(&stage_list, &outcomes) + target_weight;
+            // R89 F6: the divisor is every phase ticket not yet run in
+            // this phase -- blocked ones included -- plus the target. The
+            // runnable-only sum gave the catch-up 100 % of the headroom
+            // when its failure blocked the whole phase (minimax .45: a
+            // $0.97 catch-up of ticket 5 before stages 16-20).
+            let catch_up_weight = phase_unrun_weight_sum(&stage_list, &outcomes) + target_weight;
             // R86 F1: the catch-up's turns follow its own (large) share.
             let catch_up_budget = pool_budget(headroom, target_weight, catch_up_weight);
             let remaining_wall =
@@ -3378,6 +3405,13 @@ where
             rollup.over_budget |= over_budget_now;
             rollup.cap_reached |= floor_now && !over_budget_now;
             rollup.over_wall |= over_wall_now;
+            // R89 F7: the tickets the stop leaves unrun are recorded as
+            // not reached, so a later phase catches them up instead of
+            // skipping everything that needs them for the rest of the
+            // career (11 archived phases stopped this way).
+            for s in &stage_list {
+                outcomes.entry(s.id).or_insert(LadderOutcome::NotReached);
+            }
             rollup.ladder_state = Some(snapshot_state(
                 &outcomes,
                 &passed_all,
@@ -3927,6 +3961,13 @@ fn copy_dir_inner(src: &Path, dst: &Path, include_git: bool) -> Result<()> {
         let from = entry.path();
         let to = dst.join(&name);
         if entry.file_type()?.is_dir() {
+            // R89 F4: the build cache is not part of the source. A
+            // scratch copy with the candidate's `target/` let a `start.sh`
+            // that builds only when the binary is missing run the stale,
+            // un-reverted binary (the ticket-15 sensitivity check).
+            if name == "target" {
+                continue;
+            }
             copy_dir_inner(&from, &to, include_git)?;
         } else {
             std::fs::copy(&from, &to)
@@ -3978,6 +4019,9 @@ pub enum LadderOutcome {
     Failed,
     /// Skipped because a `needs` prerequisite failed.
     Skipped,
+    /// R89 F7: the phase stopped (cap or wall) before this ticket ran.
+    /// A later phase treats it as a catch-up target.
+    NotReached,
 }
 
 #[cfg(test)]

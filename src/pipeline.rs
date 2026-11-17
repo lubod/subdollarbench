@@ -232,35 +232,41 @@ fn crash_ladder(
             // committed row. A commit that lands on a WAL checkpoint rewrites
             // in place and grows nothing (or nothing tearable), so retry with
             // another victim instead of skipping.
-            let mut torn: Option<(std::path::PathBuf, u64)> = None;
+            let mut torn: Option<(std::path::PathBuf, u64, u64)> = None;
+            // R89 F1: the baseline is the step's start, not each retry's:
+            // a re-taken baseline absorbed the previous attempt's growth,
+            // so an unflushed first append made every retry look like it
+            // changed nothing (seen in the full gate under load).
+            let before_c = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
             for attempt in 0..3 {
-                let before = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
                 crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
                     .map_err(|e| format!("(c) {e}"))?;
                 victims += 1;
                 let _ = sandbox.kill_candidate();
-                if let Some(path) =
-                    crash::changed_file(&scratch, &before).map_err(|e| format!("(c) {e}"))?
+                // R89 F1 and the operator's answer to spec question 1:
+                // a file the commit grew is cut at most by its growth (a
+                // compact log keeps the record before the newest one); a
+                // file it rewrote in place (SQLite's reused WAL) takes
+                // the old-style tail cut.
+                if let Some(victim) =
+                    crash::tear_victim(&scratch, &before_c).map_err(|e| format!("(c) {e}"))?
                 {
-                    let cut = crash::torn_tail(&path, 256).map_err(|e| format!("(c) {e}"))?;
-                    if cut > 0 {
-                        torn = Some((path, cut));
-                        break;
-                    }
+                    torn = Some(victim);
+                    break;
                 }
                 // Nothing changed (or nothing tearable): bring the store back
                 // and try one more commit.
                 restart(&scratch_extras)?;
             }
-            let Some((path, cut)) = torn else {
+            let Some((path, grew, cut)) = torn else {
                 return Err(
                     "(c) three acked INSERTs changed no file: commits never reached the store"
                         .to_string(),
                 );
             };
             logger.log(&format!(
-                "  [CRASH] (c) torn tail: {cut} bytes off {}",
-                path.display()
+                "  [CRASH] (c) torn tail: {}",
+                crash::cut_line(&path, grew, cut)
             ));
             restart(&scratch_extras)?;
             // Only the newest victim may be missing: the older ones were
@@ -493,6 +499,24 @@ fn parse_stage_commit(log: &str, stage: u32) -> Option<String> {
 /// excluded, from the crate's own `cargo test` instrumented with
 /// `-C instrument-coverage` and read back with llvm-tools-preview. This
 /// replaces the Go branch and the self-reported `coverage.txt` branch.
+/// R89 F4: a coverage measurement that hits its time limit is the
+/// harness's fault, not the candidate's.
+pub(crate) const COVERAGE_TIMEOUT_MARKER: &str = "coverage measurement timed out";
+
+/// R89 F4: true when a stage-15 error is the coverage measurement's
+/// timeout (an infra error, never a model failure).
+pub(crate) fn coverage_error_is_infra(error: &str) -> bool {
+    error.contains(COVERAGE_TIMEOUT_MARKER)
+}
+
+/// R89 F4: a reverted copy that does not compile is inconclusive, not a
+/// ticket-15 failure: the sensitivity check has nothing to prove.
+pub(crate) fn revert_build_inconclusive(reason: &str) -> String {
+    format!(
+        "sensitivity is inconclusive: the reverted copy does not compile, so ./test.sh failing proves nothing: {reason}"
+    )
+}
+
 fn measure_rust_coverage(
     sandbox: &crate::sandbox::docker::SandboxManager,
     workdir: &Path,
@@ -560,9 +584,16 @@ if total == 0:
 print('coverage: %.2f%%' % (100.0 * covered / total))
 PY
 "#;
-    let (ok, text) = sandbox
-        .run_workspace_command(workdir, script, 300)
+    // R89 F4: the capped form keeps the timeout separate from a command
+    // that ran and failed; a timeout is an infra error, not a score.
+    let (ok, timed_out, text) = sandbox
+        .run_workspace_command_capped(workdir, script, 300)
         .map_err(|e| format!("coverage measurement failed: {e}"))?;
+    if timed_out {
+        return Err(format!(
+            "{COVERAGE_TIMEOUT_MARKER}: the measurement did not finish in 300 s"
+        ));
+    }
     if !ok {
         let lines: Vec<&str> = text.lines().collect();
         let tail = &lines[lines.len().saturating_sub(12)..];
@@ -783,6 +814,18 @@ fn run_tests_gate_blocking(
                 let _ = std::fs::remove_file(&patch_path);
                 return fail(format!("stage {stage}: sensitivity setup failed: {e}"));
             }
+        }
+        // R89 F4: build the reverted copy explicitly (the copy has no
+        // `target/`, so a start.sh that builds only when the binary is
+        // missing cannot run the stale, un-reverted one). A revert that
+        // does not compile is inconclusive, not a ticket-15 failure.
+        if let Err(e) =
+            sandbox.build_rust_candidate(&scenario, SandboxManager::RUST_BUILD_TIMEOUT_SECS)
+        {
+            logger.log(&format!("  [TESTS] {}", revert_build_inconclusive(&e)));
+            let _ = std::fs::remove_dir_all(&scenario);
+            let _ = std::fs::remove_file(&patch_path);
+            continue;
         }
         // L-a: a red suite is only meaningful if the reverted copy still
         // boots and answers a basic query. Otherwise a whole-file fallback
@@ -1944,9 +1987,18 @@ impl BenchmarkPipeline {
                                     ),
                                     Ok(st) => {
                                         let why = st.error.unwrap_or_default();
-                                        logger.log(&format!("  [TESTS] FAILED: {why}"));
-                                        late_failure =
-                                            Some((15, format!("[tests] {why}")));
+                                        if coverage_error_is_infra(&why) {
+                                            // R89 F4: the harness ran out of
+                                            // time, not the candidate.
+                                            logger.log(&format!(
+                                                "  [TESTS] INFRA: {why}; not a model failure"
+                                            ));
+                                            infra_error = true;
+                                        } else {
+                                            logger.log(&format!("  [TESTS] FAILED: {why}"));
+                                            late_failure =
+                                                Some((15, format!("[tests] {why}")));
+                                        }
                                     }
                                     Err(e) => {
                                         logger.log(&format!(

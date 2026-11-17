@@ -38,7 +38,7 @@ src/verifier/sql/disk.rs test_pipeline_eval_only_sql_stage17_disk_full_live
 src/verifier/sql/security.rs test_pipeline_eval_only_sql_stage18_security_live
 src/verifier/sql/replication.rs test_pipeline_eval_only_sql_stage19_replication_live,test_pipeline_eval_only_sql_stage19_replication_lite_live
 src/verifier/sql/pgwire.rs core
-src/verifier/sql/crash.rs core
+src/verifier/sql/crash.rs core,r89_f5_compact_reference_passes_stage5,r89_f5_reference_without_ticket2_passes_its_branch
 src/verifier/sql/txn.rs core
 src/verifier/sql/toy.rs core
 src/bench/** core
