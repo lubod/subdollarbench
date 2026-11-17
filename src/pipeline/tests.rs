@@ -4265,3 +4265,122 @@ fn r89_f4_coverage_timeout_is_infra() {
         "./test.sh exited non-zero (run 1/2): boom"
     ));
 }
+
+/// R89 F5: the reference with ticket 2's grammar disabled (ORDER BY,
+/// DISTINCT, LIMIT, OFFSET answered ERR syntax) passes stages 4-6 and 11.
+/// The F2 fix is what makes those checks need only their own tickets.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r89_f5_reference_without_ticket2_passes_its_branch() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let worker = 88u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r89f5no2");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference_without_ticket2(&workdir, port).unwrap();
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql 89 f5 no-ticket-2 fixture").unwrap();
+    let mut config = covtest_config(workdir.clone(), worker, "r89f5no2");
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage: 11,
+        prompt_path,
+        continuity: true,
+        // The stages whose checks the branch must pass; ticket 2 is not
+        // among them (the reference refuses its grammar).
+        accepted_stages: vec![4, 5, 6, 11],
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: vec![0, 1, 3],
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let out = expect_proof(
+        BenchmarkPipeline::execute(config, logger.clone(), None),
+        &logger,
+        "the no-ticket-2 reference run must complete",
+    )
+    .await;
+    assert!(
+        !out.infra_error,
+        "unexpected infra error: {:?}",
+        out.manifest.status
+    );
+    for needle in [
+        "Stage 4: Persistence -> PASS",
+        "Stage 5: Crash safety -> PASS",
+        "Stage 6: Transactions -> PASS",
+        "Stage 11: Indexes + perf gate -> PASS",
+    ] {
+        assert!(
+            logger.contains(needle),
+            "missing {needle:?}; log:\n{}",
+            logger.text()
+        );
+    }
+    assert_proof_score(&out, &logger, 4, 4);
+    cleanup_covtest_network("r89f5no2");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// R89 F5: the compact-log reference (one write per line, records under
+/// 256 bytes for the ladder's single-row writes) passes the stage-5 crash
+/// ladder. The torn tail cuts only the newest statement; the F1 fix is
+/// what keeps the older 1000-row bulk write.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r89_f5_compact_reference_passes_stage5() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let worker = 89u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r89f5compact");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference_compact(&workdir, port).unwrap();
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql 89 f5 compact fixture").unwrap();
+    let mut config = covtest_config(workdir.clone(), worker, "r89f5compact");
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage: 5,
+        prompt_path,
+        continuity: true,
+        accepted_stages: vec![4, 5],
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: vec![0, 1, 3],
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let out = expect_proof(
+        BenchmarkPipeline::execute(config, logger.clone(), None),
+        &logger,
+        "the compact reference run must complete",
+    )
+    .await;
+    assert!(
+        !out.infra_error,
+        "unexpected infra error: {:?}",
+        out.manifest.status
+    );
+    for needle in [
+        "Stage 4: Persistence -> PASS",
+        "Stage 5: Crash safety -> PASS",
+        "[CRASH] (c) torn tail",
+        "[CRASH] a double restart changed nothing",
+    ] {
+        assert!(
+            logger.contains(needle),
+            "missing {needle:?}; log:\n{}",
+            logger.text()
+        );
+    }
+    assert_proof_score(&out, &logger, 2, 2);
+    cleanup_covtest_network("r89f5compact");
+    let _ = fs::remove_dir_all(&dir);
+}

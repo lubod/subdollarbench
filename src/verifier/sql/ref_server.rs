@@ -167,6 +167,54 @@ LOG_LOCK = threading.Lock()
 SKIP_SYNC = False
 PORT = 0
 DATA = "/tmp"
+# R89 F5: a reference with ticket 2 disabled: answer ERR syntax to the
+# ticket-2 grammar (ORDER BY, DISTINCT, LIMIT, OFFSET), so the late
+# checks that must not use it can be graded against a candidate that
+# never passed ticket 2.
+NO_TICKET2 = os.environ.get("SDB_SQL_REF_NO_TICKET2") == "1"
+
+
+def ticket2_sql(sql):
+    up = sql.upper()
+    return ("ORDER BY" in up or "DISTINCT" in up
+            or "LIMIT " in up or "OFFSET " in up)
+
+
+# R89 F5: a second reference store for the crash ladder: the durable store
+# is a compact append-only statement log (one write per line, records under
+# 256 bytes for the ladder's single-row writes); the SQLite database is
+# shared memory and is rebuilt by replaying the log on every start. A torn
+# tail of the log costs at most the newest statement.
+COMPACT = os.environ.get("SDB_SQL_REF_COMPACT") == "1"
+
+
+def db_connect(path, **kw):
+    if path.startswith("file:"):
+        kw["uri"] = True
+    return sqlite3.connect(path, **kw)
+
+
+def compact_replay(db_path, data):
+    try:
+        f = open(os.path.join(data, "store.log"), "rb")
+    except OSError:
+        return
+    conn = db_connect(db_path, isolation_level=None, timeout=20.0)
+    for raw in f:
+        if not raw.endswith(b"\n"):
+            # A torn tail: the newest statement may be lost, never an
+            # older one.
+            break
+        sql = raw.decode("utf-8", "replace").rstrip("\n")
+        if not sql.strip():
+            continue
+        try:
+            conn.execute(sql)
+        except Exception as e:
+            print("sdb-sql reference: compact replay skipped %r: %s"
+                  % (sql[:80], e), file=sys.stderr, flush=True)
+    f.close()
+    conn.close()
 PRIMARY = None
 WRITE_KEYWORDS = ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER")
 LOG_KEYWORDS = WRITE_KEYWORDS + ("BEGIN", "COMMIT", "ROLLBACK")
@@ -651,7 +699,7 @@ def replica_loop(data, start_primary):
                     continue
                 if entries:
                     if conn is None:
-                        conn = sqlite3.connect(db_path, isolation_level=None)
+                        conn = db_connect(db_path, isolation_level=None)
                         conn.execute("PRAGMA journal_mode=WAL")
                         conn.execute("PRAGMA synchronous=FULL")
                     for idx, (lsn, entry_sql) in enumerate(entries):
@@ -819,7 +867,7 @@ def pg_serve(sock, db_path):
     # R49: W5 runs 16 clients on a disk-backed store; the default 5 s
     # lock wait can answer busy during a disk stall. 20 s stays inside the
     # client's 30 s statement timeout.
-    conn = sqlite3.connect(db_path, isolation_level=None, timeout=20.0)
+    conn = db_connect(db_path, isolation_level=None, timeout=20.0)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=" + SYNC)
@@ -965,7 +1013,7 @@ def pg_accept_loop(srv, db_path):
 def serve(sock, db_path):
     global CONNS_CURRENT, ROLE, ACK_MAX, SKIP_SYNC
     # R49: see pg_serve; the W5 writer must wait through a disk stall.
-    conn = sqlite3.connect(db_path, isolation_level=None, timeout=20.0)
+    conn = db_connect(db_path, isolation_level=None, timeout=20.0)
     with STATS_LOCK:
         STATS["connections_current"] += 1
         STATS["connections_total"] += 1
@@ -1000,6 +1048,11 @@ def serve(sock, db_path):
             if not sql.strip():
                 continue
             stats_bump(sql)
+            if NO_TICKET2 and ticket2_sql(sql):
+                stats_error()
+                f.write(b"ERR syntax ticket 2 is not part of this branch\n")
+                f.flush()
+                continue
             up = sql.strip().upper()
             if up == "SHOW ROLE":
                 f.write(role_reply())
@@ -1050,6 +1103,15 @@ def serve(sock, db_path):
                 f.write(b"ERR limit nesting too deep\n")
                 f.flush()
                 continue
+            if COMPACT and first_keyword(sql) in WRITE_KEYWORDS:
+                try:
+                    with open(os.path.join(DATA, "store.log"), "a") as lf:
+                        lf.write(sql + "\n")
+                        lf.flush()
+                        os.fsync(lf.fileno())
+                except OSError as e:
+                    print("sdb-sql reference: compact log append failed: %s" % e,
+                          file=sys.stderr, flush=True)
             try:
                 reply = timed_answer(conn, sql)
             except Exception as e:
@@ -1128,6 +1190,8 @@ def main():
     PRIMARY = replicaof
     load_log(data)
     db_path = os.path.join(data, "sdb-sql-ref-%d.sqlite" % port)
+    if COMPACT:
+        db_path = "file:sdbcompact%d?mode=memory&cache=shared" % port
     # The store is the harness's to own: it hands a fresh --data per run and
     # expects the same directory to survive a restart (persistence).
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1138,9 +1202,13 @@ def main():
     # file when the last connection closes, and the crash ladder needs a
     # log that survives between harness connections so it can tear its
     # tail. The keeper holds the database open without any transaction.
-    keeper = sqlite3.connect(db_path, isolation_level=None)
+    keeper = db_connect(db_path, isolation_level=None)
     keeper.execute("PRAGMA journal_mode=WAL")
     keeper.execute("PRAGMA synchronous=FULL")
+    if COMPACT:
+        # The keeper holds the shared-memory database; the log is replayed
+        # into it before the first connection is served.
+        compact_replay(db_path, data)
     print("sdb-sql reference listening on %d (db %s)" % (port, db_path), flush=True)
     if ROLE == "replica" and PRIMARY:
         threading.Thread(target=replica_loop, args=(data, PRIMARY), daemon=True).start()
@@ -1182,6 +1250,42 @@ pub fn write_reference(dir: &std::path::Path, port: u16) -> std::io::Result<()> 
         "#!/bin/bash\n\
          if [ $# -eq 0 ]; then set -- --port {port} --data /tmp; fi\n\
          exec python3 -u /workspace/sql_server.py \"$@\"\n"
+    );
+    std::fs::write(dir.join("start.sh"), start)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("start.sh"), std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// R89 F5: the same reference with ticket 2's grammar disabled (the
+/// late checks must not need it).
+pub fn write_reference_without_ticket2(dir: &std::path::Path, port: u16) -> std::io::Result<()> {
+    write_reference(dir, port)?;
+    let start = format!(
+        "#!/bin/bash\n\
+         if [ $# -eq 0 ]; then set -- --port {port} --data /tmp; fi\n\
+         SDB_SQL_REF_NO_TICKET2=1 exec python3 -u /workspace/sql_server.py \"$@\"\n"
+    );
+    std::fs::write(dir.join("start.sh"), start)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("start.sh"), std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// R89 F5: the reference on the compact append-only statement log (the
+/// crash ladder's torn tail hits the log, not a database page).
+pub fn write_reference_compact(dir: &std::path::Path, port: u16) -> std::io::Result<()> {
+    write_reference(dir, port)?;
+    let start = format!(
+        "#!/bin/bash\n\
+         if [ $# -eq 0 ]; then set -- --port {port} --data /tmp; fi\n\
+         SDB_SQL_REF_COMPACT=1 exec python3 -u /workspace/sql_server.py \"$@\"\n"
     );
     std::fs::write(dir.join("start.sh"), start)?;
     #[cfg(unix)]
