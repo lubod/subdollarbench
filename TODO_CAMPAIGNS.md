@@ -449,3 +449,6 @@ not planned.
   (key). Ticket 15's coverage measurement failed on stale `target/`
   output (round 88, rules `.49`, DECISIONS #34). Next: round 88, bar,
   rehearsal, haiku `.49`, then deepseek.
+- **2026-11-17, order (operator):** after round 88, deepseek goes first
+  (cheaper while bugs are still being found), off-peak only; haiku
+  follows once a cheap model has run clean on `.49`.
