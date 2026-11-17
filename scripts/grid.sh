@@ -1241,11 +1241,20 @@ r90_m2_no_phase_starts_at_peak() {
         grep -q 'waits: peak' "$R90_DIR/out" 2>/dev/null && break
         sleep 0.1
     done
-    grep -q 'waits: peak' "$R90_DIR/out" || {
-        kill "$pid" 2>/dev/null || true; echo "peak: the grid did not wait"; return 1; }
+    if ! grep -q 'waits: peak' "$R90_DIR/out"; then
+        # The mutant starts the phase: stop the grid cleanly (a killed
+        # subshell would leave its lane and cell behind holding locks).
+        : > "$STOP"
+        for _ in $(seq 1 100); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        wait "$pid" 2>/dev/null || true
+        echo "peak: the grid did not wait"
+        return 1
+    fi
     if [[ -f "$SDB_GRID_TRACE" ]]; then
         echo "peak: a phase started at peak"
-        kill "$pid" 2>/dev/null || true
         return 1
     fi
     : > "$STOP"
