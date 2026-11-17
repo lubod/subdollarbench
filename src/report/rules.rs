@@ -15,6 +15,20 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-17.49`: round 88. Ticket 15's coverage is measured on a
+///   fresh build in a directory outside `/workspace` (the candidate's
+///   `target/` is neither read nor reused), and the report merges every
+///   instrumented test binary's reading instead of the first one's; the
+///   provider bill counts every agent session and round (repairs
+///   included) and the phase's `billed.jsonl` keeps every record. Why:
+///   the `.48` haiku analysis -- stale build output made stage 15 fail
+///   with `no source lines under src/` while every test passed (up to
+///   ~25 phase-4 points), and a stage recorded only its last round's
+///   bill ($7.02 recorded against $13.19 from the key) (DECISIONS #34).
+///   Score impact: every career restarts at phase 1; the `.48` haiku
+///   careers (median 60.4; real bill $13.19) are void and stay
+///   unpublished; the `.49` board starts empty. Scoring and the $0.99
+///   cap stay at base rates (DECISIONS #32).
 /// - `2026-11-15.48`: round 86. A ticket's turn limit and time-out
 ///   scale with its own budget: 300 turns and 120 minutes per $0.20 of
 ///   the ticket's share, the stage's own limit as the floor, and the
@@ -851,7 +865,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-15.48";
+pub const RULES_VERSION: &str = "2026-11-17.49";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
