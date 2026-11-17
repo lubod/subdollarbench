@@ -4910,3 +4910,76 @@ fn r89_f4_revert_builds_without_the_old_target() {
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&dst);
 }
+
+/// R89 F6: a catch-up takes only its share of the phase. Ticket 5's full
+/// catch-up before stages 16-20 (all never run, because the failure
+/// blocked their chain) gets target/(target + the phase's whole weight)
+/// of the headroom, not all of it.
+#[tokio::test]
+async fn r89_f6_catch_up_takes_its_share() {
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let phase = lc.spec.phases.iter().find(|p| p.id == 4).unwrap();
+    let mut state = LadderState::default();
+    for id in 0..=4u32 {
+        state.passed.push(id);
+        state.outcomes.insert(id, LadderOutcome::Full);
+        state.best.insert(id, true);
+    }
+    state.outcomes.insert(5, LadderOutcome::Failed);
+    state.best.insert(5, false);
+    state.outcomes.insert(6, LadderOutcome::Skipped);
+    state.dirty = true;
+    state.last_green = Some("abc1234".into());
+    let opts = CampaignRunOptions {
+        campaign_id: "r89share".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let seen = std::cell::RefCell::new(Vec::<(u32, f64)>::new());
+    let _ = run_campaign_phase(
+        &lc,
+        &opts,
+        Some(phase),
+        Some(&state),
+        Some("prev"),
+        None,
+        |attempt| {
+            seen.borrow_mut()
+                .push((attempt.stage.id, attempt.budget_usd));
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let seen = seen.into_inner();
+    let (id, budget) = seen[0];
+    assert_eq!(id, 5, "the catch-up runs first: {seen:?}");
+    // The catch-up takes the stage's lite (it has one) or full weight;
+    // the divisor adds the whole phase's unrun weight.
+    let stage5 = &lc.spec.stages[5];
+    let target = if stage5.lite.is_some() {
+        stage_lite_weight(stage5)
+    } else {
+        stage_weight(stage5)
+    };
+    let phase_weight: f64 = phase
+        .stages
+        .iter()
+        .map(|id| stage_weight(&lc.spec.stages[*id as usize]))
+        .sum();
+    let headroom = cap_headroom(10.0, 0.0, 0.0).unwrap();
+    let want = pool_budget(headroom, target, target + phase_weight);
+    assert!(
+        (budget - want).abs() < 1e-9,
+        "the catch-up's budget {budget} is not {want} (target {target}, phase {phase_weight})"
+    );
+    assert!(
+        budget < 9.0,
+        "the catch-up took most of the phase headroom: {budget}"
+    );
+}

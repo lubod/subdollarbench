@@ -2859,6 +2859,20 @@ pub fn wall_exceeded(
 /// and unit-tested with a mock executor. `on_stage` receives the
 /// rollup-so-far after every ticket (and on budget stop) so callers can
 /// publish live progress.
+/// R89 F6: the weight of every phase ticket not yet run in this phase,
+/// blocked ones included. The catch-up's divisor uses it, so a catch-up
+/// takes its tier's share and the phase's own tickets keep theirs.
+fn phase_unrun_weight_sum(
+    stage_list: &[&StageSpec],
+    outcomes: &HashMap<u32, LadderOutcome>,
+) -> f64 {
+    stage_list
+        .iter()
+        .filter(|s| !outcomes.contains_key(&s.id))
+        .map(|s| stage_weight(s))
+        .sum()
+}
+
 fn needs_closure_contains(spec: &CampaignSpec, stage: u32, target: u32) -> bool {
     let mut stack = vec![stage];
     let mut seen = HashSet::new();
@@ -3242,7 +3256,12 @@ where
             } else {
                 stage.tier as f64
             };
-            let catch_up_weight = runnable_weight_sum(&stage_list, &outcomes) + target_weight;
+            // R89 F6: the divisor is every phase ticket not yet run in
+            // this phase -- blocked ones included -- plus the target. The
+            // runnable-only sum gave the catch-up 100 % of the headroom
+            // when its failure blocked the whole phase (minimax .45: a
+            // $0.97 catch-up of ticket 5 before stages 16-20).
+            let catch_up_weight = phase_unrun_weight_sum(&stage_list, &outcomes) + target_weight;
             // R86 F1: the catch-up's turns follow its own (large) share.
             let catch_up_budget = pool_budget(headroom, target_weight, catch_up_weight);
             let remaining_wall =
