@@ -137,10 +137,10 @@ fn reference_passes_the_crash_and_txn_checks_twenty_times() {
         let before = crash::snapshot_files(&proc.data).expect("stamps");
         crash::append_row(&addr, t, &format!("r{rep}_a"), acked + 1).expect("victim");
         proc.kill();
-        let victim = crash::changed_file(&proc.data, &before)
+        let (victim, grew) = crash::changed_file(&proc.data, &before)
             .expect("changed")
             .expect("the victim commit wrote something");
-        let cut = crash::torn_tail(&victim, 256).expect("torn tail");
+        let cut = crash::torn_tail(&victim, 256.min(grew)).expect("torn tail");
         assert!(cut > 0, "rep {rep}: nothing to tear");
         proc.restart().unwrap();
         wait_until_answering(&addr, t).expect("answers after a torn tail");
@@ -400,10 +400,10 @@ fn reference_survives_the_crash_safety_ladder() {
     let before = crash::snapshot_files(&proc.data).expect("store stamps");
     crash::append_row(&addr, t, "crash_acked", acked + 1).expect("victim row");
     proc.kill();
-    let victim = crash::changed_file(&proc.data, &before)
+    let (victim, grew) = crash::changed_file(&proc.data, &before)
         .expect("changed file")
         .expect("the victim commit wrote something");
-    let cut = crash::torn_tail(&victim, 256).expect("torn tail");
+    let cut = crash::torn_tail(&victim, 256.min(grew)).expect("torn tail");
     assert!(cut > 0, "the store must have a newest file to tear");
     proc.restart().unwrap();
     wait_until_answering(&addr, t).expect("answers after a torn tail");

@@ -239,10 +239,14 @@ fn crash_ladder(
                     .map_err(|e| format!("(c) {e}"))?;
                 victims += 1;
                 let _ = sandbox.kill_candidate();
-                if let Some(path) =
+                if let Some((path, grew)) =
                     crash::changed_file(&scratch, &before).map_err(|e| format!("(c) {e}"))?
                 {
-                    let cut = crash::torn_tail(&path, 256).map_err(|e| format!("(c) {e}"))?;
+                    // R89 F1: cut at most what this commit grew, so the
+                    // record before the newest one survives even in a
+                    // compact log (records under 256 bytes).
+                    let cut =
+                        crash::torn_tail(&path, 256.min(grew)).map_err(|e| format!("(c) {e}"))?;
                     if cut > 0 {
                         torn = Some((path, cut));
                         break;

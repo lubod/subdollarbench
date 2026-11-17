@@ -382,10 +382,12 @@ fn collect_stamps(dir: &Path, out: &mut BTreeMap<PathBuf, FileStamp>) -> Result<
     Ok(())
 }
 
-/// The store file the torn tail should hit: the *log*, never the database
-/// itself (truncating a database's tail destroys committed pages; truncating
-/// a write-ahead log's tail destroys at most the newest transaction).
-/// Preference order:
+/// The store file the torn tail should hit, and how many bytes the commit
+/// grew it by (0 when it changed without growing: a checkpoint or a
+/// rewrite has no tearable tail). The *log* is preferred, never the
+/// database itself (truncating a database's tail destroys committed
+/// pages; truncating a write-ahead log's tail destroys at most the newest
+/// transaction). Preference order:
 /// 1. a changed file whose name marks it as a log (`*wal*`, `*log*`,
 ///    `*journal*`, `*aof*`), newest mtime first;
 /// 2. the changed file that grew the most (an append-only store);
@@ -393,11 +395,13 @@ fn collect_stamps(dir: &Path, out: &mut BTreeMap<PathBuf, FileStamp>) -> Result<
 ///    is not the largest (a checkpointed database plus a wrapped log).
 ///
 /// `None` means no safe victim: an acked commit changed nothing the harness
-/// can reasonably tear, and the caller retries.
+/// can reasonably tear, and the caller retries. The caller cuts at most
+/// `grew` bytes (R89 F1): a 256-byte cut into a compact log would tear
+/// the record before the newest one, which a correct store owes.
 pub fn changed_file(
     dir: &Path,
     before: &BTreeMap<PathBuf, FileStamp>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<(PathBuf, u64)>, String> {
     let mut now = BTreeMap::new();
     collect_stamps(dir, &mut now)?;
     let changed: Vec<(PathBuf, FileStamp, u64)> = now
@@ -415,14 +419,14 @@ pub fn changed_file(
             (path, stamp, grew)
         })
         .collect();
-    let newest = |mut v: Vec<(PathBuf, FileStamp, u64)>| -> Option<PathBuf> {
+    let newest = |mut v: Vec<(PathBuf, FileStamp, u64)>| -> Option<(PathBuf, u64)> {
         v.sort_by(|a, b| {
             b.1.mtime
                 .cmp(&a.1.mtime)
                 .then_with(|| b.2.cmp(&a.2))
                 .then_with(|| a.0.cmp(&b.0))
         });
-        v.into_iter().next().map(|(p, _, _)| p)
+        v.into_iter().next().map(|(p, _, grew)| (p, grew))
     };
     let is_log = |p: &Path| {
         let n = p
@@ -443,8 +447,8 @@ pub fn changed_file(
     }
     let mut grown: Vec<_> = changed.iter().filter(|(_, _, g)| *g > 0).cloned().collect();
     grown.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-    if let Some((p, _, _)) = grown.into_iter().next() {
-        return Ok(Some(p));
+    if let Some((p, _, grew)) = grown.into_iter().next() {
+        return Ok(Some((p, grew)));
     }
     if changed.len() >= 2 {
         let largest = changed
