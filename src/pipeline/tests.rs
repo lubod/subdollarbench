@@ -4239,3 +4239,29 @@ fn r81_perf_builds_sources_without_target() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// R89 F4: the ticket-15 revert handling.
+
+#[test]
+fn r89_f4_uncompilable_revert_is_inconclusive() {
+    let text = revert_build_inconclusive("error[E0425]: cannot find value `x` in this scope");
+    assert!(text.contains("inconclusive"), "{text}");
+    assert!(text.contains("does not compile"), "{text}");
+    assert!(
+        !text.contains("FAILED"),
+        "an uncompilable revert is not a ticket-15 failure: {text}"
+    );
+}
+
+#[test]
+fn r89_f4_coverage_timeout_is_infra() {
+    assert!(coverage_error_is_infra(&format!(
+        "{COVERAGE_TIMEOUT_MARKER}: the measurement did not finish in 300 s"
+    )));
+    assert!(!coverage_error_is_infra(
+        "coverage 12.0% is below the 80% gate"
+    ));
+    assert!(!coverage_error_is_infra(
+        "./test.sh exited non-zero (run 1/2): boom"
+    ));
+}

@@ -497,6 +497,24 @@ fn parse_stage_commit(log: &str, stage: u32) -> Option<String> {
 /// excluded, from the crate's own `cargo test` instrumented with
 /// `-C instrument-coverage` and read back with llvm-tools-preview. This
 /// replaces the Go branch and the self-reported `coverage.txt` branch.
+/// R89 F4: a coverage measurement that hits its time limit is the
+/// harness's fault, not the candidate's.
+pub(crate) const COVERAGE_TIMEOUT_MARKER: &str = "coverage measurement timed out";
+
+/// R89 F4: true when a stage-15 error is the coverage measurement's
+/// timeout (an infra error, never a model failure).
+pub(crate) fn coverage_error_is_infra(error: &str) -> bool {
+    error.contains(COVERAGE_TIMEOUT_MARKER)
+}
+
+/// R89 F4: a reverted copy that does not compile is inconclusive, not a
+/// ticket-15 failure: the sensitivity check has nothing to prove.
+pub(crate) fn revert_build_inconclusive(reason: &str) -> String {
+    format!(
+        "sensitivity is inconclusive: the reverted copy does not compile, so ./test.sh failing proves nothing: {reason}"
+    )
+}
+
 fn measure_rust_coverage(
     sandbox: &crate::sandbox::docker::SandboxManager,
     workdir: &Path,
@@ -564,9 +582,16 @@ if total == 0:
 print('coverage: %.2f%%' % (100.0 * covered / total))
 PY
 "#;
-    let (ok, text) = sandbox
-        .run_workspace_command(workdir, script, 300)
+    // R89 F4: the capped form keeps the timeout separate from a command
+    // that ran and failed; a timeout is an infra error, not a score.
+    let (ok, timed_out, text) = sandbox
+        .run_workspace_command_capped(workdir, script, 300)
         .map_err(|e| format!("coverage measurement failed: {e}"))?;
+    if timed_out {
+        return Err(format!(
+            "{COVERAGE_TIMEOUT_MARKER}: the measurement did not finish in 300 s"
+        ));
+    }
     if !ok {
         let lines: Vec<&str> = text.lines().collect();
         let tail = &lines[lines.len().saturating_sub(12)..];
@@ -787,6 +812,18 @@ fn run_tests_gate_blocking(
                 let _ = std::fs::remove_file(&patch_path);
                 return fail(format!("stage {stage}: sensitivity setup failed: {e}"));
             }
+        }
+        // R89 F4: build the reverted copy explicitly (the copy has no
+        // `target/`, so a start.sh that builds only when the binary is
+        // missing cannot run the stale, un-reverted one). A revert that
+        // does not compile is inconclusive, not a ticket-15 failure.
+        if let Err(e) =
+            sandbox.build_rust_candidate(&scenario, SandboxManager::RUST_BUILD_TIMEOUT_SECS)
+        {
+            logger.log(&format!("  [TESTS] {}", revert_build_inconclusive(&e)));
+            let _ = std::fs::remove_dir_all(&scenario);
+            let _ = std::fs::remove_file(&patch_path);
+            continue;
         }
         // L-a: a red suite is only meaningful if the reverted copy still
         // boots and answers a basic query. Otherwise a whole-file fallback
@@ -1948,9 +1985,18 @@ impl BenchmarkPipeline {
                                     ),
                                     Ok(st) => {
                                         let why = st.error.unwrap_or_default();
-                                        logger.log(&format!("  [TESTS] FAILED: {why}"));
-                                        late_failure =
-                                            Some((15, format!("[tests] {why}")));
+                                        if coverage_error_is_infra(&why) {
+                                            // R89 F4: the harness ran out of
+                                            // time, not the candidate.
+                                            logger.log(&format!(
+                                                "  [TESTS] INFRA: {why}; not a model failure"
+                                            ));
+                                            infra_error = true;
+                                        } else {
+                                            logger.log(&format!("  [TESTS] FAILED: {why}"));
+                                            late_failure =
+                                                Some((15, format!("[tests] {why}")));
+                                        }
                                     }
                                     Err(e) => {
                                         logger.log(&format!(

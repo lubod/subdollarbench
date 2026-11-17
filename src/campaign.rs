@@ -3927,6 +3927,13 @@ fn copy_dir_inner(src: &Path, dst: &Path, include_git: bool) -> Result<()> {
         let from = entry.path();
         let to = dst.join(&name);
         if entry.file_type()?.is_dir() {
+            // R89 F4: the build cache is not part of the source. A
+            // scratch copy with the candidate's `target/` let a `start.sh`
+            // that builds only when the binary is missing run the stale,
+            // un-reverted binary (the ticket-15 sensitivity check).
+            if name == "target" {
+                continue;
+            }
             copy_dir_inner(&from, &to, include_git)?;
         } else {
             std::fs::copy(&from, &to)

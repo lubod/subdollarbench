@@ -4887,3 +4887,26 @@ fn r82_f4_fixtures_match_events() {
     }
     assert!(checked >= 6, "checked {checked} fixture(s)");
 }
+
+/// R89 F4: the ticket-15 revert copy never carries the candidate's stale
+/// build cache (a start.sh that builds only when the binary is missing
+/// ran the un-reverted binary).
+#[test]
+fn r89_f4_revert_builds_without_the_old_target() {
+    let src = tmp_dir("r89-f4-copy");
+    std::fs::create_dir_all(src.join("src")).unwrap();
+    std::fs::create_dir_all(src.join("target")).unwrap();
+    std::fs::write(src.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+    std::fs::write(src.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(src.join("target/stale-binary"), "old").unwrap();
+    let dst = tmp_dir("r89-f4-copy-dst");
+    copy_dir_with_git(&src, &dst).unwrap();
+    assert!(dst.join("src/lib.rs").is_file(), "the source is copied");
+    assert!(
+        !dst.join("target").exists(),
+        "the candidate's build cache must not be copied: {:?}",
+        std::fs::read_dir(&dst).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+    );
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&dst);
+}
