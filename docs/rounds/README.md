@@ -86,4 +86,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [85](85.md) | The board shows the real bill: opencode phases record OpenRouter's per-call cost; a model-level backfill; the page explains the gap | merged |
 | [86](86.md) | Rules `.48`: a ticket's turns and time scale with its budget | merged |
 | [87](87.md) | The billing proxy streams | merged |
-| [88](88.md) | Rules `.49`: coverage on a fresh build; the bill counts every attempt | open |
+| [88](88.md) | Rules `.49`: coverage on a fresh build; the bill counts every attempt | merged |
