@@ -898,6 +898,7 @@ fn r85_run_with_stub(
             max_effective_usd: None,
             timeout_seconds: Some(120),
         },
+        None,
     )
 }
 
@@ -908,6 +909,7 @@ fn r85_run_with_stub_limits(
     case: &str,
     prompt: &str,
     limits: crate::sandbox::omp::AgentExecutionLimits,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> (
     Result<OmpSessionStats>,
     Vec<String>,
@@ -947,7 +949,7 @@ fn r85_run_with_stub_limits(
             network: Some(&net),
             task: None,
             run_id: Some(&run_id),
-            cancel_flag: None,
+            cancel_flag: cancel,
             worker: 0,
         },
         move |line| logs_c.lock().unwrap().push(line),
@@ -1031,8 +1033,26 @@ fn r90_m4_in_flight_call_is_billed() {
         timeout_seconds: Some(1),
     };
     std::env::set_var("SDB_STUB_SLOW_SECS", "12");
-    let (res, logs, _stub_log, mgr) =
-        r85_run_with_stub_limits(&base, "slow", "the slow call", limits);
+    // End the session once the sidecar has the call open: the marker
+    // directory is the proxy's own account of an in-flight request.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_run = cancel.clone();
+    let base_run = base.clone();
+    let handle = std::thread::spawn(move || {
+        r85_run_with_stub_limits(&base_run, "slow", "the slow call", limits, Some(cancel_run))
+    });
+    let open = base.join("billed.jsonl.open");
+    for _ in 0..150 {
+        if std::fs::read_dir(&open)
+            .map(|rd| rd.flatten().next().is_some())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (res, logs, _stub_log, mgr) = handle.join().expect("the run thread");
     std::env::remove_var("SDB_STUB_SLOW_SECS");
     // A timed-out session is an error envelope, but its partial stats
     // carry the bill the wait recovered.
@@ -1051,6 +1071,50 @@ fn r90_m4_in_flight_call_is_billed() {
         (st.billed_usd - 0.001).abs() < 1e-12,
         "the runner billed {} for the in-flight call, want 0.001: {logs:?}",
         st.billed_usd
+    );
+    // The helper itself: a record that lands while the marker is open is
+    // billed only because wait_idle waited for it. (The real session above
+    // shows the wiring; this part makes the wait itself discriminating.)
+    let sim = base.join("sim");
+    std::fs::create_dir_all(&sim).unwrap();
+    let sim_log = sim.join("billed.jsonl");
+    std::fs::write(&sim_log, "").unwrap();
+    let sim_open = sim.join("billed.jsonl.open");
+    std::fs::create_dir_all(&sim_open).unwrap();
+    std::fs::write(sim_open.join("request-1"), "POST /api/v1/chat\n").unwrap();
+    let proxy = BillingProxy {
+        name: String::new(),
+        log: sim_log.clone(),
+        start_offset: 0,
+        url: String::new(),
+    };
+    let writer = {
+        let log = sim_log.clone();
+        let open = sim_open.clone();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .unwrap()
+                .write_all(format!("{{\"id\":\"sim\",\"cost\":0.001,\"status\":200}}\n").as_bytes())
+                .unwrap();
+            std::fs::remove_file(open.join("request-1")).unwrap();
+        })
+    };
+    let still = proxy.wait_idle(std::time::Duration::from_secs(5));
+    writer.join().unwrap();
+    assert!(
+        still.is_empty(),
+        "wait_idle gave up on an open call: {still:?}"
+    );
+    let sim_bill = proxy.read();
+    assert_eq!(sim_bill.calls, 1, "the waited-for record was not read");
+    assert!(
+        (sim_bill.cost - 0.001).abs() < 1e-12,
+        "the waited-for record's cost is {}",
+        sim_bill.cost
     );
     // The log line is best effort (the forwarder may drain after the
     // error envelope); the record and the billed total are the evidence.
