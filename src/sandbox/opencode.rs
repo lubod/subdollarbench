@@ -943,8 +943,18 @@ impl BillingProxy {
                 Ok(o) if o.status.success() => {
                     return String::from_utf8_lossy(&o.stdout).trim() == "false";
                 }
-                _ => std::thread::sleep(Duration::from_millis(100 * (attempt + 1))),
+                // A removed sidecar is gone; a transient daemon failure is
+                // not. `docker inspect` says "No such object" for the
+                // former and something else (or nothing) for the latter.
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr).to_lowercase();
+                    if err.contains("no such object") || err.contains("not found") {
+                        return true;
+                    }
+                }
+                Err(_) => {}
             }
+            std::thread::sleep(Duration::from_millis(100 * (attempt + 1)));
         }
         // Unknown, not dead: the missing bill records (named by the
         // caller) are the evidence to act on.
