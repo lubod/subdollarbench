@@ -481,3 +481,77 @@ fn r24_r1_a_new_stage_directory_is_covered() {
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+/// R90 M5: the graded key covers what decides a grade or what a phase
+/// inherits: each listed path is in scripts/graded-paths.txt and its
+/// tracked content is in the tree listing the key hashes.
+#[test]
+fn r90_m5_graded_key_covers_the_grade() {
+    let root = crate::config::get_repo_root();
+    let text = fs::read_to_string(root.join("scripts/graded-paths.txt"))
+        .expect("scripts/graded-paths.txt is readable");
+    let mut bases: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        match fields.next() {
+            Some("grader") | Some("plumbing") => {
+                if let Some(path) = fields.next() {
+                    bases.push(path.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let wanted = [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/grading.rs",
+        "src/main.rs",
+        "src/lib.rs",
+        "src/main_campaign.rs",
+    ];
+    for want in wanted {
+        let entry = text
+            .lines()
+            .map(str::trim)
+            .find(|l| {
+                let mut f = l.split_whitespace();
+                matches!(f.next(), Some("grader") | Some("plumbing")) && f.next() == Some(want)
+            })
+            .unwrap_or_else(|| panic!("{want} is not a graded path"));
+        let class = entry.split_whitespace().next().unwrap_or_default();
+        assert!(
+            class == "grader" || class == "plumbing",
+            "{want} has no class: {entry}"
+        );
+        assert!(
+            bases
+                .iter()
+                .any(|b| want == b || want.starts_with(&format!("{b}/"))),
+            "{want} is not covered by the graded path list"
+        );
+    }
+    // The key hashes `git ls-tree -r HEAD -- <graded paths>`: every
+    // listed file must be in that listing (its blob id moves the hash).
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("ls-tree")
+        .arg("-r")
+        .arg("HEAD")
+        .arg("--")
+        .args(&bases)
+        .output()
+        .expect("git ls-tree");
+    assert!(out.status.success(), "git ls-tree failed");
+    let listing = String::from_utf8_lossy(&out.stdout);
+    for want in wanted {
+        assert!(
+            listing.lines().any(|l| l.ends_with(&format!("\t{want}"))),
+            "{want} is not in the key's tree listing"
+        );
+    }
+}

@@ -30,6 +30,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/scripts/long-test-lock.sh"
+. "$ROOT/scripts/peak-window.sh"
 RUNS="${SDB_RUNS_DIR:-$ROOT/runs}"
 LANES=1
 CAREERS_FILE=""
@@ -41,6 +42,7 @@ HOLD=""
 STOP=""
 CELL="${SDB_GRID_CELL:-$ROOT/scripts/sql-cell.sh}"
 SELF_TEST=0
+SELF_TEST_CASE=""
 REAL=0
 REHEARSAL=0
 DRY_RUN=0
@@ -50,6 +52,7 @@ HARNESS="${SDB_GRID_HARNESS:-opencode}"
 BUDGET_SET=0
 LEDGER_SET=0
 STOP_SET=0
+CAP_SET=0
 
 log() { echo "[grid] $*" >&2; }
 
@@ -70,7 +73,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --careers) CAREERS_FILE="$2"; shift 2 ;;
         --lanes) LANES="$2"; shift 2 ;;
-        --cap) CAP="$2"; shift 2 ;;
+        --cap) CAP="$2"; CAP_SET=1; shift 2 ;;
         --budget) PHASE_BUDGET="$2"; BUDGET_SET=1; shift 2 ;;
         --wall) PHASE_WALL="$2"; shift 2 ;;
         --ledger) LEDGER="$2"; LEDGER_SET=1; shift 2 ;;
@@ -79,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         --cell) CELL="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
+        --case) SELF_TEST_CASE="$2"; shift 2 ;;
         --real) REAL=1; shift ;;
         --rehearsal) REHEARSAL=1; shift ;;
         --harness) HARNESS="$2"; shift 2 ;;
@@ -99,6 +103,13 @@ esac
 [[ "$MAX_PHASE" =~ ^[1-4]$ ]] || { log "--max-phase must be 1-4"; exit 2; }
 if [[ "$REAL" == "1" && "$SELF_TEST" != "1" ]]; then
     log "--real needs --self-test"
+    exit 2
+fi
+# R90 M5: a paid grid needs a cap. An explicit `--cap 0` stays an
+# informed choice; a rehearsal and a dry run spend nothing.
+if [[ "$SELF_TEST" != "1" && "$REHEARSAL" != "1" && "$DRY_RUN" != "1" \
+    && "$CAP_SET" != "1" ]]; then
+    log "a paid grid needs --cap <usd>; refusing to start uncapped"
     exit 2
 fi
 if [[ "$REHEARSAL" == "1" && "$BUDGET_SET" != "1" ]]; then
@@ -150,14 +161,17 @@ PYEOF
 }
 
 ledger_add() {
-    # career model phase worker campaign_id points cost stop token
+    # career model phase worker campaign_id points cost stop token billed
+    # R90 M2: column 7 is what the cap counts (the larger of list and the
+    # provider's bill); column 11 records the bill for audit. Old
+    # 10-column rows parse with an empty $11.
     local career="$1" model="$2" phase="$3" worker="$4" id="$5"
-    local points="$6" cost="$7" stop="$8" token="$9"
+    local points="$6" cost="$7" stop="$8" token="$9" billed="${10:-0}"
     (
         flock 200
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$career" "$model" "$phase" "$worker" "$id" "$points" "$cost" \
-            "$stop" "$(date -u +%FT%TZ)" "$HARNESS" >> "$LEDGER"
+            "$stop" "$(date -u +%FT%TZ)" "$HARNESS" "$billed" >> "$LEDGER"
         if [[ -n "$token" ]]; then rm -f "$token"; fi
     ) 200>>"$LEDGER.lock"
 }
@@ -269,6 +283,27 @@ balance_gate() {
     return 0
 }
 
+# R90 M2: before each phase reservation, an off-peak-only model waits for
+# its window (peak_state in scripts/peak-window.sh, the same code the
+# model check refuses with). The wait polls STOP so a stopped grid exits.
+wait_off_peak() {
+    local model="$1" phase="$2" state
+    [[ "$REHEARSAL" == "1" ]] && return 0
+    state="$(peak_state "$model")"
+    [[ "$state" == "off-peak" ]] && return 0
+    log "phase $phase of $model waits: $state"
+    while [[ "$state" != "off-peak" ]]; do
+        if [[ -f "$STOP" ]]; then
+            log "STOP while waiting for $model's off-peak window"
+            return 1
+        fi
+        sleep "${SDB_GRID_PEAK_POLL:-60}"
+        state="$(peak_state "$model")"
+    done
+    log "off-peak for $model; phase $phase starts"
+    return 0
+}
+
 # R68 F2: the rehearsal record lives next to the bar records, keyed by the
 # full content key, and names the exact commit it ran on.
 rehearsal_dir() {
@@ -317,12 +352,12 @@ write_rehearsal_record() {
         log "rehearsal: --max-phase $MAX_PHASE is not a full 4-phase rehearsal; no record"
         return 0
     fi
-    if ! python3 - "$LEDGER" "${#CAREERS[@]}" <<'PY'
+    if ! python3 - "$LEDGER" "${#CAREERS[@]}" "${REHEARSAL_START_LINE:-0}" <<'PY'
 import sys
-ledger, careers = sys.argv[1], int(sys.argv[2])
+ledger, careers, start = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 rows = {}
-for line in open(ledger):
-    parts = line.rstrip("\n").split("\t")
+for line in open(ledger).read().splitlines()[start:]:
+    parts = line.split("\t")
     if len(parts) < 8 or parts[0] in ("career", ""):
         continue
     try:
@@ -330,6 +365,8 @@ for line in open(ledger):
     except ValueError:
         sys.exit(f"bad ledger row: {line!r}")
     rows.setdefault(idx, {})[phase] = (parts[7], cost)
+if not rows:
+    sys.exit("no rows were written by this run")
 for idx in range(careers):
     phases = rows.get(idx, {})
     for phase in range(1, 5):
@@ -340,7 +377,7 @@ for idx in range(careers):
             sys.exit(f"career {idx} phase {phase} spent ${cost}")
 PY
     then
-        log "rehearsal: the ledger is not four ok $0 phases per career; no record"
+        log "rehearsal: the ledger's rows from this run are not four ok $0 phases per career; no record"
         return 1
     fi
     full="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
@@ -491,6 +528,63 @@ print("1" if d.get(sys.argv[2]) else "0")
 PY
 }
 
+# R90 M1: the run dir of a phase: the result's campaign id, or the newest
+# campaign dir for this model and worker created after the marker (a
+# killed cell writes no result).
+run_dir_for() {
+    local id="$1" model="$2" worker="$3" marker="$4" tag dir
+    if [[ -n "$id" && -d "$RUNS/$id" ]]; then
+        printf '%s' "$RUNS/$id"
+        return 0
+    fi
+    [[ -f "$marker" ]] || return 0
+    tag="${model//\//_}"; tag="${tag//:/_}"
+    dir="$(find "$RUNS" -maxdepth 1 -type d \
+        -name "campaign_sdb-sql_${tag}_*_w${worker}" -newer "$marker" \
+        -print 2>/dev/null | xargs -r ls -dt 2>/dev/null | head -1)"
+    printf '%s' "$dir"
+}
+
+# R90 M1/M2: a phase's spend from its own records: the list-price spend
+# (status.json live.campaign_spent, the campaign's own running total) and
+# the provider's bill (billed.jsonl's usage.cost lines). Prints
+# "<list> <bill>"; missing records are 0.
+run_spend() {
+    local dir="$1" list=0 bill=0
+    [[ -n "$dir" ]] || { printf '0 0\n'; return 0; }
+    if [[ -f "$dir/status.json" ]]; then
+        list="$(python3 - "$dir/status.json" <<'PY'
+import json, sys
+try:
+    v = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(0)
+print(float((v.get("live") or {}).get("campaign_spent") or 0.0))
+PY
+)" || list=0
+    fi
+    if [[ -f "$dir/billed.jsonl" ]]; then
+        bill="$(python3 - "$dir/billed.jsonl" <<'PY'
+import json, sys
+total = 0.0
+try:
+    lines = open(sys.argv[1], errors="replace").read().splitlines()
+except OSError:
+    raise SystemExit(0)
+for line in lines:
+    try:
+        cost = json.loads(line).get("cost")
+    except Exception:
+        continue
+    if isinstance(cost, (int, float)):
+        total += cost
+print(total)
+PY
+)" || bill=0
+    fi
+    printf '%s %s\n' "${list:-0}" "${bill:-0}"
+}
+
 # R48-2: the career's latest row, as `phase<TAB>campaign_id<TAB>stop`.
 career_state() {
     local idx="$1"
@@ -506,24 +600,45 @@ career_state() {
     ) 200>>"$LEDGER.lock"
 }
 
-# R68 F5: provider tool-call errors against agent turns in a finished
-# phase's live.log. The minimax phases (#29) carried 8-76% errors; the
-# published models at most 0.1%. A fault needs both >2% and at least 5
-# errors, so a single bad turn in a short phase is not a provider fault.
-provider_fault_counts() {
-    local log="$1" turns errors
+# R68 F5/R90 M3: the provider-fault thresholds on a finished phase's
+# final health.json (the same numbers the live check uses): 20+ turns and
+# 5+ tool errors over 2 %, or 5+ empty responses over 5 %. opencode never
+# writes the [BENCH-POLICY] turn= lines, so the live.log count is only a
+# fallback for a run with no health file. Prints "<turns>TAB<count>TAB
+# <kind>" and returns 0 on a fault.
+provider_fault_detail() {
+    local id="$1" log turns errors
+    if [[ -f "$RUNS/$id/health.json" ]]; then
+        python3 - "$RUNS/$id/health.json" <<'PY'
+import json, sys
+try:
+    h = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+turns = int(h.get("turns") or 0)
+errors = int(h.get("tool_errors") or 0)
+empty = int(h.get("empty_responses") or 0)
+if turns >= 20 and errors >= 5 and 100.0 * errors / turns > 2:
+    print("%d\t%d\terrors" % (turns, errors))
+    raise SystemExit(0)
+if turns >= 20 and empty >= 5 and 100.0 * empty / turns > 5:
+    print("%d\t%d\tempty responses" % (turns, empty))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+        return
+    fi
+    log="$RUNS/$id/live.log"
+    [[ -f "$log" ]] || return 1
     turns="$(grep -ac '\[BENCH-POLICY\] turn=' "$log" 2>/dev/null || true)"
     errors="$(grep -acE 'provider stream ended with an error|Upstream error from' "$log" 2>/dev/null || true)"
-    printf '%s\t%s\n' "${turns:-0}" "${errors:-0}"
+    [[ "${turns:-0}" -gt 0 && "${errors:-0}" -ge 5 ]] || return 1
+    awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }' || return 1
+    printf '%s\t%s\terrors\n' "$turns" "$errors"
 }
 
 provider_fault() {
-    local id="$1" log turns errors
-    log="$RUNS/$id/live.log"
-    [[ -f "$log" ]] || return 1
-    read -r turns errors < <(provider_fault_counts "$log")
-    [[ "$turns" -gt 0 && "$errors" -ge 5 ]] || return 1
-    awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'
+    provider_fault_detail "$1" >/dev/null 2>&1
 }
 
 # R74 F2: while a phase runs, read its health.json every poll (2 min in a
@@ -537,7 +652,7 @@ live_check() {
     local model="$1" worker="$2" phase="$3" cell_pid="$4" marker="$5" out="$6"
     local tag="${model//\//_}"; tag="${tag//:/_}"
     local poll="${SDB_GRID_HEALTH_POLL:-120}"
-    local dir="" vals turns errors empty p50 refr refq rate_limited
+    local dir="" vals turns errors empty p50 refr refq rate_limited ratio
     while kill -0 "$cell_pid" 2>/dev/null; do
         if [[ -z "$dir" ]]; then
             dir="$(find "$RUNS" -maxdepth 1 -type d -name "campaign_sdb-sql_${tag}_*_w${worker}" -newer "$marker" -print -quit 2>/dev/null || true)"
@@ -552,11 +667,11 @@ except Exception:
 print(int(h.get("turns") or 0), int(h.get("tool_errors") or 0),
       int(h.get("empty_responses") or 0), float(h.get("turn_secs_p50") or 0),
       int(h.get("ref_refused") or 0), int(h.get("ref_queries") or 0),
-      int(h.get("rate_limited") or 0))
+      int(h.get("rate_limited") or 0), float(h.get("billed_ratio") or 0))
 PY
 )" || vals=""
             if [[ -n "$vals" ]]; then
-                read -r turns errors empty p50 refr refq rate_limited <<< "$vals"
+                read -r turns errors empty p50 refr refq rate_limited ratio <<< "$vals"
                 if (( turns >= 20 && errors >= 5 )) \
                     && awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'; then
                     printf '%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" > "$out"
@@ -581,6 +696,17 @@ PY
                 fi
                 if (( refq > 0 )) && awk -v r="$refr" -v q="$refq" 'BEGIN { exit !(100 * r / q > 10) }'; then
                     log "live health warning: worker $worker phase $phase ref-sql ${refr}/${refq} refused"
+                fi
+                # R90 M2: a running phase billed above 1.25x list means the
+                # pin did not hold; hold the grid at its next boundary. The
+                # hold file is shared with the operator's `gap`, so an
+                # existing hold is never overwritten.
+                if awk -v r="$ratio" 'BEGIN { exit !(r > 1.25) }'; then
+                    if [[ ! -f "$HOLD" ]]; then
+                        printf 'hold: billed ratio %s (worker %s phase %s)\n' \
+                            "$ratio" "$worker" "$phase" > "$HOLD"
+                    fi
+                    log "live health warning: worker $worker phase $phase billed ratio $ratio"
                 fi
                 # R77 F2: transient 429s warn above 10; they never stop.
                 if (( rate_limited > 10 )); then
@@ -643,6 +769,9 @@ run_lane() {
                 return "$failed"
             fi
             wait_hold
+            if ! wait_off_peak "$model" "$phase"; then
+                return "$failed"
+            fi
             token="$(reserve_phase "$PHASE_BUDGET")" || {
                 log "lane $lane: cap $CAP reached (reservations count); STOP"
                 touch "$STOP"
@@ -678,13 +807,34 @@ run_lane() {
             wait "$cell_pid" || rc=$?
             kill "$monitor_pid" 2>/dev/null || true
             wait "$monitor_pid" 2>/dev/null || true
-            rm -f "$marker"
             id="$(result_get "$result" campaign_id)"
-            local got_phase got_chain points cost stop billed
+            local got_phase got_chain points cost stop billed dir spent_list spent_bill charged
             got_phase="$(result_get "$result" phase)"
             got_chain="$(result_get "$result" chain_from)"
             points="$(result_get "$result" points)"
             cost="$(result_get "$result" cost_usd)"
+            billed="$(result_get "$result" billed_usd)"
+            # R90 M1: a killed or faulted cell writes no result; read the
+            # run's own records so its spend still reaches the ledger and
+            # the cap.
+            dir="$(run_dir_for "$id" "$model" "$worker" "$marker")"
+            read -r spent_list spent_bill < <(run_spend "$dir")
+            if [[ -z "$id" && -n "$dir" ]]; then
+                id="$(basename "$dir")"
+            fi
+            # The recovered spend is a floor, not a reformat: the result's
+            # own numbers stay as they are (the hold line names them).
+            cost="${cost:-0}"
+            billed="${billed:-0}"
+            if awk -v a="$cost" -v b="${spent_list:-0}" \
+                'BEGIN { exit !(b > a) }'; then
+                cost="$spent_list"
+            fi
+            if awk -v a="$billed" -v b="${spent_bill:-0}" \
+                'BEGIN { exit !(b > a) }'; then
+                billed="$spent_bill"
+            fi
+            rm -f "$marker"
             stop="ok"
             if (( rc != 0 )); then
                 stop="cell exit $rc"
@@ -716,22 +866,29 @@ run_lane() {
             # not a model result. The ledger row says so and the run is
             # hidden before anything can publish it.
             if [[ "$stop" == "ok" && -n "$id" && "$id" != "—" ]] && provider_fault "$id"; then
-                read -r provider_turns provider_errors < <(provider_fault_counts "$RUNS/$id/live.log")
+                local fault_turns fault_count fault_kind
+                read -r fault_turns fault_count fault_kind < <(provider_fault_detail "$id")
+                provider_turns="$fault_turns"
+                provider_errors="$fault_count"
                 stop="provider_fault"
             fi
-            billed="$(result_get "$result" billed_usd)"
-            ledger_add "$idx" "$model" "$phase" "$worker" "${id:-—}" "${points:-0}" "${cost:-0}" "$stop" "$token"
+            # R90 M2: the cap counts the larger of the list spend and the
+            # provider's bill; the bill is recorded beside it.
+            charged="$(awk -v l="${cost:-0}" -v b="${billed:-0}" \
+                'BEGIN { printf "%.8f", (l > b ? l : b) }')"
+            ledger_add "$idx" "$model" "$phase" "$worker" "${id:-—}" \
+                "${points:-0}" "$charged" "$stop" "$token" "$billed"
             rm -f "$result" "$live_result"
             if [[ "$stop" == "provider_fault" ]]; then
                 mkdir -p "$RUNS/$id"
-                printf 'provider fault: %s errors in %s turns (%.2f%%)\n' \
-                    "$provider_errors" "$provider_turns" \
+                printf 'provider fault: %s %s in %s turns (%.2f%%)\n' \
+                    "$provider_errors" "${fault_kind:-errors}" "$provider_turns" \
                     "$(awk -v e="$provider_errors" -v t="$provider_turns" \
                         'BEGIN { printf "%.2f", 100 * e / t }')" \
                     > "$RUNS/$id/.portal_hidden"
-                printf 'hold: provider fault: %s errors in %s turns\n' \
-                    "$provider_errors" "$provider_turns" > "$HOLD"
-                log "lane $lane: career $idx $model phase $phase provider fault: $provider_errors errors in $provider_turns turns; hidden; hold at $HOLD"
+                printf 'hold: provider fault: %s %s in %s turns\n' \
+                    "$provider_errors" "${fault_kind:-errors}" "$provider_turns" > "$HOLD"
+                log "lane $lane: career $idx $model phase $phase provider fault: $provider_errors ${fault_kind:-errors} in $provider_turns turns; hidden; hold at $HOLD"
                 wait_hold
                 faults=$((faults + 1))
                 if [[ "$faults" -ge 2 ]]; then
@@ -758,6 +915,13 @@ run_lane() {
                 log "lane $lane: career $idx $model phase $phase stopped: $stop"
                 touch "$STOP"
                 return "$failed"
+            fi
+            # R90 M3: a clean phase on the canary lane reopens the lanes a
+            # stopped canary closed; the grid's wait loop watches .canary_ok.
+            if [[ "$worker" == "$WORKER_BASE" && -f "$RUNS/.canary_failed" ]]; then
+                rm -f "$RUNS/.canary_failed"
+                : > "$RUNS/.canary_ok"
+                log "lane $lane: the canary recovered on $model phase $phase; opening the other lanes"
             fi
             chain="$id"
             faults=0
@@ -821,10 +985,11 @@ run_grid() {
     mkdir -p "$RUNNING_DIR"
     rm -f "$STOP"
     if [[ ! -f "$LEDGER" ]]; then
-        printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\n' > "$LEDGER"
+        printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\tbilled_usd\n' > "$LEDGER"
     fi
     local pids=() lane
     local rc=0
+    local lanes_opened=0
     local canary="${SDB_GRID_CANARY:-1}"
     if [[ "$REHEARSAL" == "1" || "$DRY_RUN" == "1" ]]; then
         canary=0
@@ -850,6 +1015,7 @@ run_grid() {
                 run_lane "$lane" &
                 pids+=("$!")
             done
+            lanes_opened=1
         fi
     else
         for ((lane = 0; lane < LANES; lane++)); do
@@ -862,6 +1028,9 @@ run_grid() {
             rc=1
         fi
     done
+    if [[ "$canary" == "1" && "$LANES" -gt 1 && "$lanes_opened" -eq 0 ]]; then
+        log "the canary never opened the other lanes (see $RUNS/.canary_failed); lanes 2-$LANES did not start"
+    fi
     rm -rf "$RUNNING_DIR"
     return "$rc"
 }
@@ -871,6 +1040,343 @@ load_careers() {
     [[ -f "$file" ]] || { log "careers file not found: $file"; exit 2; }
     mapfile -t CAREERS < <(grep -vE '^[[:space:]]*(#|$)' "$file" | awk '{print $1}')
     [[ ${#CAREERS[@]} -gt 0 ]] || { log "no careers in $file"; exit 2; }
+}
+
+# R90 M1-M5: the fake cell of the named acceptance cases. It writes the
+# same records a real campaign does (status.json's live.campaign_spent,
+# billed.jsonl, health.json), can die before its result (a killed phase),
+# and can fault a phase's health on its first attempts.
+r90_write_cell() {
+    local fake="$1"
+    cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+model="$1"
+career="${SDB_CELL_CAREER:?}"
+phase="${SDB_CELL_PHASE:?}"
+worker="${SDB_CELL_WORKER:?}"
+chain="${SDB_CELL_CHAIN:-}"
+runs="${SDB_RUNS_DIR:?}"
+tag="${model//\//_}"; tag="${tag//:/_}"
+id="campaign_sdb-sql_${tag}_$(date -u +%Y%m%d_%H%M%S)_$$_w${worker}"
+mkdir -p "$runs/$id"
+if [[ -n "${SDB_R90_SPENT:-}" ]]; then
+    python3 - "$runs/$id/status.json" "$SDB_R90_SPENT" <<'PY'
+import json, sys
+json.dump({"live": {"campaign_spent": float(sys.argv[2])}},
+          open(sys.argv[1], "w"))
+PY
+fi
+if [[ -n "${SDB_R90_BILLED:-}" ]]; then
+    printf '{"id":"call-1","model":"m","cost":%s,"status":200}\n' \
+        "$SDB_R90_BILLED" > "$runs/$id/billed.jsonl"
+fi
+if [[ -n "${SDB_R90_HEALTH:-}" ]]; then
+    n=0
+    if [[ -n "${SDB_R90_FAULT_ATTEMPTS:-}" ]]; then
+        count="$runs/.r90-fault-count"
+        [[ -f "$count" ]] && n="$(cat "$count")"
+        n=$((n + 1))
+        printf '%s' "$n" > "$count"
+    fi
+    if [[ -z "${SDB_R90_FAULT_ATTEMPTS:-}" || "$n" -le "$SDB_R90_FAULT_ATTEMPTS" ]]; then
+        printf '%s\n' "$SDB_R90_HEALTH" > "$runs/$id/health.json"
+        [[ -n "${SDB_R90_LIVE_SLEEP:-}" ]] && sleep "$SDB_R90_LIVE_SLEEP"
+    fi
+fi
+if [[ "${SDB_R90_KILL_PHASE:-0}" == "$phase" ]]; then
+    kill -9 $$
+fi
+python3 - "$SDB_CELL_RESULT" "$id" "$phase" "$worker" "$chain" \
+    "${SDB_R90_COST:-0.1}" "${SDB_R90_BILLED:-0}" <<'PY'
+import json, sys
+out, cid, phase, worker, chain, cost, billed = sys.argv[1:8]
+json.dump({
+    "campaign_id": cid,
+    "phase": int(phase),
+    "chain_from": chain,
+    "worker": int(worker),
+    "chain": chain,
+    "cost_usd": float(cost),
+    "billed_usd": float(billed),
+    "points": 10.0,
+    "over_budget": False,
+    "over_wall": False,
+    "harness_fault": None,
+    "infra_error": False,
+    "wall_stop": False,
+    "phase_complete": True,
+}, open(out, "w"))
+PY
+EOF
+    chmod +x "$fake"
+}
+
+# The common setup of a named case: a fresh scenario dir, the fake cell,
+# and the ledger/hold/stop paths.
+r90_case_setup() {
+    local name="$1"
+    R90_DIR="$(mktemp -d "/tmp/sdb-grid-r90-${name}.XXXXXX")"
+    R90_RUNS="$R90_DIR/runs"
+    mkdir -p "$R90_RUNS"
+    RUNS="$R90_RUNS"
+    LEDGER="$R90_DIR/ledger.tsv"
+    HOLD="$R90_DIR/hold"
+    STOP="$R90_DIR/stop"
+    CELL="$R90_DIR/cell.sh"
+    r90_write_cell "$CELL"
+    printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\tbilled_usd\n' > "$LEDGER"
+    CAREERS_FILE="$R90_DIR/careers.txt"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    WORKER_BASE=1
+    REHEARSAL=0
+    DRY_RUN=0
+    HARNESS=opencode
+    export SDB_RUNS_DIR="$RUNS"
+    export SDB_GRID_SKIP_PREFLIGHT=1
+    export SDB_GRID_CANARY=0
+    export SDB_GRID_TRACE="$R90_DIR/trace.tsv"
+}
+
+r90_case_done() {
+    local name="$1"
+    rm -rf "${R90_DIR:-}"
+    echo "[self-test] $name"
+}
+
+# R90 M1: a killed phase's ledger row carries what it spent (status.json
+# and billed.jsonl), and the cap's next reservation counts it.
+r90_m1_killed_phase_spend_counts() {
+    r90_case_setup r90_m1_killed_phase_spend_counts
+    printf 'c1\n' > "$CAREERS_FILE"
+    export SDB_R90_SPENT=0.186 SDB_R90_BILLED=0.196 SDB_R90_KILL_PHASE=1
+    LANES=1
+    CAP=0.2
+    PHASE_BUDGET=0.15
+    MAX_PHASE=2
+    load_careers "$CAREERS_FILE"
+    run_grid || true
+    export -n SDB_R90_SPENT SDB_R90_BILLED SDB_R90_KILL_PHASE
+    unset SDB_R90_SPENT SDB_R90_BILLED SDB_R90_KILL_PHASE
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 1 ]] || {
+        echo "killed spend: expected one row, got $rows"; return 1; }
+    cost="$(awk -F'\t' 'NR == 2 { print $7 }' "$LEDGER")"
+    billed="$(awk -F'\t' 'NR == 2 { print $11 }' "$LEDGER")"
+    ok="$(awk -v c="$cost" -v b="$billed" 'BEGIN {
+        exit !(c > 0.195999 && c < 0.196001 && b > 0.195999 && b < 0.196001) }' && echo yes || true)"
+    [[ "$ok" == "yes" ]] || {
+        echo "killed spend: the row says cost '$cost' bill '$billed', want 0.196"; return 1; }
+    [[ -f "$STOP" ]] || {
+        echo "killed spend: the cap did not stop the next phase"; return 1; }
+    r90_case_done r90_m1_killed_phase_spend_counts
+}
+
+# R90 M2: the cap counts the larger of list and the provider's bill; the
+# ledger records both.
+r90_m2_cap_counts_the_real_bill() {
+    r90_case_setup r90_m2_cap_counts_the_real_bill
+    printf 'c1\n' > "$CAREERS_FILE"
+    export SDB_R90_COST=0.1 SDB_R90_BILLED=0.25
+    LANES=1
+    CAP=0.3
+    PHASE_BUDGET=0.1
+    MAX_PHASE=2
+    load_careers "$CAREERS_FILE"
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 50); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    [[ -f "$HOLD" ]] || {
+        kill "$pid" 2>/dev/null || true
+        echo "real bill: the 2.5x bill did not hold the grid"; return 1; }
+    grep -q 'hold: billed \$0.25 vs list \$0.1' "$R90_DIR/out" || {
+        kill "$pid" 2>/dev/null || true
+        echo "real bill: the hold does not name the bill: $(cat "$R90_DIR/out")"; return 1; }
+    rm -f "$HOLD"
+    wait "$pid" || true
+    unset SDB_R90_COST SDB_R90_BILLED
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 1 ]] || {
+        echo "real bill: expected the cap to stop phase 2 (1 row), got $rows"; return 1; }
+    cost="$(awk -F'\t' 'NR == 2 { print $7 }' "$LEDGER")"
+    billed="$(awk -F'\t' 'NR == 2 { print $11 }' "$LEDGER")"
+    ok="$(awk -v c="$cost" -v b="$billed" 'BEGIN {
+        exit !(c > 0.249999 && c < 0.250001 && b > 0.249999 && b < 0.250001) }' && echo yes || true)"
+    [[ "$ok" == "yes" ]] || {
+        echo "real bill: the row says cost '$cost' bill '$billed', want 0.25"; return 1; }
+    r90_case_done r90_m2_cap_counts_the_real_bill
+}
+
+# R90 M2: a phase due at peak waits for off-peak; a STOP ends the wait,
+# and the same grid starts the phase off-peak.
+r90_m2_no_phase_starts_at_peak() {
+    r90_case_setup r90_m2_no_phase_starts_at_peak
+    printf 'deepseek/deepseek-v4.1-flash-1017\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    export SDB_MODEL_CHECK_NOW="2026-11-16T07:00:00Z" SDB_GRID_PEAK_POLL=0.1
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 50); do
+        grep -q 'waits: peak' "$R90_DIR/out" 2>/dev/null && break
+        sleep 0.1
+    done
+    grep -q 'waits: peak' "$R90_DIR/out" || {
+        kill "$pid" 2>/dev/null || true; echo "peak: the grid did not wait"; return 1; }
+    if [[ -f "$SDB_GRID_TRACE" ]]; then
+        echo "peak: a phase started at peak"
+        kill "$pid" 2>/dev/null || true
+        return 1
+    fi
+    : > "$STOP"
+    wait "$pid" 2>/dev/null || true
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 0 ]] || {
+        echo "peak: a phase ran after the STOP during the wait ($rows rows)"; return 1; }
+    rm -f "$STOP"
+    export SDB_MODEL_CHECK_NOW="2026-11-16T16:00:00Z"
+    run_grid
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 1 ]] || {
+        echo "off-peak: expected one phase, got $rows"; return 1; }
+    unset SDB_MODEL_CHECK_NOW SDB_GRID_PEAK_POLL
+    r90_case_done r90_m2_no_phase_starts_at_peak
+}
+
+# R90 M3: a canary phase that faults on its first attempt is held and
+# rerun; the clean rerun reopens the lanes the stopped canary closed.
+r90_m3_recovered_canary_opens_lanes() {
+    r90_case_setup r90_m3_recovered_canary_opens_lanes
+    printf 'c1\nc2\nc3\n' > "$CAREERS_FILE"
+    export SDB_R90_HEALTH='{"turns":20,"tool_errors":5,"empty_responses":0,"turn_secs_p50":1.0,"ref_queries":0,"ref_refused":0,"rate_limited":0,"billed_ratio":1.0}'
+    export SDB_R90_FAULT_ATTEMPTS=1 SDB_R90_LIVE_SLEEP=0.6
+    export SDB_GRID_HEALTH_POLL=0.1 SDB_GRID_CANARY=1
+    LANES=3
+    CAP=0
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    [[ -f "$HOLD" ]] || {
+        kill "$pid" 2>/dev/null || true
+        echo "canary: the faulted phase did not hold"; return 1; }
+    [[ -f "$RUNS/.canary_failed" ]] || {
+        kill "$pid" 2>/dev/null || true
+        echo "canary: the fault did not record .canary_failed"; return 1; }
+    rm -f "$HOLD"
+    rc=0
+    wait "$pid" || rc=$?
+    [[ "$rc" -eq 0 ]] || {
+        echo "canary: the grid did not finish after the recovery (rc=$rc)"; return 1; }
+    workers="$(awk -F'\t' 'NR > 1 { print $4 }' "$LEDGER" | sort -u | paste -sd, -)"
+    [[ "$workers" == "1,2,3" ]] || {
+        echo "canary: a recovered canary did not open the lanes (workers $workers)"; return 1; }
+    [[ ! -f "$RUNS/.canary_failed" ]] || {
+        echo "canary: .canary_failed survived the clean rerun"; return 1; }
+    grep -q 'canary recovered' "$R90_DIR/out" || {
+        echo "canary: the recovery was not logged"; return 1; }
+    unset SDB_R90_HEALTH SDB_R90_FAULT_ATTEMPTS SDB_R90_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_GRID_CANARY
+    r90_case_done r90_m3_recovered_canary_opens_lanes
+}
+
+# R90 M3: a finished phase's final health.json (not the opencode-less
+# [BENCH-POLICY] lines) decides the provider fault.
+r90_m3_post_phase_fault_reads_health() {
+    r90_case_setup r90_m3_post_phase_fault_reads_health
+    printf 'c1\n' > "$CAREERS_FILE"
+    export SDB_R90_HEALTH='{"turns":33,"tool_errors":5,"empty_responses":0,"turn_secs_p50":1.0,"ref_queries":0,"ref_refused":0,"rate_limited":0,"billed_ratio":1.0}'
+    LANES=1
+    CAP=0
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    [[ -f "$HOLD" ]] || {
+        kill "$pid" 2>/dev/null || true
+        echo "health fault: no hold"; return 1; }
+    grep -q 'provider fault' "$R90_DIR/out" || {
+        kill "$pid" 2>/dev/null || true
+        echo "health fault: the grid did not name the provider fault"; return 1; }
+    id="$(awk -F'\t' 'NR == 2 { print $5 }' "$LEDGER")"
+    [[ -f "$RUNS/$id/.portal_hidden" ]] || {
+        kill "$pid" 2>/dev/null || true
+        echo "health fault: the phase was not hidden"; return 1; }
+    grep -q '5 errors in 33 turns' "$RUNS/$id/.portal_hidden" || {
+        kill "$pid" 2>/dev/null || true
+        echo "health fault: the hidden file's counts are wrong: $(cat "$RUNS/$id/.portal_hidden")"
+        return 1; }
+    : > "$STOP"
+    rm -f "$HOLD"
+    wait "$pid" 2>/dev/null || true
+    unset SDB_R90_HEALTH
+    r90_case_done r90_m3_post_phase_fault_reads_health
+}
+
+# R90 M5: a rehearsal on a ledger whose careers are already complete runs
+# nothing and writes no PASS record.
+r90_m5_stale_rehearsal_ledger_never_passes() {
+    r90_case_setup r90_m5_stale_rehearsal_ledger_never_passes
+    printf 'c1\n' > "$CAREERS_FILE"
+    for p in 1 2 3 4; do
+        printf '0\tc1\t%s\t1\told-p%s\t10\t0\tok\tx\topencode\t0\n' "$p" "$p" >> "$LEDGER"
+    done
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0
+    MAX_PHASE=4
+    REHEARSAL=1
+    export SDB_REHEARSAL_DIR="$R90_DIR/gates"
+    export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:r90"
+    load_careers "$CAREERS_FILE"
+    REHEARSAL_START_LINE="$(wc -l < "$LEDGER")"
+    run_grid
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 4 ]] || {
+        echo "stale ledger: the grid wrote rows for a complete career ($rows)"; return 1; }
+    if write_rehearsal_record 2>"$R90_DIR/rec.err"; then
+        echo "stale ledger: a PASS record was written for content that did not run"; return 1
+    fi
+    record="$(rehearsal_record_path "$(cd "$ROOT" && scripts/flake-bar.sh --key)")"
+    [[ ! -f "$record" ]] || {
+        echo "stale ledger: the record exists at $record"; return 1; }
+    grep -q 'no rows were written by this run' "$R90_DIR/rec.err" || {
+        echo "stale ledger: the refusal did not say why: $(cat "$R90_DIR/rec.err")"; return 1; }
+    unset SDB_REHEARSAL_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
+    REHEARSAL=0
+    r90_case_done r90_m5_stale_rehearsal_ledger_never_passes
+}
+
+# R90 M5: a paid grid without --cap refuses before anything runs.
+r90_m5_paid_grid_needs_a_cap() {
+    r90_case_setup r90_m5_paid_grid_needs_a_cap
+    printf 'c1\n' > "$CAREERS_FILE"
+    rc=0
+    out="$(SDB_GRID_SKIP_PREFLIGHT=1 SDB_GRID_CELL="$CELL" \
+        "$ROOT/scripts/grid.sh" --careers "$CAREERS_FILE" --lanes 1 2>&1)" || rc=$?
+    [[ "$rc" -eq 2 ]] || {
+        echo "paid cap: the grid exited $rc without --cap, want 2: $out"; return 1; }
+    grep -q 'needs --cap' <<<"$out" || {
+        echo "paid cap: the refusal did not say why: $out"; return 1; }
+    [[ ! -f "$SDB_GRID_TRACE" ]] || {
+        echo "paid cap: a phase ran without a cap"; return 1; }
+    r90_case_done r90_m5_paid_grid_needs_a_cap
 }
 
 self_test() {
@@ -973,6 +1479,13 @@ EOF
     chmod +x "$balance"
     SDB_GRID_BALANCE_CMD="$balance"
     export SDB_GRID_BALANCE_CMD
+    if [[ -n "${SELF_TEST_CASE:-}" ]]; then
+        case "$SELF_TEST_CASE" in
+            r90_m1_*|r90_m2_*|r90_m3_*|r90_m5_*) "$SELF_TEST_CASE" ;;
+            *) echo "unknown self-test case: $SELF_TEST_CASE" >&2; return 2 ;;
+        esac
+        return 0
+    fi
 
     # 1) three lanes, six careers: 24 rows, phases in order, one worker per
     # lane.
@@ -2138,6 +2651,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 mkdir -p "$RUNS"
 : > "$RUNS/.grid-audit-marker"
+# R90 M5: the rehearsal record counts only the rows this run writes.
+REHEARSAL_START_LINE=0
+if [[ "$REHEARSAL" == "1" && -f "$LEDGER" ]]; then
+    REHEARSAL_START_LINE="$(wc -l < "$LEDGER")"
+fi
 run_grid
 if [[ "$REHEARSAL" == "1" ]]; then
     write_rehearsal_record

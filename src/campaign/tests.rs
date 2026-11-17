@@ -5072,3 +5072,115 @@ async fn r89_f7_unreached_ticket_is_caught_up_later() {
         "the 16 runs once the 11 passes: {seen:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R90 M1-M5: the grid driver's named acceptance cases. The driver is bash;
+// each test runs the real script's one case, so the cargo test the gate
+// runs is the acceptance test and seen-failing patches the script.
+// ---------------------------------------------------------------------------
+
+fn r90_grid_case(name: &str) {
+    let root = crate::config::get_repo_root();
+    // The grid's live check leaves a short-lived `sleep` child behind
+    // when a phase ends; a piped `output()` would wait for it to close
+    // the pipe. Files let the case's own process decide when it is done.
+    let dir = std::env::temp_dir().join(format!("sdb-r90-grid-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_path = dir.join("out");
+    let err_path = dir.join("err");
+    let status = std::process::Command::new("bash")
+        .arg(root.join("scripts/grid.sh"))
+        .args(["--self-test", "--case", name])
+        .env("SDB_GRID_SKIP_PREFLIGHT", "1")
+        .stdout(std::fs::File::create(&out_path).unwrap())
+        .stderr(std::fs::File::create(&err_path).unwrap())
+        .status()
+        .expect("run scripts/grid.sh --self-test --case");
+    let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(status.success(), "grid case {name} failed:\n{out}\n{err}");
+}
+
+#[test]
+fn r90_m1_killed_phase_spend_counts() {
+    r90_grid_case("r90_m1_killed_phase_spend_counts");
+}
+
+#[test]
+fn r90_m2_cap_counts_the_real_bill() {
+    r90_grid_case("r90_m2_cap_counts_the_real_bill");
+}
+
+#[test]
+fn r90_m2_no_phase_starts_at_peak() {
+    r90_grid_case("r90_m2_no_phase_starts_at_peak");
+}
+
+#[test]
+fn r90_m3_recovered_canary_opens_lanes() {
+    r90_grid_case("r90_m3_recovered_canary_opens_lanes");
+}
+
+#[test]
+fn r90_m3_post_phase_fault_reads_health() {
+    r90_grid_case("r90_m3_post_phase_fault_reads_health");
+}
+
+#[test]
+fn r90_m5_stale_rehearsal_ledger_never_passes() {
+    r90_grid_case("r90_m5_stale_rehearsal_ledger_never_passes");
+}
+
+#[test]
+fn r90_m5_paid_grid_needs_a_cap() {
+    r90_grid_case("r90_m5_paid_grid_needs_a_cap");
+}
+
+/// R90 M3: the chain exemption needs the fault's reason: a provider-fault
+/// hide and a live stop free the chain; an operator/comparison "hidden"
+/// note does not (a genuine result still uses its chain).
+#[test]
+fn r90_m3_hidden_fault_markers_do_not_use_the_chain() {
+    let dir = std::env::temp_dir().join(format!("sdb-r90-markers-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let runs = dir.join("runs");
+    let make = |name: &str, marker: Option<(&str, &str)>| {
+        let d = runs.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("status.json"),
+            serde_json::json!({
+                "state": "done",
+                "chain_from": "campaign_root",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        if let Some((file, text)) = marker {
+            std::fs::write(d.join(file), text).unwrap();
+        }
+    };
+    make(
+        "campaign_provider",
+        Some((".portal_hidden", "provider fault: 5 errors in 20 turns\n")),
+    );
+    make(
+        "campaign_live_stop",
+        Some((".live_stop", "live provider fault: 5 errors in 20 turns\n")),
+    );
+    make("campaign_comparison", Some((".portal_hidden", "hidden\n")));
+    make("campaign_plain", None);
+    // Only the comparison cell and the plain cell claim the chain.
+    assert_eq!(
+        chain_already_used(&runs, "campaign_root").as_deref(),
+        Some("campaign_comparison")
+    );
+    std::fs::remove_dir_all(runs.join("campaign_comparison")).unwrap();
+    assert_eq!(
+        chain_already_used(&runs, "campaign_root").as_deref(),
+        Some("campaign_plain")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

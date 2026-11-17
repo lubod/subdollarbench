@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::sandbox::omp::{
     AgentRunSpec, OmpBillingError, OmpExecutionError, OmpRunner, OmpSessionStats,
@@ -899,19 +899,56 @@ impl BillingProxy {
         s
     }
 
+    /// R90 M4: the directory of in-flight request markers the sidecar
+    /// keeps beside the log.
+    fn open_dir(&self) -> PathBuf {
+        PathBuf::from(format!("{}.open", self.log.display()))
+    }
+
+    /// R90 M4: wait (bounded) until the sidecar has no request open, so a
+    /// call the session's end interrupted has time to write its record.
+    /// Returns the markers still open at the deadline (named, never lost
+    /// without a word).
+    fn wait_idle(&self, max: Duration) -> Vec<String> {
+        let dir = self.open_dir();
+        let deadline = Instant::now() + max;
+        loop {
+            let names: Vec<String> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if names.is_empty() || Instant::now() >= deadline {
+                return names;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     /// True when the sidecar is gone (a mid-run death is a harness fault,
-    /// never a graded result).
+    /// never a graded result). R90 M4: a transient `docker inspect`
+    /// failure is not a death: retry, and require a successful
+    /// `State.Running == false` to say the sidecar died.
     fn exited(&self) -> bool {
         if self.name.is_empty() {
             return false;
         }
-        let out = Command::new("docker")
-            .args(["inspect", "-f", "{{.State.Running}}", &self.name])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() != "true",
-            _ => true,
+        for attempt in 0..3u64 {
+            let out = Command::new("docker")
+                .args(["inspect", "-f", "{{.State.Running}}", &self.name])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    return String::from_utf8_lossy(&o.stdout).trim() == "false";
+                }
+                _ => std::thread::sleep(Duration::from_millis(100 * (attempt + 1))),
+            }
         }
+        // Unknown, not dead: the missing bill records (named by the
+        // caller) are the evidence to act on.
+        false
     }
 }
 
@@ -1472,6 +1509,22 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     &effective_model,
                     &mut reconcile_log,
                 );
+            }
+            // R90 M4: the session ended while the sidecar may still be
+            // in its next call; wait for its record (bounded) before
+            // reading the bill, and name any call that never landed.
+            let wait_start = Instant::now();
+            let still_open = billing.wait_idle(Duration::from_secs(90));
+            if wait_start.elapsed() >= Duration::from_millis(500) {
+                let _ = retry_tx.send(format!(
+                    "[BILLED] waited {:.1}s for the open call's record",
+                    wait_start.elapsed().as_secs_f64()
+                ));
+            }
+            for name in &still_open {
+                let _ = retry_tx.send(format!(
+                    "[BILLED] no record for the request open when the session ended: {name}"
+                ));
             }
             // R85 F1: the proxy's billed.jsonl is the run's real bill
             // (cumulative across attempts); a call with no usage.cost is

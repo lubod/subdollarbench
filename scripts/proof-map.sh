@@ -357,7 +357,10 @@ self_test() {
     echo "[self-test] every core proof is in live-proofs.sh"
 
     # 4) Fixture diffs: the map selects what the change puts at risk.
-    mkdir -p "$repo/src/pipeline" "$repo/src/verifier/sql" "$repo/docs" "$repo/scripts"
+    mkdir -p "$repo/src/pipeline" "$repo/src/verifier/sql" \
+        "$repo/src/verifier/sql/perfscore" "$repo/docs" "$repo/scripts"
+    # R90 M5: live-proofs.sh reads this file; the fixture must have it.
+    : >"$repo/src/verifier/sql/perfscore/tests.rs"
     cp "$PROOF_MAP_ROOT/scripts/graded-paths.txt" \
         "$PROOF_MAP_ROOT/scripts/proof-map.txt" \
         "$PROOF_MAP_ROOT/scripts/ready-proofs.txt" \

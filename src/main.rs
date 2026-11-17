@@ -1558,6 +1558,146 @@ mod tests {
         std::env::remove_var("SDB_CAMPAIGN_TEST_WORKER_MAX");
         drop(env);
     }
+
+    /// R90 M3 live: a phase-3 rerun on a chain whose phase-3 successor was
+    /// hidden as a provider fault starts and chains from phase 2. The
+    /// stub agent is the rehearsal reference candidate the phase-2 chain
+    /// carries.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test-only serialization guard
+    async fn r90_m3_fault_rerun_any_phase() {
+        static SQL_PERF_LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        let real_campaign =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("campaigns/sdb-sql");
+        let env = SdbEnv::new("r90m3rerun").await;
+        fs::create_dir_all(env.root.join("campaigns")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_campaign, env.root.join("campaigns/sdb-sql")).unwrap();
+        let runs = env.root.join("runs");
+        fs::create_dir_all(&runs).unwrap();
+        std::env::set_var("SDB_CAMPAIGN_TEST_WORKER_MAX", "99");
+        let p2_name = "campaign_sdb-sql_test-model_p2";
+        let p2 = runs.join(p2_name);
+        let workspace = p2.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let port = subdollarbench::web::server::worker_port(
+            subdollarbench::config::TaskType::Sql.default_port(),
+            9,
+        );
+        subdollarbench::verifier::sql::ref_server::write_reference(&workspace, port).unwrap();
+        let image = subdollarbench::sandbox::omp_updater::sandbox_image_id();
+        let rollup = serde_json::json!({
+            "campaign_id": p2_name,
+            "name": "sdb-sql",
+            "model": "test-model",
+            "harness": "omp",
+            "effort": "low",
+            "task": "sql",
+            "started_at": "2026-11-17T00:00:00Z",
+            "finished_at": "2026-11-17T00:10:00Z",
+            "stages": [],
+            "reached": 10,
+            "regression_free_tickets": 10,
+            "total_cost_usd": 0.0,
+            "billed_usd": 0.0,
+            "over_budget": false,
+            "over_wall": false,
+            "rules_version": subdollarbench::report::rules::RULES_VERSION,
+            "phase": 2,
+            "points": 10.0,
+            "max_points": 10.0,
+            "sandbox_image": image,
+            "budget_usd": 0.99,
+            "wall_min": 0,
+            "worker": 9,
+            "concurrent_cells": 1
+        });
+        fs::write(
+            p2.join("status.json"),
+            serde_json::json!({
+                "state": "done",
+                "chain_from": "campaign_sdb-sql_test-model_p1",
+                "rollup": rollup,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut ladder = subdollarbench::campaign::LadderState::default();
+        for id in 0..=10u32 {
+            ladder.passed.push(id);
+            ladder
+                .outcomes
+                .insert(id, subdollarbench::campaign::LadderOutcome::Full);
+            ladder.best.insert(id, true);
+        }
+        fs::write(
+            p2.join("ladder_state.json"),
+            serde_json::to_string(&ladder).unwrap(),
+        )
+        .unwrap();
+        // The phase-3 successor the grid hid as a provider fault: it must
+        // not use up its chain.
+        let p3old = runs.join("campaign_sdb-sql_test-model_p3");
+        fs::create_dir_all(p3old.join("workspace")).unwrap();
+        fs::write(
+            p3old.join(".portal_hidden"),
+            "provider fault: 5 errors in 20 turns\n",
+        )
+        .unwrap();
+        fs::write(
+            p3old.join("status.json"),
+            serde_json::json!({
+                "state": "done",
+                "chain_from": p2_name,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        main_campaign::run(
+            "sdb-sql".to_string(),
+            "test-model".to_string(),
+            "low".to_string(),
+            Harness::Omp,
+            0.99,
+            None,
+            120,
+            None,
+            false,
+            true,
+            false,
+            None,
+            Some(3),
+            Some(p2_name.to_string()),
+            None,
+            9,
+        )
+        .await
+        .expect("the phase-3 rerun starts");
+        let mut dirs: Vec<_> = fs::read_dir(&runs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.join("campaign.json").is_file()
+                    && p.file_name().unwrap().to_string_lossy() != p2_name
+                    && p.file_name().unwrap().to_string_lossy() != "campaign_sdb-sql_test-model_p3"
+            })
+            .collect();
+        dirs.sort();
+        let new = dirs.pop().expect("the rerun's campaign dir");
+        let rollup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(new.join("campaign.json")).unwrap()).unwrap();
+        assert_eq!(rollup["phase"], 3, "{rollup}");
+        assert_eq!(rollup["chain_from"], p2_name, "{rollup}");
+        assert_eq!(rollup["rehearsal"], true, "{rollup}");
+        assert!(
+            !rollup["stages"].as_array().expect("stages").is_empty(),
+            "the rerun started but verified nothing: {rollup}"
+        );
+        std::env::remove_var("SDB_CAMPAIGN_TEST_WORKER_MAX");
+        drop(env);
+    }
 }
 
 #[cfg(test)]

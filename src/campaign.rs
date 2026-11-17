@@ -842,6 +842,15 @@ pub fn chain_already_used(runs_dir: &std::path::Path, chain_id: &str) -> Option<
         if chain_from.as_deref() != Some(chain_id) && refork_of.as_deref() != Some(chain_id) {
             continue;
         }
+        // R90 M3: a cell the grid hid as a provider fault or killed on a
+        // live fault is a non-result too, so its phase can be rerun on the
+        // same chain. The marker alone is not enough: a comparison cell is
+        // hidden with a plain "hidden" note (R79 F4) and a genuine result
+        // still uses its chain.
+        let provider_hidden = std::fs::read_to_string(e.path().join(".portal_hidden"))
+            .map(|t| t.contains("provider fault"))
+            .unwrap_or(false);
+        let live_stopped = e.path().join(".live_stop").is_file();
         let faulted = rollup
             .as_ref()
             .and_then(|r| r.get("harness_fault"))
@@ -856,7 +865,9 @@ pub fn chain_already_used(runs_dir: &std::path::Path, chain_id: &str) -> Option<
                 .as_ref()
                 .and_then(|s| s.pointer("/rollup/harness_fault"))
                 .filter(|v| !v.is_null())
-                .is_some();
+                .is_some()
+            || provider_hidden
+            || live_stopped;
         if faulted {
             continue;
         }

@@ -10,6 +10,7 @@ import os
 import socket
 import threading
 import urllib.parse
+import uuid
 
 PORT = int(__import__("sys").argv[1]) if len(__import__("sys").argv) > 1 else 3128
 ALLOW = set(
@@ -24,6 +25,12 @@ ALLOW = set(
 # the runner's sidecar sets BILL_LOG; the egress-only sidecar keeps the
 # plain allowlist proxy behaviour.
 BILL_LOG = os.environ.get("BILL_LOG", "")
+# R90 M4: one marker file per in-flight call beside the log. The runner
+# waits for this directory to empty before it reads the bill; a marker
+# that survives a sidecar crash names the call whose record was lost.
+BILL_OPEN = (BILL_LOG + ".open") if BILL_LOG else ""
+if BILL_OPEN:
+    os.makedirs(BILL_OPEN, exist_ok=True)
 BILL_UPSTREAM = os.environ.get("BILL_UPSTREAM", "https://openrouter.ai")
 UP = urllib.parse.urlsplit(BILL_UPSTREAM)
 
@@ -95,6 +102,14 @@ def handle_billing(client, head, method, path):
                 body.decode("utf-8", "replace")).get("model")
         except Exception:
             request_model = None
+    marker = ""
+    if BILL_OPEN:
+        marker = os.path.join(BILL_OPEN, "%d-%s" % (os.getpid(), uuid.uuid4().hex))
+        try:
+            with open(marker, "w") as mf:
+                mf.write("%s %s\n" % (method, path))
+        except OSError:
+            marker = ""
     fwd = {k: headers[k] for k in ("authorization", "content-type", "accept")
            if k in headers}
     fwd_path = (UP.path.rstrip("/") + path) if UP.path else path
@@ -171,6 +186,11 @@ def handle_billing(client, head, method, path):
                 f.write(json.dumps(
                     billing_record(bytes(resp_body), status, request_model))
                     + "\n")
+        except OSError:
+            pass
+    if marker:
+        try:
+            os.remove(marker)
         except OSError:
             pass
 

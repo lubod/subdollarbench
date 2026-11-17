@@ -147,40 +147,9 @@ wrong_pin_for() {
     return 1
 }
 
-# R83 F3: minimax and deepseek are priced and run off-peak only (R75-1,
-# DECISIONS #30). minimax's window is the one PRICE_OVERRIDES names
-# (`src/cost/calculator.rs`: "2x 01:00-15:00 UTC"). deepseek's is its
-# published pricing page: peak 01:00-04:00 and 06:00-10:00 UTC, Monday
-# through Friday; weekends and Chinese public holidays are off-peak
-# (the check does not know the holiday calendar, so a holiday check may
-# wait a day). A peak-time check refuses with the window; the record is
-# not written.
-peak_state() {
-    local id="$1" now dow hhmm
-    now="${SDB_MODEL_CHECK_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-    dow="$(date -u -d "$now" +%u 2>/dev/null || echo 0)"
-    hhmm="$(date -u -d "$now" +%H:%M 2>/dev/null || echo 00:00)"
-    case "$id" in
-        minimax/*)
-            if [[ "$hhmm" > "00:59" && "$hhmm" < "15:00" ]]; then
-                echo "peak 01:00-15:00 UTC (off-peak 15:00-01:00 UTC)"
-            else
-                echo "off-peak"
-            fi
-            ;;
-        deepseek/*)
-            # Peak 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday.
-            if [[ "$dow" -le 5 ]] && {
-                { [[ "$hhmm" > "00:59" && "$hhmm" < "04:00" ]] || \
-                  [[ "$hhmm" > "05:59" && "$hhmm" < "10:00" ]]; }; }; then
-                echo "peak 01:00-04:00 and 06:00-10:00 UTC on weekdays (off-peak all other hours, weekends and Chinese public holidays)"
-            else
-                echo "off-peak"
-            fi
-            ;;
-        *) echo "off-peak" ;;
-    esac
-}
+# R83 F3/R90 M2: the peak window lives in one place, scripts/peak-window.sh,
+# so the model check's refusal and the grid's wait cannot drift apart.
+. "$ROOT/scripts/peak-window.sh"
 
 # R79-18: a settled canned usage series for the self-test: six equal
 # reads, the 30 s settle window at the live 5 s interval.

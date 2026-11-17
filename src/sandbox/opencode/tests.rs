@@ -888,6 +888,32 @@ fn r85_run_with_stub(
     std::path::PathBuf,
     crate::sandbox::docker::SandboxManager,
 ) {
+    r85_run_with_stub_limits(
+        base,
+        case,
+        prompt,
+        crate::sandbox::omp::AgentExecutionLimits {
+            max_turns: Some(3),
+            max_budget_usd: Some(0.05),
+            max_effective_usd: None,
+            timeout_seconds: Some(120),
+        },
+    )
+}
+
+/// R90 M4: the same real-cell run with the caller's limits (the in-flight
+/// billing test ends the session while the stub's call is still open).
+fn r85_run_with_stub_limits(
+    base: &std::path::Path,
+    case: &str,
+    prompt: &str,
+    limits: crate::sandbox::omp::AgentExecutionLimits,
+) -> (
+    Result<OmpSessionStats>,
+    Vec<String>,
+    std::path::PathBuf,
+    crate::sandbox::docker::SandboxManager,
+) {
     let id = format!(
         "r85-f1-{}-{}",
         std::process::id(),
@@ -916,12 +942,7 @@ fn r85_run_with_stub(
             prompt,
             workdir: &ws,
             api_key: Some("sk-covtest"),
-            limits: crate::sandbox::omp::AgentExecutionLimits {
-                max_turns: Some(3),
-                max_budget_usd: Some(0.05),
-                max_effective_usd: None,
-                timeout_seconds: Some(120),
-            },
+            limits,
             effort: Some("high"),
             network: Some(&net),
             task: None,
@@ -991,6 +1012,46 @@ fn r85_f1_billed_from_the_calls() {
             .any(|l| l.contains("[BILLED]") && l.contains("OpenRouter's charge")),
         "{logs:?}"
     );
+    mgr.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R90 M4: a session ended (its timeout) while the stub's slow call is
+/// still open still bills that call: the runner waits for the sidecar's
+/// in-flight record before it reads the bill.
+#[test]
+fn r90_m4_in_flight_call_is_billed() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r90-m4-inflight");
+    let limits = crate::sandbox::omp::AgentExecutionLimits {
+        max_turns: Some(3),
+        max_budget_usd: Some(0.05),
+        max_effective_usd: None,
+        // The stub's slow case sleeps 3 s; the session ends first.
+        timeout_seconds: Some(1),
+    };
+    let (res, logs, _stub_log, mgr) =
+        r85_run_with_stub_limits(&base, "slow", "the slow call", limits);
+    // A timed-out session is an error envelope, but its partial stats
+    // carry the bill the wait recovered.
+    let err = res.expect_err("a timed-out session is not a clean result");
+    let exec = err
+        .downcast_ref::<OmpExecutionError>()
+        .expect("OmpExecutionError");
+    let st = &exec.partial_stats;
+    let billed_log = std::fs::read_to_string(base.join("billed.jsonl")).unwrap_or_default();
+    assert_eq!(
+        billed_log.lines().count(),
+        1,
+        "the in-flight call's record is missing: {billed_log:?}\n{logs:?}"
+    );
+    assert!(
+        (st.billed_usd - 0.001).abs() < 1e-12,
+        "the runner billed {} for the in-flight call, want 0.001: {logs:?}",
+        st.billed_usd
+    );
+    // The log line is best effort (the forwarder may drain after the
+    // error envelope); the record and the billed total are the evidence.
     mgr.cleanup();
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -1790,6 +1851,27 @@ wait_for_kill() {
 }
 
 case "$1" in
+  inspect)
+    n=0
+    if [ -n "$state" ] && [ -f "${state}.inspect" ]; then n=$(cat "${state}.inspect"); fi
+    n=$((n + 1))
+    if [ -n "$state" ]; then printf '%s' "$n" > "${state}.inspect"; fi
+    case "$scenario" in
+      inspect_blip)
+        if [ "$n" -le 1 ]; then exit 1; fi
+        printf 'true\n'
+        exit 0
+        ;;
+      inspect_dead)
+        printf 'false\n'
+        exit 0
+        ;;
+      *)
+        printf 'true\n'
+        exit 0
+        ;;
+    esac
+    ;;
   rm|kill)
     if [ -n "$state" ] && [ -f "$started" ]; then : > "$kill"; fi
     exit 0
@@ -2082,6 +2164,33 @@ fn oc_driver() {
         let (res, _) = run_oc_scenario("billing_stderr", &root, covtest_limits(10, 1.0, 10), None);
         let err = res.expect_err("stderr 402 must trip");
         assert!(err.downcast_ref::<OmpBillingError>().is_some());
+        passed += 1;
+    }
+
+    // 5c. R90 M4: one failed `docker inspect` is not a sidecar death; a
+    //     successful State.Running == false is.
+    {
+        std::env::set_var("SDB_COVTEST_STATE", root.join("state-inspect"));
+        let log = root.join("billed.jsonl");
+        std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_blip");
+        let proxy = BillingProxy {
+            name: "covtest-egress".to_string(),
+            log: log.clone(),
+            start_offset: 0,
+            url: String::new(),
+        };
+        assert!(
+            !proxy.exited(),
+            "one inspect failure must not read as the sidecar's death"
+        );
+        std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_dead");
+        let dead = BillingProxy {
+            name: "covtest-egress".to_string(),
+            log,
+            start_offset: 0,
+            url: String::new(),
+        };
+        assert!(dead.exited(), "a running=false inspect is a death");
         passed += 1;
     }
 
