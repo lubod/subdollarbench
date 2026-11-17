@@ -783,6 +783,10 @@ impl Drop for RunDirs {
 struct BillingProxy {
     name: String,
     log: PathBuf,
+    /// R88 F2: the log's length when this session started. The file is
+    /// kept across sessions (a phase's `billed.jsonl` is every record it
+    /// wrote), so this session's bill is the lines after this offset.
+    start_offset: u64,
     url: String,
 }
 
@@ -796,7 +800,10 @@ struct BilledSummary {
 impl BillingProxy {
     fn start(network: Option<&str>, run_dir: &std::path::Path, upstream: &str) -> Result<Self> {
         let log = run_dir.join("billed.jsonl");
-        let _ = std::fs::remove_file(&log);
+        // R88 F2: never delete the log at a session start. A phase's
+        // `billed.jsonl` holds every record it wrote; a session's bill is
+        // read from this offset, so earlier sessions are not double-counted.
+        let start_offset = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
         if std::env::var("SDB_OPENCODE_BASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -807,6 +814,7 @@ impl BillingProxy {
             return Ok(Self {
                 name: String::new(),
                 log,
+                start_offset,
                 url: String::new(),
             });
         }
@@ -821,6 +829,7 @@ impl BillingProxy {
             return Ok(Self {
                 name: String::new(),
                 log,
+                start_offset,
                 url: String::new(),
             });
         };
@@ -829,6 +838,7 @@ impl BillingProxy {
             return Ok(Self {
                 name: String::new(),
                 log,
+                start_offset,
                 url: String::new(),
             });
         };
@@ -845,6 +855,7 @@ impl BillingProxy {
         Ok(Self {
             name: mgr.egress_proxy_name(),
             log,
+            start_offset,
             url,
         })
     }
@@ -857,11 +868,21 @@ impl BillingProxy {
         }
     }
 
-    /// Read the whole run's log (cumulative across attempts); a call with
-    /// no `usage.cost` is counted and named, never silently priced.
+    /// Read this session's part of the log (from `start_offset`); a call
+    /// with no `usage.cost` is counted and named, never silently priced.
     fn read(&self) -> BilledSummary {
-        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        use std::io::{Read, Seek, SeekFrom};
         let mut s = BilledSummary::default();
+        let Ok(mut f) = std::fs::File::open(&self.log) else {
+            return s;
+        };
+        if f.seek(SeekFrom::Start(self.start_offset)).is_err() {
+            return s;
+        }
+        let mut text = String::new();
+        if f.read_to_string(&mut text).is_err() {
+            return s;
+        }
         for line in text.lines() {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
                 continue;

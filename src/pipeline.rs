@@ -501,6 +501,13 @@ fn measure_rust_coverage(
 export RUSTFLAGS="-C instrument-coverage"
 export LLVM_PROFILE_FILE="/tmp/sdb-cov-%p-%m.profraw"
 rm -f /tmp/sdb-cov*.profraw /tmp/sdb-cov.profdata /tmp/sdb-cov-bins.json
+# R88 F1: measure on a fresh build outside /workspace. Cargo 1.100's
+# build-dir layout can reuse a candidate's plain test binaries (a stale
+# `target/` made the suite binary uninstrumented and the report held no
+# src/ lines), and a planted `target/` could steer the reading. The
+# directory is removed before every measurement.
+export CARGO_TARGET_DIR="/tmp/sdb-cov-target"
+rm -rf "$CARGO_TARGET_DIR"
 cargo test --release --offline --locked --tests
 cargo test --release --offline --locked --no-run --message-format=json > /tmp/sdb-cov-bins.json
 TOOLS="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
@@ -520,24 +527,33 @@ for line in open('/tmp/sdb-cov-bins.json'):
 if not bins:
     print('no instrumented test binaries', file=sys.stderr)
     sys.exit(2)
-out = subprocess.run([llvm_cov, 'export', '-format=text',
-                      '-instr-profile=/tmp/sdb-cov.profdata', *bins],
-                     capture_output=True, text=True)
+# R88 F1: pass every test binary to one export with --object. A single
+# export whose binaries are positional arguments reads only the first
+# one's files, so which integration test cargo reported first decided
+# whether src/ was in the report (the stale target's `no source lines
+# under src/`). --object merges every binary's coverage, so a file tested
+# by two binaries is counted once with the union of its lines.
+args = [llvm_cov, 'export', '-format=text',
+        '-instr-profile=/tmp/sdb-cov.profdata', bins[0]]
+for exe in bins[1:]:
+    args += ['--object', exe]
+out = subprocess.run(args, capture_output=True, text=True)
 if out.returncode != 0:
     print(out.stderr, file=sys.stderr)
     sys.exit(out.returncode)
 data = json.loads(out.stdout)
 total = covered = 0
-for f in data['data'][0]['files']:
-    name = f['filename']
-    if '/workspace/src/' not in name:
-        continue
-    parts = name.split('/')
-    if 'tests' in parts or parts[-1].startswith('test_') or parts[-1].endswith('_test.rs'):
-        continue
-    lines = f['summary']['lines']
-    total += lines['count']
-    covered += lines['covered']
+for d in data['data']:
+    for f in d['files']:
+        name = f['filename']
+        if '/workspace/src/' not in name:
+            continue
+        parts = name.split('/')
+        if 'tests' in parts or parts[-1].startswith('test_') or parts[-1].endswith('_test.rs'):
+            continue
+        lines = f['summary']['lines']
+        total += lines['count']
+        covered += lines['covered']
 if total == 0:
     print('no source lines under src/', file=sys.stderr)
     sys.exit(3)
@@ -3470,6 +3486,9 @@ impl BenchmarkPipeline {
                                 omp_stats.steps_taken += r_stats.steps_taken;
                                 omp_stats.total_tokens += r_stats.total_tokens;
                                 omp_stats.cost_usd += r_stats.cost_usd;
+                                // R88 F2: every round's provider bill
+                                // reaches the stage's `billed_usd`.
+                                omp_stats.billed_usd += r_stats.billed_usd;
                                 omp_stats.max_call_usd =
                                     omp_stats.max_call_usd.max(r_stats.max_call_usd);
                                 omp_stats.stop_reason = r_stats.stop_reason.clone();
@@ -3496,6 +3515,9 @@ impl BenchmarkPipeline {
                                 omp_stats.steps_taken += end.partial.steps_taken;
                                 omp_stats.total_tokens += end.partial.total_tokens;
                                 omp_stats.cost_usd += end.partial.cost_usd;
+                                // R88 F2: a repair that ends in an error
+                                // still billed its calls.
+                                omp_stats.billed_usd += end.partial.billed_usd;
                                 omp_stats.max_call_usd =
                                     omp_stats.max_call_usd.max(end.partial.max_call_usd);
                                 omp_stats.stop_reason = end.partial.stop_reason.clone();
