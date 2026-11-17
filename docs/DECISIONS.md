@@ -828,14 +828,16 @@ The benchmark answers "what does a dollar buy" (round 23):
 ## 34. Rules `.49`: coverage on a fresh build; the bill counts every attempt (2026-11-17)
 
 - **Why** (operator, 2026-11-17: "88", after the reviewer's analysis of
-  the `.48` haiku grid): ticket 15's coverage measurement built into the
-  candidate's own `target/` and failed ("no source lines under src/") on
-  stale output while every test passed; reproduced on a haiku workspace
-  (fails with its `target/`, 85.6 % with a fresh one). It cost up to ~25
+  the `.48` haiku grid): ticket 15's coverage measurement failed ("no
+  source lines under src/") while every test passed. The cause (found by
+  the implementer, round 88 spec question 1): `llvm-cov export` read only
+  the first test binary, so the reading depended on cargo's binary order.
+  The measurement also built in the candidate's own `target/`, which a
+  stale or planted build could steer. It cost up to ~25
   phase-4 points across the three careers. Separately, a stage recorded
   only its last round's bill ($7.02 recorded against $13.19 from the key).
-- **Change** (round 88): coverage builds in a fresh target directory
-  outside the workspace; every session's calls reach the bill.
+- **Change** (round 88): coverage merges every test binary and builds in
+  a fresh target directory outside the workspace; every session's calls reach the bill.
 - **Impact:** the `.48` haiku careers (median 60.4; real bill $13.19) are
   void and unpublished; the rerun restarts at haiku. #32 and #33 carry
   over.
