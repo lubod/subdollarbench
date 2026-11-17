@@ -4,7 +4,7 @@
     {
       "package": "@pfoundation/ocadvisor",
       "options": {
-        "model": "opencode-go/gemini-4-argon#high",
+        "model": "opencode-go/qwen4-max#high",
         "maxTranscriptChars": 200000,
         "timeoutMs": 600000,
         "disabledForModels": []

@@ -842,6 +842,42 @@ The benchmark answers "what does a dollar buy" (round 23):
   void and unpublished; the rerun restarts at haiku. #32 and #33 carry
   over.
 
+## 35. The advisor moves to Qwen4 Max via OpenCode Go (2026-11-17)
+
+- **Operator** (2026-11-17): "check opencode models and try to pick a
+  better model for the opencode advisor".
+- **The test** (reviewer, `/tmp/advtest`): six OpenCode Go models at
+  `high`, each given two real bugs from recent rounds as a cold review,
+  with no hint of the answer:
+  - **P1, the coverage measurement** as it stood at `round-88-open`
+    (`src/pipeline.rs:491-564`): the real fault is that `llvm-cov
+    export` reads only the first test binary passed positionally (round
+    88's root cause, which the reviewer itself had first misread).
+  - **P2, the billing proxy** as merged in round 85
+    (`extensions/egress_proxy.py`): the real fault is that it buffers the
+    whole response, so opencode's 5-minute header wait expires on long
+    generations, and each abandoned call is billed again on retry
+    (round 87).
+- **Results:**
+
+  | Model | P1 positional binaries | P2 buffering | P2 retry double-bill | Time P1 / P2 | Price in/out |
+  |---|---|---|---|---|---|
+  | Qwen4 Max | #1 | #1 | yes | 256 s / 170 s | $1.5/4.5 |
+  | Gemini 4 Argon | #1 | #1 | yes | 587 s / 150 s (one 429 retry) | $2/10 |
+  | GLM-5.3 | #1 (ran a demo) | #1 | yes | 491 s / 254 s | $1.4/4.4 |
+  | Grok 4.7 | #1 | #1 | yes | 728 s / 896 s | $2/6 |
+  | Kimi K3.1 Pro | partial (`data[0]`) | #1 | yes | 148 s / 164 s | $2/10 |
+  | DeepSeek V4 Pro | missed; a false #1 | #1 | no | 392 s / 207 s | $0.66/1.98 |
+- **Chosen:** Qwen4 Max, high: the same findings as Gemini on both
+  probes, about twice as fast on the hard one, shorter answers, and less
+  than half the output price on the shared Go plan. Gemini's capacity
+  429 during the test is a reliability point too. Qwen4 Max was released
+  on 2026-11-16, so the reviewer watches its first rounds' consultations.
+- **Smoke:** an `advisor` call from an opencode session in the repo
+  answered "OK — Qwen4 Max (`opencode-go/qwen4-max`)".
+- **Not graded:** `opencode.json` and `.opencode/` are outside the graded
+  key (`377c4225eda3` before and after).
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

@@ -86,12 +86,13 @@ round file, never only in chat.
 
 ## The advisor (implementer)
 
-**On** (operator, 2026-11-08): **Gemini 4 Argon, high, on OpenCode
-Go** (`opencode-go/gemini-4-argon#high`). It replaced the Opus advisor
-on `claude-agent`, which failed every `review` call in rounds 64-66 (the
-Claude plan's 5-hour limit, shared with the reviewer). It was chosen
-over Kimi K3.1 Pro on a blind review of round 69 (`docs/DECISIONS.md`
-#27). Its calls count against the same Go plan as the implementer.
+**On** (operator, 2026-11-17): **Qwen4 Max, high, on OpenCode Go**
+(`opencode-go/qwen4-max#high`). It replaced Gemini 4 Argon (on since
+2026-11-08, `docs/DECISIONS.md` #27) after a blind two-bug test of six
+Go models (`docs/DECISIONS.md` #35). Before that, the Opus advisor on
+`claude-agent` failed every `review` call in rounds 64-66 (the Claude
+plan's 5-hour limit, shared with the reviewer). Its calls count against
+the same Go plan as the implementer.
 - **It needs an `OpenCode Go` connection.** The plugin checks
   `integration.connection.active("opencode-go")`, and OpenCode keeps
   `opencode-go` as its own integration, apart from `opencode` (the
