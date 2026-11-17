@@ -1199,7 +1199,18 @@ r90_m2_cap_counts_the_real_bill() {
         kill "$pid" 2>/dev/null || true
         echo "real bill: the hold does not name the bill: $(cat "$R90_DIR/out")"; return 1; }
     rm -f "$HOLD"
-    wait "$pid" || true
+    # A fix that does not count the bill lets phase 2 start, and its own
+    # bill holds the grid again: bound the wait so the test fails instead
+    # of hanging.
+    for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        if [[ -f "$HOLD" ]]; then
+            kill "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.1
+    done
+    wait "$pid" 2>/dev/null || true
     unset SDB_R90_COST SDB_R90_BILLED
     rows=$(($(wc -l < "$LEDGER") - 1))
     [[ "$rows" -eq 1 ]] || {
