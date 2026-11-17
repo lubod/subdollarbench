@@ -4983,3 +4983,92 @@ async fn r89_f6_catch_up_takes_its_share() {
         "the catch-up took most of the phase headroom: {budget}"
     );
 }
+
+/// R89 F7: a phase stopped at the cap records its unrun tickets as not
+/// reached; the next phase catches them up, and a ticket blocked only by
+/// the unreached one runs once it passes.
+#[tokio::test]
+async fn r89_f7_unreached_ticket_is_caught_up_later() {
+    let lc = load_campaign("sdb-sql").expect("the sdb-sql campaign loads");
+    let phase3 = lc.spec.phases.iter().find(|p| p.id == 3).unwrap();
+    let mut state = LadderState::default();
+    for id in 0..=10u32 {
+        state.passed.push(id);
+        state.outcomes.insert(id, LadderOutcome::Full);
+        state.best.insert(id, true);
+    }
+    state.dirty = true;
+    state.last_green = Some("abc1234".into());
+    let tight = CampaignRunOptions {
+        campaign_id: "r89stop".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 0.01,
+        wall_min: None,
+    };
+    let stopped = run_campaign_phase(
+        &lc,
+        &tight,
+        Some(phase3),
+        Some(&state),
+        Some("prev"),
+        None,
+        |_attempt| async {
+            Err(anyhow::anyhow!(
+                "the phase must stop before its first ticket"
+            ))
+        },
+        None,
+    )
+    .await
+    .expect("the stopped phase");
+    let carried = stopped
+        .ladder_state
+        .clone()
+        .expect("the stopped phase records its ladder");
+    for id in 11..=15u32 {
+        assert_eq!(
+            carried.outcomes.get(&id),
+            Some(&LadderOutcome::NotReached),
+            "ticket {id} is not reached"
+        );
+    }
+    // The next phase catches the unreached tickets up; the 11's pass
+    // unblocks the 16, which could not run before.
+    let phase4 = lc.spec.phases.iter().find(|p| p.id == 4).unwrap();
+    let loose = CampaignRunOptions {
+        campaign_id: "r89catch".into(),
+        model: "m".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 10.0,
+        wall_min: None,
+    };
+    let seen = std::cell::RefCell::new(Vec::<u32>::new());
+    let _ = run_campaign_phase(
+        &lc,
+        &loose,
+        Some(phase4),
+        Some(&carried),
+        Some("prev2"),
+        None,
+        |attempt| {
+            seen.borrow_mut().push(attempt.stage.id);
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .expect("the later phase");
+    let seen = seen.into_inner();
+    assert!(
+        seen.contains(&11),
+        "the not-reached 11 is caught up: {seen:?}"
+    );
+    assert!(
+        seen.contains(&16),
+        "the 16 runs once the 11 passes: {seen:?}"
+    );
+}

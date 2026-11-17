@@ -231,7 +231,7 @@ pub fn stage_points(stage: &StageSpec, outcome: LadderOutcome) -> f64 {
                 .map(|l| l.weight)
                 .unwrap_or(DEFAULT_LITE_WEIGHT)
         }
-        LadderOutcome::Failed | LadderOutcome::Skipped => 0.0,
+        LadderOutcome::Failed | LadderOutcome::Skipped | LadderOutcome::NotReached => 0.0,
     }
 }
 
