@@ -1087,6 +1087,7 @@ fn r90_m4_in_flight_call_is_billed() {
         log: sim_log.clone(),
         start_offset: 0,
         url: String::new(),
+        stale: Vec::new(),
     };
     let writer = {
         let log = sim_log.clone();
@@ -2531,6 +2532,7 @@ fn r90_m4_inspect_driver() {
         log: log.clone(),
         start_offset: 0,
         url: String::new(),
+        stale: Vec::new(),
     };
     assert!(
         !proxy.exited(),
@@ -2542,6 +2544,7 @@ fn r90_m4_inspect_driver() {
         log,
         start_offset: 0,
         url: String::new(),
+        stale: Vec::new(),
     };
     assert!(dead.exited(), "a running=false inspect is a death");
     std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_removed");
@@ -2550,6 +2553,7 @@ fn r90_m4_inspect_driver() {
         log: work.join("billed.jsonl"),
         start_offset: 0,
         url: String::new(),
+        stale: Vec::new(),
     };
     assert!(removed.exited(), "a removed sidecar is a death");
     println!("inspect blip scenarios passed");
@@ -2960,4 +2964,57 @@ fn r89_f3_real_provider_errors_still_trip() {
         !OpenCodeRunner::is_throttled_noop(true, 100, 0),
         "a session that did work is not a throttle no-op"
     );
+}
+
+/// R90-1: a marker an earlier session left open is moved aside at the
+/// next session's start, so it can never make that session wait the full
+/// 90 s; this session's own timed-out marker is moved aside at the deadline.
+#[test]
+fn r90_m4_stale_marker_does_not_delay_the_next_session() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("r90-m4-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("billed.jsonl");
+    std::fs::write(&log, "").unwrap();
+    let open = dir.join("billed.jsonl.open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::write(open.join("old-call"), "POST /api/v1/chat\n").unwrap();
+    let old_filter = std::env::var_os("SDB_EGRESS_FILTER");
+    std::env::remove_var("SDB_EGRESS_FILTER");
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let proxy = BillingProxy::start(None, &dir, "http://unused").expect("standalone start");
+    if let Some(v) = old_filter {
+        std::env::set_var("SDB_EGRESS_FILTER", v);
+    }
+    assert_eq!(proxy.stale, vec!["old-call".to_string()]);
+    assert!(
+        !open.join("old-call").exists(),
+        "the earlier session's marker is still live"
+    );
+    assert!(
+        dir.join("billed.jsonl.lost/old-call").exists(),
+        "the stale marker is not kept as evidence"
+    );
+    let t0 = std::time::Instant::now();
+    let still = proxy.wait_idle(std::time::Duration::from_secs(2));
+    assert!(
+        still.is_empty(),
+        "the stale marker was waited for: {still:?}"
+    );
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(1),
+        "the next session waited {:?} on a stale marker",
+        t0.elapsed()
+    );
+    // This session's own call that outlives the deadline is moved aside
+    // at the deadline, named, and kept.
+    std::fs::write(open.join("this-call"), "POST /api/v1/chat\n").unwrap();
+    let t0 = std::time::Instant::now();
+    let still = proxy.wait_idle(std::time::Duration::from_millis(50));
+    assert_eq!(still, vec!["this-call".to_string()]);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(1));
+    assert!(!open.join("this-call").exists());
+    assert!(dir.join("billed.jsonl.lost/this-call").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
