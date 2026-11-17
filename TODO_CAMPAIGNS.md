@@ -463,5 +463,6 @@ not planned.
   identical failures across careers only warn. On the `.48` haiku ledger
   it would have held after the first phase (~$0.85) on the bill
   undercount, and on the coverage bug at the first phase-4 result.
-  Paid grids start with **one career** first; the other careers follow
-  once its phase 2 is clean.
+  Proposed (reviewer, awaiting the operator): paid grids start with
+  **one career** first; the other careers follow once its phase 2 is
+  clean.
