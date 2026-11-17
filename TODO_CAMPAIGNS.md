@@ -444,3 +444,8 @@ not planned.
   `runs/.grid-v48-haiku-ledger.tsv` is a record only (never published).
   Round 87 fixes the proxy; then bar, rehearsal, and haiku restarts from
   scratch on a new ledger.
+- **2026-11-17, `.48` haiku finished, then voided (operator "88"):**
+  careers 51.6 / 60.4 / 62.8 (median 60.4), scored $5.02, real $13.19
+  (key). Ticket 15's coverage measurement failed on stale `target/`
+  output (round 88, rules `.49`, DECISIONS #34). Next: round 88, bar,
+  rehearsal, haiku `.49`, then deepseek.
