@@ -15,6 +15,7 @@ Usage: scripts/opencode-stub.py <port> <request-log> <case>
 """
 import http.server
 import json
+import os
 import sys
 import time
 
@@ -62,8 +63,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(n)
         if CASE == "slow":
             # R85 F1: the proxy-gone test kills the proxy while this
-            # request is in flight.
-            time.sleep(3)
+            # request is in flight. R90 M4: the in-flight billing test
+            # keeps the call open past the session's teardown.
+            time.sleep(float(os.environ.get("SDB_STUB_SLOW_SECS", "3")))
         with open(LOG, "a") as f:
             f.write(json.dumps({"case": CASE, "n": COUNT["n"], "path": self.path,
                                 "body": body.decode("utf-8", "replace")}) + "\n")

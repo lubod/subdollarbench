@@ -1027,11 +1027,13 @@ fn r90_m4_in_flight_call_is_billed() {
         max_turns: Some(3),
         max_budget_usd: Some(0.05),
         max_effective_usd: None,
-        // The stub's slow case sleeps 3 s; the session ends first.
+        // The session ends long before the stub's slow call answers.
         timeout_seconds: Some(1),
     };
+    std::env::set_var("SDB_STUB_SLOW_SECS", "12");
     let (res, logs, _stub_log, mgr) =
         r85_run_with_stub_limits(&base, "slow", "the slow call", limits);
+    std::env::remove_var("SDB_STUB_SLOW_SECS");
     // A timed-out session is an error envelope, but its partial stats
     // carry the bill the wait recovered.
     let err = res.expect_err("a timed-out session is not a clean result");
