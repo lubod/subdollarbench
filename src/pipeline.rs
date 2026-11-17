@@ -3486,6 +3486,9 @@ impl BenchmarkPipeline {
                                 omp_stats.steps_taken += r_stats.steps_taken;
                                 omp_stats.total_tokens += r_stats.total_tokens;
                                 omp_stats.cost_usd += r_stats.cost_usd;
+                                // R88 F2: every round's provider bill
+                                // reaches the stage's `billed_usd`.
+                                omp_stats.billed_usd += r_stats.billed_usd;
                                 omp_stats.max_call_usd =
                                     omp_stats.max_call_usd.max(r_stats.max_call_usd);
                                 omp_stats.stop_reason = r_stats.stop_reason.clone();
@@ -3512,6 +3515,9 @@ impl BenchmarkPipeline {
                                 omp_stats.steps_taken += end.partial.steps_taken;
                                 omp_stats.total_tokens += end.partial.total_tokens;
                                 omp_stats.cost_usd += end.partial.cost_usd;
+                                // R88 F2: a repair that ends in an error
+                                // still billed its calls.
+                                omp_stats.billed_usd += end.partial.billed_usd;
                                 omp_stats.max_call_usd =
                                     omp_stats.max_call_usd.max(end.partial.max_call_usd);
                                 omp_stats.stop_reason = end.partial.stop_reason.clone();
