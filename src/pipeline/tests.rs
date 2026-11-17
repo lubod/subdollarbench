@@ -3553,6 +3553,46 @@ fn r88_f1_planted_target_is_ignored() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R88 F1 (change after open): every test binary counts. The no-src
+/// `tests/pg.rs` binary is prebuilt first (the suite is added after), so
+/// a positional export reads only `tests/pg.rs` and reports "no source
+/// lines under src/"; the `--object` export merges both and reads the
+/// true coverage.
+#[test]
+fn r88_f1_every_test_binary_counts() {
+    use crate::sandbox::docker::{RunGuard, SandboxManager};
+
+    let dir = std::env::temp_dir().join(format!("r88-f1-cov-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_r88_cov_fixture(&dir);
+    fs::write(
+        dir.join("prebuild.sh"),
+        "set -e\n\
+         export RUSTFLAGS=\"-C instrument-coverage\"\n\
+         mv tests/suite.rs tests/suite.rs.off\n\
+         cargo test --release --offline --locked --tests --no-run >/dev/null 2>&1\n\
+         mv tests/suite.rs.off tests/suite.rs\n",
+    )
+    .unwrap();
+    let id = format!("r88-f1-cov-order-{}", std::process::id());
+    let sm = SandboxManager::with_id(&id);
+    let _guard = RunGuard::new(SandboxManager::with_id(&id));
+    sm.cleanup();
+    let (ok, text) = sm
+        .run_workspace_command(&dir, "bash prebuild.sh", 300)
+        .expect("the pg prebuild");
+    assert!(ok, "the pg prebuild failed: {text}");
+    let merged = measure_rust_coverage(&sm, &dir).expect("the merged coverage measurement");
+    let _ = std::fs::remove_dir_all(dir.join("target"));
+    let fresh = measure_rust_coverage(&sm, &dir).expect("the fresh coverage measurement");
+    assert!(
+        (merged - fresh).abs() < 0.01,
+        "the first-only export read {merged:.2}%, the merged reading is {fresh:.2}%"
+    );
+    sm.cleanup();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// R81 F4: the text the candidate reads. Every stage prompt says Rust and
 /// `./start.sh`; the genesis names the toolchain `Dockerfile.sandbox`
 /// pins; no prompt offers another language or the Dockerfile entrypoint.
