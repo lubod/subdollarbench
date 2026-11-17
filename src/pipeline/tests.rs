@@ -4334,7 +4334,7 @@ async fn r89_f5_reference_without_ticket2_passes_its_branch() {
 #[allow(clippy::await_holding_lock)] // a test-only serialization guard
 async fn r89_f5_compact_reference_passes_stage5() {
     let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let worker = 89u8;
+    let worker = 90u8;
     let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
     let dir = covtest_dir("r89f5compact");
     let workdir = dir.join("workspace");

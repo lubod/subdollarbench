@@ -1844,7 +1844,7 @@ case "$1" in
         exit 7
         ;;
       billing)
-        printf '%s\n' '{"type":"text","part":{"text":"insufficient credit balance"}}'
+        printf '%s\n' '{"type":"error","error":{"type":"provider.quota","message":"insufficient credits"}}'
         exit 0
         ;;
       billing_stderr)
@@ -2067,7 +2067,8 @@ fn oc_driver() {
         passed += 1;
     }
 
-    // 5. Billing phrase in a text event pauses in the billing envelope.
+    // 5. The provider's 402 error event (the real shape: a structured
+    //    error, not model prose) pauses in the billing envelope.
     {
         let (res, logs) = run_oc_scenario("billing", &root, covtest_limits(10, 1.0, 10), None);
         let err = res.expect_err("billing phrase must trip");
