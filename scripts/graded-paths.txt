@@ -59,7 +59,7 @@ grader rust-toolchain.toml
 # R90 M5: the campaign binary's entry points and the grading lock decide
 # what runs and how a phase inherits; they are plumbing (a change needs
 # the $0 rehearsal, not a 7-hour bar).
-plumbing src/grading.rs
+grader src/grading.rs
 plumbing src/lib.rs
 plumbing src/main.rs
 plumbing src/main_campaign.rs
