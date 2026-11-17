@@ -1104,12 +1104,14 @@ fn r90_m4_in_flight_call_is_billed() {
         })
     };
     let still = proxy.wait_idle(std::time::Duration::from_secs(5));
+    // Read before joining the writer: only the wait makes the record
+    // visible at this point.
+    let sim_bill = proxy.read();
     writer.join().unwrap();
     assert!(
         still.is_empty(),
         "wait_idle gave up on an open call: {still:?}"
     );
-    let sim_bill = proxy.read();
     assert_eq!(sim_bill.calls, 1, "the waited-for record was not read");
     assert!(
         (sim_bill.cost - 0.001).abs() < 1e-12,
