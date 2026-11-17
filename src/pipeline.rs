@@ -232,7 +232,7 @@ fn crash_ladder(
             // committed row. A commit that lands on a WAL checkpoint rewrites
             // in place and grows nothing (or nothing tearable), so retry with
             // another victim instead of skipping.
-            let mut torn: Option<(std::path::PathBuf, u64)> = None;
+            let mut torn: Option<(std::path::PathBuf, u64, u64)> = None;
             // R89 F1: the baseline is the step's start, not each retry's:
             // a re-taken baseline absorbed the previous attempt's growth,
             // so an unflushed first append made every retry look like it
@@ -243,32 +243,30 @@ fn crash_ladder(
                     .map_err(|e| format!("(c) {e}"))?;
                 victims += 1;
                 let _ = sandbox.kill_candidate();
-                if let Some((path, grew)) =
-                    crash::changed_file(&scratch, &before_c).map_err(|e| format!("(c) {e}"))?
+                // R89 F1 and the operator's answer to spec question 1:
+                // a file the commit grew is cut at most by its growth (a
+                // compact log keeps the record before the newest one); a
+                // file it rewrote in place (SQLite's reused WAL) takes
+                // the old-style tail cut.
+                if let Some(victim) =
+                    crash::tear_victim(&scratch, &before_c).map_err(|e| format!("(c) {e}"))?
                 {
-                    // R89 F1: cut at most what this commit grew, so the
-                    // record before the newest one survives even in a
-                    // compact log (records under 256 bytes).
-                    let cut =
-                        crash::torn_tail(&path, 256.min(grew)).map_err(|e| format!("(c) {e}"))?;
-                    if cut > 0 {
-                        torn = Some((path, cut));
-                        break;
-                    }
+                    torn = Some(victim);
+                    break;
                 }
                 // Nothing changed (or nothing tearable): bring the store back
                 // and try one more commit.
                 restart(&scratch_extras)?;
             }
-            let Some((path, cut)) = torn else {
+            let Some((path, grew, cut)) = torn else {
                 return Err(
                     "(c) three acked INSERTs changed no file: commits never reached the store"
                         .to_string(),
                 );
             };
             logger.log(&format!(
-                "  [CRASH] (c) torn tail: {cut} bytes off {}",
-                path.display()
+                "  [CRASH] (c) torn tail: {}",
+                crash::cut_line(&path, grew, cut)
             ));
             restart(&scratch_extras)?;
             // Only the newest victim may be missing: the older ones were

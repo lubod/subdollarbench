@@ -1,7 +1,7 @@
 use super::super::compare::render_expected;
 use super::super::oracle::Oracle;
 use super::*;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 
 /// One oracle-backed server with a shared database.
@@ -344,6 +344,55 @@ fn r89_f1_losing_an_older_record_still_fails() {
     assert!(
         !r89_log_prefix_intact(&lossy, 6, 40),
         "an older record lost across the tear must fail the check"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R89 F1 + the operator's answer to spec question 1: a log the commit
+/// **rewrote in place** (SQLite reuses its WAL's frames, so the length
+/// does not grow) takes the old-style tail cut `min(256, len / 2)`, and
+/// the committed records below its stale tail survive.
+#[test]
+fn r89_f1_rewritten_log_keeps_older_records() {
+    let dir = std::env::temp_dir().join(format!("sdb-r89-f1-rewritten-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.wal");
+    // Five committed 40-byte records, then 200 bytes of stale frames past
+    // the last checkpoint (SQLite's reused WAL tail).
+    let mut data = Vec::new();
+    for i in 0..5u8 {
+        data.extend(std::iter::repeat_n(i, 40));
+    }
+    data.extend(std::iter::repeat_n(0xFFu8, 200));
+    std::fs::write(&path, &data).unwrap();
+    let before = snapshot_files(&dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // The commit reuses the stale tail in place: same length, new bytes.
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(200)).unwrap();
+        f.write_all(&[5u8; 40]).unwrap();
+        f.flush().unwrap();
+    }
+    let (victim, grew, cut) = tear_victim(&dir, &before).unwrap().expect("a victim");
+    assert_eq!(victim, path);
+    assert_eq!(grew, 0, "the commit rewrote the log, it did not grow it");
+    assert_eq!(cut, 200, "the old-style tail cut is min(256, len / 2)");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 200);
+    assert!(
+        r89_log_prefix_intact(&path, 5, 40),
+        "every older committed record survives the rewritten log's tail cut"
+    );
+    let line = cut_line(&path, grew, cut);
+    assert!(
+        line.contains("rewritten in place, tail cut 200"),
+        "the (c) line names the cut: {line}"
+    );
+    // A grown log still reports its growth.
+    assert!(
+        cut_line(&path, 40, 40).contains("grew 40 bytes, cut 40"),
+        "a grown log's (c) line names its growth"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

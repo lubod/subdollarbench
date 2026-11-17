@@ -322,6 +322,42 @@ pub fn read_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<usize
     }
 }
 
+/// R89 F1 and the operator's answer to spec question 1: the torn tail of
+/// the victim commit. The victim is [`changed_file`]'s pick. A file the
+/// commit **grew** is cut at most by its growth, so a compact log keeps
+/// every older record; a file the commit **rewrote in place** (SQLite
+/// reuses its WAL's frames, so the length does not grow) takes the
+/// old-style tail cut `min(256, len / 2)`, which only reaches its stale
+/// tail. Returns the path, the growth (0 for a rewrite) and the cut;
+/// `None` when there is no safe tear and the caller retries.
+pub fn tear_victim(
+    dir: &Path,
+    before: &BTreeMap<PathBuf, FileStamp>,
+) -> Result<Option<(PathBuf, u64, u64)>, String> {
+    let Some((path, grew)) = changed_file(dir, before)? else {
+        return Ok(None);
+    };
+    let cut = if grew > 0 {
+        torn_tail(&path, 256.min(grew))?
+    } else {
+        torn_tail(&path, 256)?
+    };
+    if cut == 0 {
+        return Ok(None);
+    }
+    Ok(Some((path, grew, cut)))
+}
+
+/// R89 F1: the `[CRASH] (c)` line's account of the cut: a grown file
+/// says how much it grew, a rewritten one names the old-style tail cut.
+pub fn cut_line(path: &Path, grew: u64, cut: u64) -> String {
+    if grew > 0 {
+        format!("grew {grew} bytes, cut {cut} off {}", path.display())
+    } else {
+        format!("rewritten in place, tail cut {cut} off {}", path.display())
+    }
+}
+
 /// Recursively copy `src` to `dst`, regular files and directories only:
 /// the source is candidate-controlled, so symlinks are never followed
 /// (a link to a host file must not leak it into a snapshot), and FIFOs or

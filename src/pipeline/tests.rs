@@ -4373,7 +4373,7 @@ async fn r89_f5_compact_reference_passes_stage5() {
     for needle in [
         "Stage 4: Persistence -> PASS",
         "Stage 5: Crash safety -> PASS",
-        "[CRASH] (c) torn tail",
+        "[CRASH] (c) torn tail: grew",
         "[CRASH] a double restart changed nothing",
     ] {
         assert!(
