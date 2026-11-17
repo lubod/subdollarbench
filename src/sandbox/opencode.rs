@@ -254,16 +254,11 @@ impl OpenCodeRunner {
                     .or_else(|| v.get("text"))
                     .and_then(|t| t.as_str())
                     .unwrap_or(raw);
-                if let Some(crate::sandbox::omp::BillingSignal::Fault(reason)) =
-                    crate::sandbox::omp::classify_billing_error(raw)
-                        .or_else(|| crate::sandbox::omp::classify_billing_error(text))
-                {
-                    lines.push(format!("[BILLING] {}", reason));
-                    effects.billing = Some(reason.to_string());
-                }
-                if Self::is_rate_limit_event(v, text) {
-                    effects.rate_limited = true;
-                }
+                // R89 F3: the model's own words are never a provider fault
+                // signal. Ticket 18 (auth, limits) invites prose like
+                // "reject unauthorized connections" or "add a rate limit";
+                // only structured error events and the raw provider error
+                // payload are classified (below and on the stderr path).
                 lines.push(format!("[RESPONSE] {}", Self::cap_line(text)));
             }
             "step_finish" => {
@@ -292,7 +287,10 @@ impl OpenCodeRunner {
                         "[VARIANT] model variant unavailable; will retry prose-only".to_string(),
                     );
                 }
-                let rate_event = Self::is_rate_limit_event(v, raw);
+                // R89 F3: only a structured error event (or the provider's
+                // raw stderr) is classified. Another event's text is not.
+                let provider_error = etype == "error" || etype == "stderr";
+                let rate_event = provider_error && Self::is_rate_limit_event(v, raw);
                 if rate_event {
                     effects.rate_limited = true;
                 }
@@ -300,7 +298,7 @@ impl OpenCodeRunner {
                     lines.push(format!("[BILLING] {reason}"));
                     effects.billing = Some(reason);
                 }
-                if !rate_event {
+                if provider_error && !rate_event {
                     if let Some(reason) = Self::error_event_billing_reason(raw) {
                         lines.push(format!("[BILLING] {reason}"));
                         effects.billing = Some(reason.to_string());

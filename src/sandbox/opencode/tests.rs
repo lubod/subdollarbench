@@ -2646,3 +2646,81 @@ fn r82_f3_effort_reaches_the_request() {
     }
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// R89 F3: the model's own words never trip the billing fault.
+// ---------------------------------------------------------------------------
+
+/// The effects of one event line (as the runner maps it).
+fn r89_effects(event: &str) -> OpenCodeEventEffects {
+    let v = ev(event);
+    let raw = serde_json::to_string(&v).unwrap();
+    let (_, effects) =
+        OpenCodeRunner::opencode_event_lines(&v, &raw, 1, 200, 0.0, 0, "openai/gpt-6-luna", 0.99);
+    effects
+}
+
+/// R89 F3: ticket 18's prose (auth, limits) is never a provider fault.
+#[test]
+fn r89_f3_prose_never_trips_billing() {
+    for prose in [
+        "reject unauthorized connections with ERR auth",
+        "add a connection rate limit",
+        "too many requests from one client",
+    ] {
+        let e = r89_effects(&format!(r#"{{"type":"text","part":{{"text":"{prose}"}}}}"#));
+        assert!(
+            e.billing.is_none(),
+            "the prose {prose:?} tripped the billing fault: {:?}",
+            e.billing
+        );
+        assert!(
+            !e.rate_limited,
+            "the prose {prose:?} set the rate-limit flag"
+        );
+    }
+}
+
+/// R89 F3: real provider errors still trip; an exhausted 429 is a provider
+/// fault (a rate-limited no-op session), a retrying one is transient.
+#[test]
+fn r89_f3_real_provider_errors_still_trip() {
+    for (event, kind) in [
+        (
+            r#"{"type":"error","error":{"type":"provider.billing","message":"402 Payment Required"}}"#,
+            "402",
+        ),
+        (
+            r#"{"type":"error","error":{"type":"provider.auth","message":"401 Unauthorized"}}"#,
+            "401",
+        ),
+        (
+            r#"{"type":"error","error":{"message":"Insufficient credits: this request requires more credits"}}"#,
+            "billing",
+        ),
+    ] {
+        let e = r89_effects(event);
+        let reason = e.billing.unwrap_or_default();
+        assert!(
+            reason.to_lowercase().contains(kind),
+            "the {kind} event did not trip: {reason:?}"
+        );
+    }
+    // A 429 the session ends on is a provider fault; a retrying one is not.
+    assert!(matches!(
+        crate::sandbox::omp::classify_billing_error("Retrying (10/10): 429 Too Many Requests"),
+        Some(crate::sandbox::omp::BillingSignal::Fault(_))
+    ));
+    assert!(matches!(
+        crate::sandbox::omp::classify_billing_error("Retrying (1/10): 429 Too Many Requests"),
+        Some(crate::sandbox::omp::BillingSignal::RateLimited)
+    ));
+    assert!(
+        OpenCodeRunner::is_throttled_noop(true, 0, 0),
+        "a rate-limited no-op session is a provider fault"
+    );
+    assert!(
+        !OpenCodeRunner::is_throttled_noop(true, 100, 0),
+        "a session that did work is not a throttle no-op"
+    );
+}
