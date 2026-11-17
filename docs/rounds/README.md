@@ -87,3 +87,5 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [86](86.md) | Rules `.48`: a ticket's turns and time scale with its budget | merged |
 | [87](87.md) | The billing proxy streams | merged |
 | [88](88.md) | Rules `.49`: coverage on a fresh build; the bill counts every attempt | merged |
+| [89](89.md) | Rules `.50`: grader fixes from the code audit, each with tests | open |
+| [90](90.md) | Money and the grid: every dollar counted, every rerun possible | open |

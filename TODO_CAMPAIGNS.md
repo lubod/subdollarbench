@@ -466,3 +466,9 @@ not planned.
   **Decided** (operator, 2026-11-17 "one career"): paid grids start with
   **one career** first; the other careers follow once its phase 2 is
   clean.
+
+- **2026-11-17, stop and fix (operator; DECISIONS #36):** the `.49` bar
+  and deepseek arm stopped at 11:27 CET; rounds 89 (rules `.50`,
+  grader) and 90 (money, grid) open; then one bar, a fresh rehearsal,
+  deepseek `.50` one career with the checker. Pending operator: the
+  catch-up's pool share and unreached tickets (add to 89 if approved).

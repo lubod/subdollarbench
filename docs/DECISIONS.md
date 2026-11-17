@@ -878,6 +878,28 @@ The benchmark answers "what does a dollar buy" (round 23):
 - **Not graded:** `opencode.json` and `.opencode/` are outside the graded
   key (`377c4225eda3` before and after).
 
+## 36. Stop and fix: the code audit's grader and money bugs, rules `.50` (2026-11-17)
+
+- **Why** (operator, 2026-11-17: "analyze code and try to find good, bad
+  and ugly, I want to avoid more costly problems during runs", then
+  "stop and fix also add more tests"): a read-only audit of the grader,
+  the harness, the budget logic and the grid scripts found grader bugs
+  with run evidence: the stage-5 torn tail cut 256 bytes whatever the
+  victim commit wrote, failing correct compact logs (35 rounds, 23
+  campaigns, all three `.48` haiku careers); stage 5/6/11 scenarios used
+  ticket-2 syntax outside their needs (18 rounds, 7 campaigns); model
+  prose could trip the billing fault; ticket 15's revert ran a stale
+  binary. On the money side: killed phases at $0 in the ledger, the real
+  bill never reaching the grid, fault reruns of phases 2-4 refused, the
+  call in flight at a session's end never counted, a stale rehearsal
+  ledger able to write a PASS.
+- **Change:** the armed `.49` bar and deepseek career stopped (nothing
+  paid ran on `.49`); round 89 (rules `.50`, grader, with regression
+  tests and two class-wide live proofs) and round 90 (money and grid,
+  plumbing), then one bar.
+- **Impact:** `.50` careers start at phase 1; the stage-5 results of
+  every earlier run are suspect (none is published under `.48`/`.49`).
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
