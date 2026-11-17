@@ -2873,10 +2873,7 @@ fn phase_unrun_weight_sum(
 ) -> f64 {
     stage_list
         .iter()
-        .filter(|s| match outcomes.get(&s.id) {
-            None | Some(LadderOutcome::NotReached) => true,
-            _ => false,
-        })
+        .filter(|s| matches!(outcomes.get(&s.id), None | Some(LadderOutcome::NotReached)))
         .map(|s| stage_weight(s))
         .sum()
 }
