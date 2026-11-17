@@ -449,3 +449,20 @@ not planned.
   (key). Ticket 15's coverage measurement failed on stale `target/`
   output (round 88, rules `.49`, DECISIONS #34). Next: round 88, bar,
   rehearsal, haiku `.49`, then deepseek.
+- **2026-11-17, order (operator):** after round 88, deepseek goes first
+  (cheaper while bugs are still being found), off-peak only; haiku
+  follows once a cheap model has run clean on `.49`.
+- **Per-phase checker** (operator, 2026-11-17 "checker"; reviewer-side,
+  `~/sdb-cmp/phase_check.py`, outside the repo and the graded key): runs
+  beside every paid grid (`--watch --unit sdb-<grid> --ledger ...`) and
+  writes the grid's hold file when a finished phase shows our bug rather
+  than the model's: a non-ok stop, a grader/harness failure text
+  (coverage measurement failed, panicked, provider.transport, ...), a
+  stage billed under half its scored cost, 0 points, unhealthy turns, or
+  (at the end) phase bills more than 10 % from the key's spend. Repeated
+  identical failures across careers only warn. On the `.48` haiku ledger
+  it would have held after the first phase (~$0.85) on the bill
+  undercount, and on the coverage bug at the first phase-4 result.
+  Proposed (reviewer, awaiting the operator): paid grids start with
+  **one career** first; the other careers follow once its phase 2 is
+  clean.
