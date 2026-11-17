@@ -1098,7 +1098,7 @@ fn r90_m4_in_flight_call_is_billed() {
                 .append(true)
                 .open(&log)
                 .unwrap()
-                .write_all(format!("{{\"id\":\"sim\",\"cost\":0.001,\"status\":200}}\n").as_bytes())
+                .write_all(b"{\"id\":\"sim\",\"cost\":0.001,\"status\":200}\n")
                 .unwrap();
             std::fs::remove_file(open.join("request-1")).unwrap();
         })
