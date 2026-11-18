@@ -15,6 +15,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 # same list scripts/gate.sh reads.
 . "$BAR_ROOT/scripts/graded-filter.sh"
 . "$BAR_ROOT/scripts/bar-proofs.sh"
+. "$BAR_ROOT/scripts/bar-targets.sh"
 mapfile -t graded_paths < <(graded_path_entries)
 mapfile -t grader_paths < <(grader_path_entries)
 # R68 F1: the full key covers every graded path (the fingerprint and the
@@ -92,7 +93,9 @@ tests_from_source() {
 # R61 F7: the ready gate's self-test compares its map against this list.
 # `--list` is read-only, like --key, so it stays allowed beside a cell.
 if [[ "$list_only" -eq 1 ]]; then
-    tests_from_source
+    # R91 B2: a dry run of the next bar's targets, with each reason.
+    mapfile -t list_tests < <(tests_from_source)
+    bar_targets_for "$(git rev-parse --show-toplevel)" "${list_tests[@]}"
     exit 0
 fi
 
@@ -136,7 +139,8 @@ summary() {
     fi
     for t in "${tests[@]}"; do
         local runs passes fails cured rf target
-        target="$(bar_target "$t")"
+        # R91 B2: the target pinned in this record (fallback: fixed, 20).
+        target="$(bar_target_for "$record" "$t")"
         runs=$(runs_for "$t" "$record")
         passes=$(passes_for "$t" "$record")
         fails=$(fails_for "$t" "$record")
@@ -213,7 +217,7 @@ run_chunk() {
     local tests=("$@")
     for _ in $(seq 1 "$passes"); do
         for t in "${tests[@]}"; do
-            if [[ "$(runs_for "$t" "$record")" -ge "$(bar_target "$t")" ]]; then
+            if [[ "$(runs_for "$t" "$record")" -ge "$(bar_target_for "$record" "$t")" ]]; then
                 continue
             fi
             local t0=$SECONDS
@@ -682,6 +686,8 @@ if [[ ! -f "$record" ]]; then
 else
     echo "resumed: $(date -u +%FT%TZ) commit $commit (passes requested: $passes)" >> "$record"
 fi
+# R91 B2: pin the targets once, at start; a resume reads them back.
+bar_write_targets "$record" "$(git rev-parse --show-toplevel)" "${all_tests[@]}"
 log="$(mktemp)"
 load_key=""
 cleanup() {
