@@ -902,6 +902,24 @@ The benchmark answers "what does a dollar buy" (round 23):
 - **Impact:** `.50` careers start at phase 1; the stage-5 results of
   every earlier run are suspect (none is published under `.48`/`.49`).
 
+## 37. A faster bar that also catches wrong grades (2026-11-18)
+
+- **Operator** (2026-11-18): "is there any possibility to make this bar
+  optimized and faster and effective?", then "91".
+- **Change** (round 91): the stage-20 lite proof stops re-grading the
+  whole ladder; a proof runs 20 times only when the change since the
+  last passing bar maps to it (`scripts/proof-map.txt`), 5 times
+  otherwise, and every proof 20 times after a change to a path every
+  proof depends on; correctness-only proofs run up to 3 at a time,
+  timing proofs alone; negative proofs (broken fixtures must fail) and a
+  replay of real candidate workspaces with expected verdicts, 3 runs
+  each.
+- **This amends #26** (every grader change ran every proof 20 times).
+  **Why:** a narrow change re-ran 8 hours of proofs it could not affect,
+  and 20 reference passes measure flakiness, not correctness: the
+  coverage, proxy, torn-tail and ticket-2 bugs (rounds 87-89) passed
+  every bar.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

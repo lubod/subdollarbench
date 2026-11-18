@@ -89,3 +89,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [88](88.md) | Rules `.49`: coverage on a fresh build; the bill counts every attempt | merged |
 | [89](89.md) | Rules `.50`: grader fixes from the code audit, each with tests | merged |
 | [90](90.md) | Money and the grid: every dollar counted, every rerun possible | merged |
+| [91](91.md) | A faster bar that also catches wrong grades | open |
