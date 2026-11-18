@@ -2580,7 +2580,9 @@ async fn test_pipeline_eval_only_sql_stage20_pgwire_lite_live() {
         stage: 20,
         prompt_path,
         continuity: true,
-        accepted_stages: (0..=20).collect(),
+        // R91 B1: the lite proof grades its own branch (0-4 and 20), like
+        // the other below-20 lite proofs; the full proof keeps 0-20.
+        accepted_stages: vec![0, 1, 2, 3, 4, 20],
         lite_profile: vec!["pg-simple".to_string()],
         passed_lite: Vec::new(),
         passed_stages: (0..20).collect(),
@@ -2609,7 +2611,7 @@ async fn test_pipeline_eval_only_sql_stage20_pgwire_lite_live() {
                 logger.text()
             );
         }
-    assert_proof_score(&out, &logger, 21, 21);
+    assert_proof_score(&out, &logger, 6, 6);
     cleanup_covtest_network("sqlpglite");
     let _ = fs::remove_dir_all(&dir);
 }
