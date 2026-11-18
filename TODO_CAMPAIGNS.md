@@ -472,3 +472,11 @@ not planned.
   grader) and 90 (money, grid) open; then one bar, a fresh rehearsal,
   deepseek `.50` one career with the checker. Catch-up capped and
   unreached tickets carried (operator "cap catchup"; round 89 F6, F7).
+- **2026-11-18, after the deepseek `.50` careers end:** round 91 (faster
+  bar) merges first; round 92 (draft, rules `.51`, the audit's leftover
+  grader fixes: R89-2's retry cut, R89-1's conclusive revert, coverage
+  of spawned binaries, no symlink copies, restart attribution) then one
+  bar with the optimizations; round 93 (draft, harness/grid guards: the
+  pre-phase red-flag guard that closes the checker's race, one deadline
+  per ticket, zero budget refused, chain budget validated, per-ledger
+  state). The next paid model waits for these.
