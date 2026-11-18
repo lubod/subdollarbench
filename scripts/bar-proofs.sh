@@ -31,6 +31,8 @@ bar_proofs_at() {
 # without 20 x 6 min.
 bar_target() {
     case "$1" in
+        # R63 F4 / R91 spec answer 1: five runs in every bar (a 6-minute
+        # production-shaped self-check); B2's 20/5 rule is for the rest.
         r45_f1_reference_scores_one) echo 5 ;;
         r91_b4_*) echo 3 ;;
         *) echo 20 ;;

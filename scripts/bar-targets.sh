@@ -46,7 +46,7 @@ bar_fixed_target() {
 
 bar_fixed_reason() {
     case "$1" in
-        r45_f1_reference_scores_one) echo "spec question 1: a 6-minute run" ;;
+        r45_f1_reference_scores_one) echo "R63 F4 / spec answer 1: its 5-run production-shaped self-check, at 5 in every case" ;;
         r91_b4_*) echo "deterministic fixture, 3 runs (B4)" ;;
     esac
 }
