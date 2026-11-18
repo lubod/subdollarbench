@@ -1,0 +1,55 @@
+OK 0
+OK 1
+OK 0
+OK 1
+OK 1
+ROWS 2
+id	v
+1	changed
+2	inside
+END 2
+OK 0
+ROWS 2
+id	v
+1	base
+END 1
+OK 0
+OK 1
+OK 0
+ROWS 1
+id
+END 0
+ERR txn
+ERR txn
+OK 0
+ERR txn
+OK 1
+ERR type
+ROWS 1
+id
+3
+END 1
+ERR arity
+ERR no_column
+OK 0
+ROWS 1
+id
+3
+END 1
+OK 0
+ERR no_column
+OK 1
+OK 0
+ROWS 1
+id
+3
+END 1
+OK 0
+OK 1
+OK 0
+OK 0
+OK 0
+ROWS 1
+v
+three
+END 1

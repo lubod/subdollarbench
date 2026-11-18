@@ -25,6 +25,7 @@ src/verifier/sql/driver.rs full
 src/verifier/sql/generator.rs full
 src/verifier/sql/oracle.rs full
 src/verifier/sql/ref_server.rs full
+src/verifier/sql/ref_server.rs core,r91_b4_neg_stage5_lost_older_record,r91_b4_neg_stage11_full_scan,r91_b4_neg_isolation,r91_b4_neg_stage15_insensitive_suite,r91_b4_replay_real_workspaces
 src/verifier/sql/run.rs full
 src/verifier/sql/scenarios.rs full
 src/verifier/sql/schema.rs full

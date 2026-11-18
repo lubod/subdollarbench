@@ -6,7 +6,7 @@
 # proofs. The fast-gate skip list is scripts/live-proofs.sh, which is the
 # SQL_PERF_LIVE holders only; the bar must not shrink to that list.
 bar_proofs_from_source() {
-    { grep -oE 'fn (test_pipeline_eval_only_sql_stage[0-9a-z_]*_live|r4[59]_[a-z0-9_]*|r89_f5_[a-z0-9_]*)' || true; } \
+    { grep -oE 'fn (test_pipeline_eval_only_sql_stage[0-9a-z_]*_live|r4[59]_[a-z0-9_]*|r89_f5_[a-z0-9_]*|r91_b4_[a-z0-9_]*)' || true; } \
         | sed 's/^fn //' | sort -u
 }
 
@@ -32,6 +32,25 @@ bar_proofs_at() {
 bar_target() {
     case "$1" in
         r45_f1_reference_scores_one) echo 5 ;;
+        r91_b4_*) echo 3 ;;
         *) echo 20 ;;
     esac
+}
+
+# R91 B3: the proofs that check answers, never timing (the scheduler's
+# table; a proof not listed is timing, the safe default).
+bar_untimed_here() {
+    case "$1" in
+        test_pipeline_eval_only_sql_stages_0_3_live|\
+        test_pipeline_eval_only_sql_stage4_persistence_live|\
+        test_pipeline_eval_only_sql_stage7_aggregates_live|\
+        test_pipeline_eval_only_sql_stage8_joins_live|\
+        test_pipeline_eval_only_sql_stage8_lite_live|\
+        test_pipeline_eval_only_sql_stage9_constraints_live|\
+        test_pipeline_eval_only_sql_stage10_subqueries_live|\
+        test_pipeline_eval_only_sql_stage13_schema_change_live|\
+        test_pipeline_eval_only_sql_stage14_observability_live)
+            return 0 ;;
+    esac
+    return 1
 }

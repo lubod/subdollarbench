@@ -2463,6 +2463,364 @@ async fn test_pipeline_eval_only_sql_stage19_replication_lite_live() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// R91 B4: run the accepted stages of a negative fixture and return the
+/// stage's own log line. The fixture is broken on purpose; the stage must
+/// FAIL for the expected reason (the caller asserts the line).
+async fn r91_negative_stage(
+    dir: &std::path::Path,
+    workdir: &std::path::Path,
+    worker: u8,
+    stage: u32,
+    accepted: Vec<u32>,
+    passed: Vec<u32>,
+    tag: &str,
+) -> String {
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(
+        &prompt_path,
+        format!("sdb-sql stage-{stage} negative fixture"),
+    )
+    .unwrap();
+    let mut config = covtest_config(workdir.to_path_buf(), worker, tag);
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage,
+        prompt_path,
+        continuity: true,
+        accepted_stages: accepted,
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: passed,
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let _ = BenchmarkPipeline::execute(config, logger.clone(), None).await;
+    logger
+        .text()
+        .lines()
+        .find(|l| l.contains(&format!("Stage {stage}:")))
+        .unwrap_or("no stage line")
+        .to_string()
+}
+
+/// Replace exactly `count` occurrences of `old` in `path`; the negative
+/// fixtures must not silently stop matching the reference's source.
+fn r91_patch(path: &std::path::Path, old: &str, new: &str) {
+    let text = fs::read_to_string(path).unwrap();
+    assert!(
+        text.contains(old),
+        "the reference fixture no longer contains {old:?}"
+    );
+    fs::write(path, text.replacen(old, new, 1)).unwrap();
+}
+
+/// R91 B4: copy a replay fixture's source into a temp workspace (never
+/// `target/`, `.git/`, logs, data or the expected-verdict file).
+fn r91_copy_fixture(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let from = entry.path();
+        if from.is_dir() {
+            if ["target", ".git", "data", "runs"].contains(&name.as_str()) {
+                continue;
+            }
+            r91_copy_fixture(&from, &dst.join(&name))?;
+        } else {
+            if name.ends_with(".log")
+                || name.starts_with(".env")
+                || name == "expected.json"
+                || name.ends_with(".profraw")
+            {
+                continue;
+            }
+            fs::copy(&from, dst.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
+/// R91 B4: replay the two real candidate workspaces (a haiku `.48`
+/// phase-4 and a deepseek `.48` phase-4, source only) through the whole
+/// ladder and compare each stage's verdict with `expected.json`. A
+/// verdict change fails; `SDB_REPLAY_RECORD=1` re-records the file for a
+/// deliberate change (the round file then says why).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r91_b4_replay_real_workspaces() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = repo.join("campaigns/sdb-sql/replay");
+    let mut fixtures: Vec<std::path::PathBuf> = fs::read_dir(&root)
+        .expect("the replay fixtures")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("expected.json").is_file())
+        .collect();
+    fixtures.sort();
+    assert!(
+        fixtures.len() >= 2,
+        "the replay needs at least two fixtures: {fixtures:?}"
+    );
+    let record = std::env::var("SDB_REPLAY_RECORD").ok().as_deref() == Some("1");
+    let mut failures: Vec<String> = Vec::new();
+    for (i, fixture) in fixtures.iter().enumerate() {
+        let name = fixture
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let tag = format!("r91rep{i}");
+        cleanup_covtest_network(&tag);
+        let dir = covtest_dir(&tag);
+        let workdir = dir.join("workspace");
+        r91_copy_fixture(fixture, &workdir).expect("copy the replay fixture");
+        let worker = 121 + i as u8;
+        let prompt_path = dir.join("ticket_prompt.md");
+        fs::write(&prompt_path, format!("sdb-sql replay {name}")).unwrap();
+        let mut config = covtest_config(workdir.clone(), worker, &tag);
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage: 20,
+            prompt_path,
+            continuity: true,
+            accepted_stages: (0..=20).collect(),
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: Vec::new(),
+            spec_md: None,
+            preamble: None,
+            cap_headroom_usd: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let _ = BenchmarkPipeline::execute(config, logger.clone(), None).await;
+        let log = logger.text();
+        let mut got = std::collections::BTreeMap::new();
+        for n in 0..=20u32 {
+            let needle = format!("Stage {n}: ");
+            let verdict = log
+                .lines()
+                .find(|l| l.contains(&needle))
+                .map(|l| {
+                    if l.contains("-> PASS") {
+                        "pass"
+                    } else {
+                        "fail"
+                    }
+                })
+                .unwrap_or("missing");
+            got.insert(n.to_string(), verdict.to_string());
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(fixture.join("expected.json")).unwrap())
+                .unwrap();
+        if record {
+            let mut out = expected.clone();
+            let mut stages = serde_json::Map::new();
+            for (k, v) in &got {
+                stages.insert(k.clone(), serde_json::json!(v));
+            }
+            out["stages"] = serde_json::Value::Object(stages);
+            fs::write(
+                fixture.join("expected.json"),
+                serde_json::to_string_pretty(&out).unwrap() + "\n",
+            )
+            .unwrap();
+        } else {
+            for (k, v) in &got {
+                let want = expected["stages"][k].as_str().unwrap_or("missing");
+                if want != v {
+                    failures.push(format!("{name} stage {k}: expected {want}, got {v}"));
+                }
+            }
+        }
+        cleanup_covtest_network(&tag);
+        let _ = fs::remove_dir_all(&dir);
+    }
+    assert!(
+        failures.is_empty(),
+        "the replay's verdicts changed (update expected.json and the round notes):\n{}",
+        failures.join("\n")
+    );
+}
+
+/// R91 B4 negative, stage 5: a store that loses an older committed record
+/// across the torn tail must fail the crash ladder (the check names the
+/// missing owed key). The fixture is the compact-log reference with its
+/// replay losing the record before the newest.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r91_b4_neg_stage5_lost_older_record() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    cleanup_covtest_network("r91neg5");
+    let worker = 80u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r91neg5");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference_compact(&workdir, port).unwrap();
+    r91_patch(
+        &workdir.join("sql_server.py"),
+        "    for raw in f:\n        if not raw.endswith(b\"\\n\"):\n            # A torn tail: the newest statement may be lost, never an\n            # older one.\n            break\n",
+        "    records = [r for r in f if r.endswith(b\"\\n\")]\n    if len(records) >= 2:\n        # R91 B4 negative: lose the record before the newest.\n        records = records[:-2] + records[-1:]\n    for raw in records:\n",
+    );
+    let line = r91_negative_stage(
+        &dir,
+        &workdir,
+        worker,
+        5,
+        vec![0, 1, 2, 3, 4, 5],
+        Vec::new(),
+        "r91neg5",
+    )
+    .await;
+    assert!(
+        line.contains("FAIL"),
+        "the broken store passed stage 5: {line}"
+    );
+    assert!(
+        line.contains("missing (committed before the tear and owed)"),
+        "stage 5 failed for another reason: {line}"
+    );
+    cleanup_covtest_network("r91neg5");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// R91 B4 negative, stage 11: a store that accepts CREATE INDEX but never
+/// builds one full-scans the indexed table and must fail the perf gate
+/// with the indexed budget reason.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r91_b4_neg_stage11_full_scan() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    cleanup_covtest_network("r91neg11");
+    let worker = 21u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r91neg11");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    r91_patch(
+        &workdir.join("sql_server.py"),
+        "                reply = timed_answer(conn, sql)",
+        "                reply = b\"OK 0\\n\" if sql.strip().upper().startswith(\"CREATE INDEX\") else timed_answer(conn, sql)",
+    );
+    let line = r91_negative_stage(
+        &dir,
+        &workdir,
+        worker,
+        11,
+        vec![0, 1, 2, 3, 4, 11],
+        Vec::new(),
+        "r91neg11",
+    )
+    .await;
+    assert!(
+        line.contains("FAIL"),
+        "the unindexed store passed stage 11: {line}"
+    );
+    assert!(
+        line.contains("indexed p50"),
+        "stage 11 failed for another reason: {line}"
+    );
+    cleanup_covtest_network("r91neg11");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// R91 B4 negative, stage 6: a store whose BEGIN does not start a
+/// transaction leaks an uncommitted row; the isolation check must fail
+/// with that reason.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r91_b4_neg_isolation() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    cleanup_covtest_network("r91neg6");
+    let worker = 70u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r91neg6");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    // R91 B4: BEGIN is answered OK without starting a transaction, so the
+    // INSERT autocommits and the peer sees it.
+    r91_patch(
+        &workdir.join("sql_server.py"),
+        "def timed_answer(conn, sql):",
+        "def timed_answer(conn, sql):\n    if first_keyword(sql) == \"BEGIN\":\n        return b\"OK 0\\n\"",
+    );
+    let line = r91_negative_stage(
+        &dir,
+        &workdir,
+        worker,
+        6,
+        vec![4, 5, 6],
+        vec![0, 1, 2, 3],
+        "r91neg6",
+    )
+    .await;
+    assert!(
+        line.contains("FAIL"),
+        "the non-isolating store passed stage 6: {line}"
+    );
+    assert!(
+        line.contains("an uncommitted row is visible to another connection"),
+        "stage 6 failed for another reason: {line}"
+    );
+    cleanup_covtest_network("r91neg6");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// R91 B4 negative, stage 15: a suite that stays green when the feature
+/// is reverted must fail the sensitivity check.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r91_b4_neg_stage15_insensitive_suite() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    cleanup_covtest_network("r91neg15");
+    let worker = 45u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r91neg15");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    install_tests_ci_fixture(&workdir, port);
+    // The always-green suite (with a plausible coverage self-report).
+    fs::write(
+        workdir.join("test.sh"),
+        "#!/bin/sh\nprintf 'coverage: 100.0%%\\n'\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workdir.join("test.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let line = r91_negative_stage(
+        &dir,
+        &workdir,
+        worker,
+        15,
+        (0..=15).collect(),
+        Vec::new(),
+        "r91neg15",
+    )
+    .await;
+    assert!(
+        line.contains("FAIL"),
+        "the insensitive suite passed stage 15: {line}"
+    );
+    assert!(
+        line.contains("stayed green") && line.contains("reverted"),
+        "stage 15 failed for another reason: {line}"
+    );
+    cleanup_covtest_network("r91neg15");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Ticket 20 live proof (eval-only, no model): the reference serves
 /// PostgreSQL protocol 3.0 on a second port; the harness frontend and a
 /// stock psql check SSL, startup/auth, simple + extended query,

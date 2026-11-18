@@ -1,0 +1,29 @@
+{
+  "captured_rules": "2026-11-15.48",
+  "fixture": "deepseek48-phase4",
+  "note": "captured from the source run ladder; the replay proof re-derives at the gap and updates this file with a note",
+  "source_run": "campaign_sdb-sql_openrouter_deepseek_deepseek-v4.1-flash-1017_20261116_011224_w1",
+  "stages": {
+    "0": "pass",
+    "1": "pass",
+    "10": "pass",
+    "11": "pass",
+    "12": "pass",
+    "13": "pass",
+    "14": "pass",
+    "15": "fail",
+    "16": "pass",
+    "17": "pass",
+    "18": "pass",
+    "19": "pass",
+    "2": "pass",
+    "20": "pass",
+    "3": "pass",
+    "4": "pass",
+    "5": "pass",
+    "6": "pass",
+    "7": "pass",
+    "8": "pass",
+    "9": "pass"
+  }
+}

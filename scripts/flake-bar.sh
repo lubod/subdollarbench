@@ -340,8 +340,10 @@ if [[ "$self_test" -eq 1 ]]; then
         printf '%s\n' "${bar_tests[@]}" | grep -qx "$t" \
             || { echo "[flake] bar list missing $t"; exit 1; }
     done
-    [[ ${#bar_tests[@]} -eq 28 ]] \
-        || { echo "[flake] bar list has ${#bar_tests[@]} tests, expected 28"; exit 1; }
+    # 30 before round 91 (round 89 added the two reference proofs); R91 B4
+    # adds the four negative proofs and the replay.
+    [[ ${#bar_tests[@]} -eq 35 ]] \
+        || { echo "[flake] bar list has ${#bar_tests[@]} tests, expected 35"; exit 1; }
 
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT

@@ -40,6 +40,14 @@ bar_gates_dir() {
 bar_fixed_target() {
     case "$1" in
         r45_f1_reference_scores_one) echo 5 ;;
+        r91_b4_*) echo 3 ;;
+    esac
+}
+
+bar_fixed_reason() {
+    case "$1" in
+        r45_f1_reference_scores_one) echo "spec question 1: a 6-minute run" ;;
+        r91_b4_*) echo "deterministic fixture, 3 runs (B4)" ;;
     esac
 }
 
@@ -122,7 +130,7 @@ bar_targets_for() {
     for p in "${proofs[@]}"; do
         fixed="$(bar_fixed_target "$p")"
         if [[ -n "$fixed" ]]; then
-            echo "TARGET $p $fixed fixed (spec question 1: a 6-minute run)"
+            echo "TARGET $p $fixed fixed ($(bar_fixed_reason "$p"))"
         elif [[ "$global" -eq 1 ]]; then
             echo "TARGET $p 20 $why"
         elif [[ -n "${selected[$p]:-}" ]]; then

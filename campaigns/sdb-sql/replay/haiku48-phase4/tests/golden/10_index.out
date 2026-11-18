@@ -1,0 +1,53 @@
+OK 0
+OK 4
+OK 0
+ERR exists
+ERR no_table
+ERR no_column
+OK 0
+ERR constraint
+ERR constraint
+OK 1
+OK 0
+OK 1
+ERR constraint
+OK 0
+OK 0
+OK 2
+ERR constraint
+OK 1
+OK 0
+ERR no_table
+ERR no_table
+ROWS 2
+id	email
+2	b@x
+END 1
+ROWS 1
+id
+40
+END 1
+ROWS 1
+id
+3
+5
+END 2
+ROWS 1
+id
+2
+3
+5
+END 3
+OK 0
+OK 0
+OK 0
+OK 0
+OK 0
+ROWS 2
+id	n
+1	1
+2	2
+3	3
+5	5
+40	\N
+END 5

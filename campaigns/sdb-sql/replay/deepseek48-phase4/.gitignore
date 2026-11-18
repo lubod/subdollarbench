@@ -1,0 +1,9 @@
+target/
+node_modules/
+__pycache__/
+*.o
+*.tmp
+appendonly.log
+*.aof
+*.rdb
+FEEDBACK_REPORT.md
