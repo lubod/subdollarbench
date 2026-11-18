@@ -5205,3 +5205,23 @@ fn r91_b2_targets_follow_the_change() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// R91 B3: the bar's plan runs only correctness-only proofs in parallel,
+/// at most 3 at once, on distinct workers and ports; a proof not in the
+/// table (and every timing proof) runs alone. The shell self-test also
+/// checks the table against each proof's own worker.
+#[test]
+fn r91_b3_parallel_only_untimed() {
+    let root = crate::config::get_repo_root();
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/bar-scheduler.sh"))
+        .arg("--self-test")
+        .output()
+        .expect("run scripts/bar-scheduler.sh --self-test");
+    assert!(
+        out.status.success(),
+        "bar scheduler self-test failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
