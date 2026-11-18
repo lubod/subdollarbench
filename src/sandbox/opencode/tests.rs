@@ -888,6 +888,34 @@ fn r85_run_with_stub(
     std::path::PathBuf,
     crate::sandbox::docker::SandboxManager,
 ) {
+    r85_run_with_stub_limits(
+        base,
+        case,
+        prompt,
+        crate::sandbox::omp::AgentExecutionLimits {
+            max_turns: Some(3),
+            max_budget_usd: Some(0.05),
+            max_effective_usd: None,
+            timeout_seconds: Some(120),
+        },
+        None,
+    )
+}
+
+/// R90 M4: the same real-cell run with the caller's limits (the in-flight
+/// billing test ends the session while the stub's call is still open).
+fn r85_run_with_stub_limits(
+    base: &std::path::Path,
+    case: &str,
+    prompt: &str,
+    limits: crate::sandbox::omp::AgentExecutionLimits,
+    cancel: Option<Arc<AtomicBool>>,
+) -> (
+    Result<OmpSessionStats>,
+    Vec<String>,
+    std::path::PathBuf,
+    crate::sandbox::docker::SandboxManager,
+) {
     let id = format!(
         "r85-f1-{}-{}",
         std::process::id(),
@@ -916,17 +944,12 @@ fn r85_run_with_stub(
             prompt,
             workdir: &ws,
             api_key: Some("sk-covtest"),
-            limits: crate::sandbox::omp::AgentExecutionLimits {
-                max_turns: Some(3),
-                max_budget_usd: Some(0.05),
-                max_effective_usd: None,
-                timeout_seconds: Some(120),
-            },
+            limits,
             effort: Some("high"),
             network: Some(&net),
             task: None,
             run_id: Some(&run_id),
-            cancel_flag: None,
+            cancel_flag: cancel,
             worker: 0,
         },
         move |line| logs_c.lock().unwrap().push(line),
@@ -991,6 +1014,113 @@ fn r85_f1_billed_from_the_calls() {
             .any(|l| l.contains("[BILLED]") && l.contains("OpenRouter's charge")),
         "{logs:?}"
     );
+    mgr.cleanup();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// R90 M4: a session ended (its timeout) while the stub's slow call is
+/// still open still bills that call: the runner waits for the sidecar's
+/// in-flight record before it reads the bill.
+#[test]
+fn r90_m4_in_flight_call_is_billed() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let base = r79_temp_dir("r90-m4-inflight");
+    let limits = crate::sandbox::omp::AgentExecutionLimits {
+        max_turns: Some(3),
+        max_budget_usd: Some(0.05),
+        max_effective_usd: None,
+        // The session ends long before the stub's slow call answers.
+        timeout_seconds: Some(1),
+    };
+    std::env::set_var("SDB_STUB_SLOW_SECS", "12");
+    // End the session once the sidecar has the call open: the marker
+    // directory is the proxy's own account of an in-flight request.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_run = cancel.clone();
+    let base_run = base.clone();
+    let handle = std::thread::spawn(move || {
+        r85_run_with_stub_limits(&base_run, "slow", "the slow call", limits, Some(cancel_run))
+    });
+    let open = base.join("billed.jsonl.open");
+    for _ in 0..150 {
+        if std::fs::read_dir(&open)
+            .map(|rd| rd.flatten().next().is_some())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (res, logs, _stub_log, mgr) = handle.join().expect("the run thread");
+    std::env::remove_var("SDB_STUB_SLOW_SECS");
+    // A timed-out session is an error envelope, but its partial stats
+    // carry the bill the wait recovered.
+    let err = res.expect_err("a timed-out session is not a clean result");
+    let exec = err
+        .downcast_ref::<OmpExecutionError>()
+        .expect("OmpExecutionError");
+    let st = &exec.partial_stats;
+    let billed_log = std::fs::read_to_string(base.join("billed.jsonl")).unwrap_or_default();
+    assert_eq!(
+        billed_log.lines().count(),
+        1,
+        "the in-flight call's record is missing: {billed_log:?}\n{logs:?}"
+    );
+    assert!(
+        (st.billed_usd - 0.001).abs() < 1e-12,
+        "the runner billed {} for the in-flight call, want 0.001: {logs:?}",
+        st.billed_usd
+    );
+    // The helper itself: a record that lands while the marker is open is
+    // billed only because wait_idle waited for it. (The real session above
+    // shows the wiring; this part makes the wait itself discriminating.)
+    let sim = base.join("sim");
+    std::fs::create_dir_all(&sim).unwrap();
+    let sim_log = sim.join("billed.jsonl");
+    std::fs::write(&sim_log, "").unwrap();
+    let sim_open = sim.join("billed.jsonl.open");
+    std::fs::create_dir_all(&sim_open).unwrap();
+    std::fs::write(sim_open.join("request-1"), "POST /api/v1/chat\n").unwrap();
+    let proxy = BillingProxy {
+        name: String::new(),
+        log: sim_log.clone(),
+        start_offset: 0,
+        url: String::new(),
+        stale: Vec::new(),
+    };
+    let writer = {
+        let log = sim_log.clone();
+        let open = sim_open.clone();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .unwrap()
+                .write_all(b"{\"id\":\"sim\",\"cost\":0.001,\"status\":200}\n")
+                .unwrap();
+            std::fs::remove_file(open.join("request-1")).unwrap();
+        })
+    };
+    let still = proxy.wait_idle(std::time::Duration::from_secs(5));
+    // Read before joining the writer: only the wait makes the record
+    // visible at this point.
+    let sim_bill = proxy.read();
+    writer.join().unwrap();
+    assert!(
+        still.is_empty(),
+        "wait_idle gave up on an open call: {still:?}"
+    );
+    assert_eq!(sim_bill.calls, 1, "the waited-for record was not read");
+    assert!(
+        (sim_bill.cost - 0.001).abs() < 1e-12,
+        "the waited-for record's cost is {}",
+        sim_bill.cost
+    );
+    // The log line is best effort (the forwarder may drain after the
+    // error envelope); the record and the billed total are the evidence.
     mgr.cleanup();
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -1790,6 +1920,31 @@ wait_for_kill() {
 }
 
 case "$1" in
+  inspect)
+    n=0
+    if [ -n "$state" ] && [ -f "${state}.inspect" ]; then n=$(cat "${state}.inspect"); fi
+    n=$((n + 1))
+    if [ -n "$state" ]; then printf '%s' "$n" > "${state}.inspect"; fi
+    case "$scenario" in
+      inspect_blip)
+        if [ "$n" -le 1 ]; then exit 1; fi
+        printf 'true\n'
+        exit 0
+        ;;
+      inspect_dead)
+        printf 'false\n'
+        exit 0
+        ;;
+      inspect_removed)
+        printf 'Error: No such object: covtest-egress\n' >&2
+        exit 1
+        ;;
+      *)
+        printf 'true\n'
+        exit 0
+        ;;
+    esac
+    ;;
   rm|kill)
     if [ -n "$state" ] && [ -f "$started" ]; then : > "$kill"; fi
     exit 0
@@ -2319,6 +2474,91 @@ fn oc_driver() {
     println!("fake-docker opencode scenarios passed ({passed})");
 }
 
+/// R90 M4: one failed `docker inspect` is not a sidecar death; only a
+/// removed container or a successful `State.Running == false` is. The
+/// fake `docker` lives in a child so PATH stays out of the parallel suite.
+#[test]
+fn r90_m4_inspect_blip_is_not_a_death() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let root = std::env::temp_dir().join(format!("r90-inspect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let docker = root.join("bin/docker");
+    std::fs::write(&docker, FAKE_DOCKER).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sandbox::opencode::tests::r90_m4_inspect_driver",
+            "--nocapture",
+        ])
+        .env("SDB_R90_INSPECT_DRIVER", "1")
+        .env(BIN_ENV, root.join("bin"))
+        .env(WORK_ENV, &root)
+        .output()
+        .expect("spawn the inspect driver");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the inspect driver failed:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("inspect blip scenarios passed"),
+        "the driver must report its scenarios; got:\n{stdout}\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The child entry of `r90_m4_inspect_blip_is_not_a_death`.
+#[test]
+fn r90_m4_inspect_driver() {
+    if std::env::var("SDB_R90_INSPECT_DRIVER").ok().as_deref() != Some("1") {
+        return;
+    }
+    let bin = std::env::var(BIN_ENV).expect("bin");
+    let work = PathBuf::from(std::env::var(WORK_ENV).expect("work"));
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{bin}:{old_path}"));
+    std::env::set_var("SDB_COVTEST_STATE", work.join("state-inspect"));
+    let log = work.join("billed.jsonl");
+    std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_blip");
+    let proxy = BillingProxy {
+        name: "covtest-egress".to_string(),
+        log: log.clone(),
+        start_offset: 0,
+        url: String::new(),
+        stale: Vec::new(),
+    };
+    assert!(
+        !proxy.exited(),
+        "one inspect failure must not read as the sidecar's death"
+    );
+    std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_dead");
+    let dead = BillingProxy {
+        name: "covtest-egress".to_string(),
+        log,
+        start_offset: 0,
+        url: String::new(),
+        stale: Vec::new(),
+    };
+    assert!(dead.exited(), "a running=false inspect is a death");
+    std::env::set_var("SDB_COVTEST_SCENARIO", "inspect_removed");
+    let removed = BillingProxy {
+        name: "covtest-egress".to_string(),
+        log: work.join("billed.jsonl"),
+        start_offset: 0,
+        url: String::new(),
+        stale: Vec::new(),
+    };
+    assert!(removed.exited(), "a removed sidecar is a death");
+    println!("inspect blip scenarios passed");
+}
+
 /// Re-exec'd child entry point: the parent sets DRIVER_ENV, so a normal
 /// suite run is a no-op.
 #[test]
@@ -2724,4 +2964,57 @@ fn r89_f3_real_provider_errors_still_trip() {
         !OpenCodeRunner::is_throttled_noop(true, 100, 0),
         "a session that did work is not a throttle no-op"
     );
+}
+
+/// R90-1: a marker an earlier session left open is moved aside at the
+/// next session's start, so it can never make that session wait the full
+/// 90 s; this session's own timed-out marker is moved aside at the deadline.
+#[test]
+fn r90_m4_stale_marker_does_not_delay_the_next_session() {
+    let _env = R85_ENV_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("r90-m4-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("billed.jsonl");
+    std::fs::write(&log, "").unwrap();
+    let open = dir.join("billed.jsonl.open");
+    std::fs::create_dir_all(&open).unwrap();
+    std::fs::write(open.join("old-call"), "POST /api/v1/chat\n").unwrap();
+    let old_filter = std::env::var_os("SDB_EGRESS_FILTER");
+    std::env::remove_var("SDB_EGRESS_FILTER");
+    std::env::remove_var("SDB_OPENCODE_BASE_URL");
+    let proxy = BillingProxy::start(None, &dir, "http://unused").expect("standalone start");
+    if let Some(v) = old_filter {
+        std::env::set_var("SDB_EGRESS_FILTER", v);
+    }
+    assert_eq!(proxy.stale, vec!["old-call".to_string()]);
+    assert!(
+        !open.join("old-call").exists(),
+        "the earlier session's marker is still live"
+    );
+    assert!(
+        dir.join("billed.jsonl.lost/old-call").exists(),
+        "the stale marker is not kept as evidence"
+    );
+    let t0 = std::time::Instant::now();
+    let still = proxy.wait_idle(std::time::Duration::from_secs(2));
+    assert!(
+        still.is_empty(),
+        "the stale marker was waited for: {still:?}"
+    );
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(1),
+        "the next session waited {:?} on a stale marker",
+        t0.elapsed()
+    );
+    // This session's own call that outlives the deadline is moved aside
+    // at the deadline, named, and kept.
+    std::fs::write(open.join("this-call"), "POST /api/v1/chat\n").unwrap();
+    let t0 = std::time::Instant::now();
+    let still = proxy.wait_idle(std::time::Duration::from_millis(50));
+    assert_eq!(still, vec!["this-call".to_string()]);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(1));
+    assert!(!open.join("this-call").exists());
+    assert!(dir.join("billed.jsonl.lost/this-call").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

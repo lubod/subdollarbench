@@ -12,6 +12,8 @@
 src/pipeline.rs full
 src/pipeline/tests.rs core
 src/campaign.rs full
+src/campaign/** core
+src/config.rs core
 src/scoring.rs full
 src/sandbox/** full
 src/verifier/mod.rs full
@@ -53,5 +55,11 @@ tasks/** core
 extensions/** core
 build.rs core
 scripts/graded-paths.txt core
+Cargo.toml full
 Cargo.lock full
+Dockerfile.sandbox full
 rust-toolchain.toml full
+src/grading.rs core
+src/lib.rs core
+src/main.rs core
+src/main_campaign.rs core

@@ -53,7 +53,15 @@ grader build.rs
 plumbing src/report/graded-files.txt
 plumbing scripts/graded-paths.txt
 grader extensions
+grader Cargo.toml
 grader Cargo.lock
 grader rust-toolchain.toml
+# R90 M5: the campaign binary's entry points and the grading lock decide
+# what runs and how a phase inherits; they are plumbing (a change needs
+# the $0 rehearsal, not a 7-hour bar).
+grader src/grading.rs
+plumbing src/lib.rs
+plumbing src/main.rs
+plumbing src/main_campaign.rs
 exclude-name tests.rs
 keep src/pipeline/tests.rs

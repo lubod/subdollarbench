@@ -450,6 +450,7 @@ d = {
     "worker": int(worker),
     "chain": chain,
     "cost_usd": 0.0,
+    "billed_usd": 0.0,
     "points": 0.0,
     "over_budget": False,
     "over_wall": False,
@@ -474,6 +475,9 @@ if m:
             phase=r.get("phase"),
             chain_from=r.get("chain_from"),
             cost_usd=float(r.get("total_cost_usd") or 0.0),
+            # R90 M2: the provider's real bill, summed over the phase's
+            # tickets; the grid records it and the cap counts the larger.
+            billed_usd=float(r.get("billed_usd") or 0.0),
             points=float(r.get("points") or 0.0),
             over_budget=bool(r.get("over_budget")),
             over_wall=bool(r.get("over_wall")),

@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::sandbox::omp::{
     AgentRunSpec, OmpBillingError, OmpExecutionError, OmpRunner, OmpSessionStats,
@@ -786,6 +786,10 @@ struct BillingProxy {
     /// wrote), so this session's bill is the lines after this offset.
     start_offset: u64,
     url: String,
+    /// R90-1: markers an earlier session left open (its sidecar is gone).
+    /// They were moved aside at this session's start, so they never make
+    /// this session wait; the names are kept for the log.
+    stale: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -796,12 +800,56 @@ struct BilledSummary {
 }
 
 impl BillingProxy {
+    /// R90-1: where markers left open by a session that ended are kept as
+    /// evidence (they are moved out of the live directory so they cannot
+    /// make the next session wait for a call whose sidecar is gone).
+    fn lost_dir(log: &std::path::Path) -> PathBuf {
+        PathBuf::from(format!("{}.lost", log.display()))
+    }
+
+    /// R90-1: move `names` out of `log.open` into `log.lost`; the names
+    /// are returned whether or not the rename found the file.
+    fn stash(log: &std::path::Path, names: &[String]) -> Vec<String> {
+        let open = PathBuf::from(format!("{}.open", log.display()));
+        let lost = Self::lost_dir(log);
+        if !names.is_empty() {
+            let _ = std::fs::create_dir_all(&lost);
+        }
+        for name in names {
+            let from = open.join(name);
+            let to = lost.join(name);
+            if from.exists() && std::fs::rename(&from, &to).is_err() {
+                // A name collision from an older session: suffix it.
+                let alt = lost.join(format!("{name}.{}", std::process::id()));
+                let _ = std::fs::rename(&from, &alt);
+            }
+        }
+        names.to_vec()
+    }
+
+    /// R90-1: every marker in the live directory belongs to an earlier
+    /// session (this one has not started a call yet); move them aside.
+    fn stash_stale(log: &std::path::Path) -> Vec<String> {
+        let open = PathBuf::from(format!("{}.open", log.display()));
+        let names: Vec<String> = std::fs::read_dir(&open)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::stash(log, &names)
+    }
+
     fn start(network: Option<&str>, run_dir: &std::path::Path, upstream: &str) -> Result<Self> {
         let log = run_dir.join("billed.jsonl");
         // R88 F2: never delete the log at a session start. A phase's
         // `billed.jsonl` holds every record it wrote; a session's bill is
         // read from this offset, so earlier sessions are not double-counted.
         let start_offset = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        // R90-1: an earlier session's open marker is not this session's
+        // call; move it aside once, so only this session's calls wait.
+        let stale = Self::stash_stale(&log);
         if std::env::var("SDB_OPENCODE_BASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -814,6 +862,7 @@ impl BillingProxy {
                 log,
                 start_offset,
                 url: String::new(),
+                stale,
             });
         }
         let Some(net) = network else {
@@ -829,6 +878,7 @@ impl BillingProxy {
                 log,
                 start_offset,
                 url: String::new(),
+                stale,
             });
         };
         let Some(id) = net.strip_prefix("subdollar-net-") else {
@@ -838,6 +888,7 @@ impl BillingProxy {
                 log,
                 start_offset,
                 url: String::new(),
+                stale,
             });
         };
         let mgr = crate::sandbox::docker::SandboxManager::with_id(id);
@@ -855,6 +906,7 @@ impl BillingProxy {
             log,
             start_offset,
             url,
+            stale,
         })
     }
 
@@ -899,19 +951,72 @@ impl BillingProxy {
         s
     }
 
+    /// R90 M4: the directory of in-flight request markers the sidecar
+    /// keeps beside the log.
+    fn open_dir(&self) -> PathBuf {
+        PathBuf::from(format!("{}.open", self.log.display()))
+    }
+
+    /// R90 M4: wait (bounded) until the sidecar has no request open, so a
+    /// call the session's end interrupted has time to write its record.
+    /// Returns the markers still open at the deadline (named, never lost
+    /// without a word).
+    fn wait_idle(&self, max: Duration) -> Vec<String> {
+        let dir = self.open_dir();
+        let deadline = Instant::now() + max;
+        loop {
+            let names: Vec<String> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if names.is_empty() {
+                return names;
+            }
+            if Instant::now() >= deadline {
+                // R90-1: give up on these calls, but do not let their
+                // markers make every later session wait too; keep them as
+                // evidence.
+                return Self::stash(&self.log, &names);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     /// True when the sidecar is gone (a mid-run death is a harness fault,
-    /// never a graded result).
+    /// never a graded result). R90 M4: a transient `docker inspect`
+    /// failure is not a death: retry, and require a successful
+    /// `State.Running == false` to say the sidecar died.
     fn exited(&self) -> bool {
         if self.name.is_empty() {
             return false;
         }
-        let out = Command::new("docker")
-            .args(["inspect", "-f", "{{.State.Running}}", &self.name])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() != "true",
-            _ => true,
+        for attempt in 0..3u64 {
+            let out = Command::new("docker")
+                .args(["inspect", "-f", "{{.State.Running}}", &self.name])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    return String::from_utf8_lossy(&o.stdout).trim() == "false";
+                }
+                // A removed sidecar is gone; a transient daemon failure is
+                // not. `docker inspect` says "No such object" for the
+                // former and something else (or nothing) for the latter.
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr).to_lowercase();
+                    if err.contains("no such object") || err.contains("not found") {
+                        return true;
+                    }
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(Duration::from_millis(100 * (attempt + 1)));
         }
+        // Unknown, not dead: the missing bill records (named by the
+        // caller) are the evidence to act on.
+        false
     }
 }
 
@@ -1168,6 +1273,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(1800));
         let deadline = start_time + timeout;
+        if !billing.stale.is_empty() {
+            let _ = tx.send(format!(
+                "[BILLED] moved {} stale marker(s) from an earlier session aside",
+                billing.stale.len()
+            ));
+        }
         let _ = tx.send(format!(
             "[TELEMETRY] turn=0 max_turns={} spent=0.000000 tokens=0",
             limits.max_turns.unwrap_or(0)
@@ -1472,6 +1583,22 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
                     &effective_model,
                     &mut reconcile_log,
                 );
+            }
+            // R90 M4: the session ended while the sidecar may still be
+            // in its next call; wait for its record (bounded) before
+            // reading the bill, and name any call that never landed.
+            let wait_start = Instant::now();
+            let still_open = billing.wait_idle(Duration::from_secs(90));
+            if wait_start.elapsed() >= Duration::from_millis(500) {
+                let _ = retry_tx.send(format!(
+                    "[BILLED] waited {:.1}s for the open call's record",
+                    wait_start.elapsed().as_secs_f64()
+                ));
+            }
+            for name in &still_open {
+                let _ = retry_tx.send(format!(
+                    "[BILLED] no record for the request open when the session ended (moved aside): {name}"
+                ));
             }
             // R85 F1: the proxy's billed.jsonl is the run's real bill
             // (cumulative across attempts); a call with no usage.cost is
