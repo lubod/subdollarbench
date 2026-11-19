@@ -453,6 +453,7 @@ fn covtest_config(workdir: PathBuf, worker: u8, tag: &str) -> BenchmarkConfig {
         feedback_rounds: 0,
         campaign_stage: None,
         baseline_rps: None,
+        reference_fixture: false,
     }
 }
 
@@ -697,6 +698,7 @@ async fn test_pipeline_cancelled_early() {
         feedback_rounds: 0,
         campaign_stage: None,
         baseline_rps: None,
+        reference_fixture: false,
     };
 
     let res = BenchmarkPipeline::execute(config, Arc::new(DummyLogger), Some(cancel)).await;
@@ -732,6 +734,7 @@ async fn test_pipeline_buffers_and_writes_console_log() {
         feedback_rounds: 0,
         campaign_stage: None,
         baseline_rps: None,
+        reference_fixture: false,
     };
 
     struct CaptureLogger(std::sync::Mutex<Vec<String>>);
@@ -2482,6 +2485,9 @@ async fn r91_negative_stage(
     )
     .unwrap();
     let mut config = covtest_config(workdir.to_path_buf(), worker, tag);
+    // The workspace is the harness's own reference with a deliberate
+    // defect; the embedded-SQL scan targets candidate code.
+    config.reference_fixture = true;
     config.task = TaskType::Sql;
     config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
         campaign: "covtest-sdb-sql".to_string(),
@@ -2498,9 +2504,13 @@ async fn r91_negative_stage(
     });
     let logger = Arc::new(RecordingLogger::default());
     let _ = BenchmarkPipeline::execute(config, logger.clone(), None).await;
+    if std::env::var("SDB_R91_DEBUG").ok().as_deref() == Some("1") {
+        eprintln!("--- negative stage log ---\n{}", logger.text());
+    }
     logger
         .text()
         .lines()
+        .rev()
         .find(|l| l.contains(&format!("Stage {stage}:")))
         .unwrap_or("no stage line")
         .to_string()
@@ -2578,6 +2588,18 @@ async fn r91_b4_replay_real_workspaces() {
         let dir = covtest_dir(&tag);
         let workdir = dir.join("workspace");
         r91_copy_fixture(fixture, &workdir).expect("copy the replay fixture");
+        // R91 B4: the model path builds a Rust candidate before staging;
+        // an eval-only replay must do the same (the workspace has no
+        // target/). A Python fixture has no Cargo.toml.
+        if workdir.join("Cargo.toml").is_file() {
+            let sandbox = crate::sandbox::docker::SandboxManager::with_id(&tag);
+            sandbox
+                .build_rust_candidate(
+                    &workdir,
+                    crate::sandbox::docker::SandboxManager::RUST_BUILD_TIMEOUT_SECS,
+                )
+                .expect("build the replay fixture");
+        }
         let worker = 121 + i as u8;
         let prompt_path = dir.join("ticket_prompt.md");
         fs::write(&prompt_path, format!("sdb-sql replay {name}")).unwrap();
@@ -2599,6 +2621,9 @@ async fn r91_b4_replay_real_workspaces() {
         let logger = Arc::new(RecordingLogger::default());
         let _ = BenchmarkPipeline::execute(config, logger.clone(), None).await;
         let log = logger.text();
+        if std::env::var("SDB_R91_DEBUG").ok().as_deref() == Some("1") {
+            eprintln!("--- replay {name} ---\n{log}");
+        }
         let mut got = std::collections::BTreeMap::new();
         for n in 0..=20u32 {
             let needle = format!("Stage {n}: ");
@@ -2665,15 +2690,20 @@ async fn r91_b4_neg_stage5_lost_older_record() {
     r91_patch(
         &workdir.join("sql_server.py"),
         "    for raw in f:\n        if not raw.endswith(b\"\\n\"):\n            # A torn tail: the newest statement may be lost, never an\n            # older one.\n            break\n",
-        "    records = [r for r in f if r.endswith(b\"\\n\")]\n    if len(records) >= 2:\n        # R91 B4 negative: lose the record before the newest.\n        records = records[:-2] + records[-1:]\n    for raw in records:\n",
+        "    data = f.read()\n    lines = [r for r in data.split(b\"\\n\") if r]\n    try:\n        expected = int(open(os.path.join(DATA, \"store.seq\")).read())\n    except Exception:\n        expected = len(lines)\n    if len(lines) < expected:\n        # R91 B4 negative: a tear costs a committed acked row too.\n        for i, raw in enumerate(lines):\n            if b\"_acked\" in raw and raw.lstrip().upper().startswith(b\"INSERT\"):\n                del lines[i]\n                break\n    for raw in lines:\n",
+    );
+    r91_patch(
+        &workdir.join("sql_server.py"),
+        "            if COMPACT and first_keyword(sql) in WRITE_KEYWORDS:\n                try:\n                    with open(os.path.join(DATA, \"store.log\"), \"a\") as lf:\n                        lf.write(sql + \"\\n\")\n                        lf.flush()\n                        os.fsync(lf.fileno())\n                except OSError as e:",
+        "            if COMPACT and first_keyword(sql) in WRITE_KEYWORDS:\n                try:\n                    with open(os.path.join(DATA, \"store.log\"), \"a\") as lf:\n                        lf.write(sql + \"\\n\")\n                        lf.flush()\n                        os.fsync(lf.fileno())\n                    n = 0\n                    try:\n                        n = int(open(os.path.join(DATA, \"store.seq\")).read())\n                    except Exception:\n                        n = 0\n                    with open(os.path.join(DATA, \"store.seq\"), \"w\") as sf:\n                        sf.write(str(n + 1))\n                except OSError as e:",
     );
     let line = r91_negative_stage(
         &dir,
         &workdir,
         worker,
         5,
-        vec![0, 1, 2, 3, 4, 5],
-        Vec::new(),
+        vec![5],
+        vec![0, 1, 2, 3, 4],
         "r91neg5",
     )
     .await;
@@ -2705,7 +2735,7 @@ async fn r91_b4_neg_stage11_full_scan() {
     r91_patch(
         &workdir.join("sql_server.py"),
         "                reply = timed_answer(conn, sql)",
-        "                reply = b\"OK 0\\n\" if sql.strip().upper().startswith(\"CREATE INDEX\") else timed_answer(conn, sql)",
+        "                reply = b\"OK 0\\n\" if (sql.strip().upper().startswith(\"CREATE INDEX\") and \"(k)\" in sql) else timed_answer(conn, sql)",
     );
     let line = r91_negative_stage(
         &dir,
@@ -2747,7 +2777,7 @@ async fn r91_b4_neg_isolation() {
     r91_patch(
         &workdir.join("sql_server.py"),
         "def timed_answer(conn, sql):",
-        "def timed_answer(conn, sql):\n    if first_keyword(sql) == \"BEGIN\":\n        return b\"OK 0\\n\"",
+        "def timed_answer(conn, sql):\n    if \"_iso\" in sql and first_keyword(sql) in (\"INSERT\", \"UPDATE\", \"DELETE\", \"REPLACE\"):\n        out = answer(conn, sql)\n        conn.commit()\n        return out",
     );
     let line = r91_negative_stage(
         &dir,
@@ -4322,6 +4352,7 @@ fn main() {
         &[],
         &[],
         true,
+        false,
     )
     .await;
     assert!(
@@ -4389,6 +4420,7 @@ async fn r81_f3_lang_failure_unit() {
         &[],
         &[],
         true,
+        false,
     )
     .await;
     assert!(!outcome.infra_error, "graded, not a harness fault");
@@ -4493,6 +4525,7 @@ async fn r81_f3_rust_server_pipeline_unit() {
         &[],
         &[],
         true,
+        false,
     )
     .await;
     assert!(!outcome.infra_error, "{}", rec.text());

@@ -1246,6 +1246,7 @@ async fn run_one_stage(
             cap_headroom_usd: job.cap_headroom_usd,
         }),
         baseline_rps,
+        reference_fixture: false,
     };
 
     let output = BenchmarkPipeline::execute(config, logger, cancel).await?;

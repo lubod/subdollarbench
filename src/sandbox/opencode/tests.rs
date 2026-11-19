@@ -1237,6 +1237,7 @@ fn r88_pipeline_config(
             preamble: None,
         }),
         baseline_rps: None,
+        reference_fixture: false,
     }
 }
 

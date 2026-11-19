@@ -924,6 +924,7 @@ pub async fn run_extension_batch(
             feedback_rounds: spec.feedback_rounds,
             campaign_stage: None,
             baseline_rps: None,
+            reference_fixture: false,
         };
         match BenchmarkPipeline::execute(pipe_config, logger.clone(), Some(Arc::clone(cancel)))
             .await
@@ -1515,6 +1516,7 @@ pub async fn execute_run_body(
             feedback_rounds: req.feedback_rounds.unwrap_or(0),
             campaign_stage: None,
             baseline_rps: None,
+            reference_fixture: false,
         };
 
         let pipe_res = BenchmarkPipeline::execute(
