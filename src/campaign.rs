@@ -2227,31 +2227,42 @@ fn live_rollup_stub_at_with(
     }
 }
 
-/// R23 D3/R24: a paid campaign launch must have a price in the committed
-/// snapshot (`src/cost/model_prices.json`); eval-only runs do not spend and
-/// are exempt. `_at` is the offline-testable form; the URL is ignored.
-pub async fn require_model_list_price_at(
+/// R94 M1: a paid launch needs the model's row in the run-time registry
+/// (`models/registry.json`, or `SDB_MODEL_REGISTRY`). A missing or
+/// unparsable registry is an error naming its path, never a silent price.
+pub async fn require_model_list_price_from(
+    registry: &std::path::Path,
     model: &str,
-    url: &str,
     eval_only: bool,
 ) -> Result<(), String> {
     if eval_only {
         return Ok(());
     }
-    if crate::cost::calculator::ModelPricing::list_price_for_model_async_at(model, url)
-        .await
-        .is_none()
-    {
+    let reg = crate::cost::calculator::registry_at(registry)
+        .map_err(|e| format!("{e}; a paid campaign launch needs a readable model registry"))?;
+    let Some(row) = reg.row(model) else {
         return Err(format!(
-            "model {model} has no entry in the price snapshot src/cost/model_prices.json; add the model's catalog id there, then retry the paid campaign launch"
+            "model {model} has no entry in the model registry {}; add the model's row (scripts/add-model.sh) and retry the paid campaign launch",
+            registry.display()
         ));
-    }
-    if crate::cost::calculator::provider_for_model(model).is_none() {
+    };
+    if row.provider.is_none() {
         return Err(format!(
-            "model {model} has no pinned provider in src/cost/model_prices.json; add the provider endpoint and its prices, then retry the paid campaign launch"
+            "model {model} has no pinned provider in the model registry {}; add the provider endpoint and its prices, then retry the paid campaign launch",
+            registry.display()
         ));
     }
     Ok(())
+}
+
+/// R23 D3/R24: the eval-only exemption and the default registry path.
+/// `_at` is the offline-testable form; the URL is ignored.
+pub async fn require_model_list_price_at(
+    model: &str,
+    _url: &str,
+    eval_only: bool,
+) -> Result<(), String> {
+    require_model_list_price_from(&crate::cost::calculator::registry_path(), model, eval_only).await
 }
 
 pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<(), String> {

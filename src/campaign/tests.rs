@@ -1602,8 +1602,8 @@ async fn r24_7_refusal_names_the_price_snapshot() {
         .await
         .expect_err("unknown model must be refused");
     assert!(
-        err.contains("src/cost/model_prices.json"),
-        "refusal does not name the snapshot: {err}"
+        err.contains("models/registry.json"),
+        "refusal does not name the registry: {err}"
     );
     assert!(
         !err.contains("OpenRouter catalog or offline table"),
@@ -5394,4 +5394,36 @@ fn r93_g2_no_lite_after_the_wall() {
     assert!(lite_allowed(false, false, None));
     assert!(!lite_allowed(true, false, None));
     assert!(lite_allowed(false, true, Some(120)));
+}
+
+/// R94 M1: a missing or unparsable registry refuses a paid launch, names
+/// the registry, and never falls back to a default price; eval-only is
+/// exempt.
+#[tokio::test]
+async fn r94_m1_bad_registry_refuses() {
+    let dir = std::env::temp_dir().join(format!("r94-m1-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad = dir.join("registry.json");
+    std::fs::write(&bad, "{ this is not json").unwrap();
+    let err = crate::campaign::require_model_list_price_from(&bad, "deepseek/deepseek-chat", false)
+        .await
+        .expect_err("a bad registry must refuse a paid launch");
+    assert!(
+        err.contains(&bad.display().to_string()) && err.contains("model registry"),
+        "the refusal does not name the registry: {err}"
+    );
+    crate::campaign::require_model_list_price_from(&bad, "deepseek/deepseek-chat", true)
+        .await
+        .expect("eval-only is exempt");
+    let missing = dir.join("missing.json");
+    let err =
+        crate::campaign::require_model_list_price_from(&missing, "deepseek/deepseek-chat", false)
+            .await
+            .expect_err("a missing registry must refuse a paid launch");
+    assert!(
+        err.contains(&missing.display().to_string()),
+        "the refusal does not name the missing registry: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

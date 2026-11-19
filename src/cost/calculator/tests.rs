@@ -19,10 +19,16 @@ fn r51_f5_every_grid_model_has_an_entry() {
     ] {
         assert!(price_override_for(m).is_some(), "{m} has no entry");
     }
-    assert_eq!(price_override_for("xiaomi/mimo-v2.6-flash"), Some(""));
-    assert_eq!(price_override_for("qwen/qwen3.8-flash"), Some(""));
     assert_eq!(
-        price_override_for("openrouter/OpenAI/GPT-6-LUNA"),
+        price_override_for("xiaomi/mimo-v2.6-flash").as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        price_override_for("qwen/qwen3.8-flash").as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        price_override_for("openrouter/OpenAI/GPT-6-LUNA").as_deref(),
         Some("2× above 272k prompt tokens")
     );
     assert_eq!(price_override_for("unknown/model"), None);
@@ -220,15 +226,18 @@ fn r66_f1_new_models_priced() {
     }
     // R75 F4: the pinned minimax endpoint doubles 01:00-15:00 UTC.
     assert_eq!(
-        price_override_for("minimax/minimax-m3.1-flash"),
+        price_override_for("minimax/minimax-m3.1-flash").as_deref(),
         Some("2× 01:00-15:00 UTC")
     );
     assert_eq!(
-        price_override_for("openai/gpt-6-luna-pro"),
+        price_override_for("openai/gpt-6-luna-pro").as_deref(),
         Some("2× above 272k prompt tokens")
     );
-    assert_eq!(price_override_for("tencent/hy4"), Some(""));
-    assert_eq!(price_override_for("xiaomi/mimo-v2.6-pro"), Some(""));
+    assert_eq!(price_override_for("tencent/hy4").as_deref(), Some(""));
+    assert_eq!(
+        price_override_for("xiaomi/mimo-v2.6-pro").as_deref(),
+        Some("")
+    );
 }
 
 /// R67 F1: every grid row names the OpenRouter endpoint it is pinned to,
@@ -301,7 +310,7 @@ fn r67_f1_rows_match_pinned_provider() {
     ];
     for (id, provider, prompt, completion, cache_read, cache_write) in endpoints {
         assert_eq!(
-            provider_for_model(id),
+            provider_for_model(id).as_deref(),
             Some(provider),
             "{id} must be pinned"
         );
@@ -799,5 +808,298 @@ fn test_cached_tokens_are_not_double_charged() {
     assert!(
         cheap > dear,
         "a cached run must score better than an identical fresh one"
+    );
+}
+
+/// R94 M1: the old compiled snapshot, inline (the compiled JSON moved to
+/// the run-time registry; this is the migration's field-for-field check).
+const R94_SNAPSHOT: &str = r#"{
+  "as_of": "2026-11-09",
+  "source": "OpenRouter /api/v1/models; exact catalog ids; cache_read is input_cache_read, cache_write is input_cache_write or the prompt rate when absent",
+  "models": [
+    {
+      "id": "anthropic/claude-haiku-5.5",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.125,
+      "provider": "anthropic"
+    },
+    {
+      "id": "google/gemini-3.8-flash",
+      "prompt_per_million": 0.825,
+      "completion_per_million": 4.125,
+      "cache_read_per_million": 0.0825,
+      "cache_write_per_million": 0.0416666667
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.4,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.0833333333
+    },
+    {
+      "id": "google/gemini-2.5-flash",
+      "prompt_per_million": 0.3,
+      "completion_per_million": 2.5,
+      "cache_read_per_million": 0.03,
+      "cache_write_per_million": 0.0833333333
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash-1017",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.6,
+      "cache_read_per_million": 0.003,
+      "cache_write_per_million": 0.15,
+      "provider": "deepseek"
+    },
+    {
+      "id": "deepseek/deepseek-chat",
+      "prompt_per_million": 0.32,
+      "completion_per_million": 0.89,
+      "cache_read_per_million": 0.32,
+      "cache_write_per_million": 0.32
+    },
+    {
+      "id": "qwen/qwen-2.5-coder-32b-instruct",
+      "prompt_per_million": 0.66,
+      "completion_per_million": 1.0,
+      "cache_read_per_million": 0.66,
+      "cache_write_per_million": 0.66
+    },
+    {
+      "id": "meta-llama/llama-3.3-70b-instruct",
+      "prompt_per_million": 0.59,
+      "completion_per_million": 0.79,
+      "cache_read_per_million": 0.295,
+      "cache_write_per_million": 0.59
+    },
+    {
+      "id": "openai/gpt-4o-mini",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.6,
+      "cache_read_per_million": 0.075,
+      "cache_write_per_million": 0.15
+    },
+    {
+      "id": "mistralai/mistral-small-2603",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.6,
+      "cache_read_per_million": 0.015,
+      "cache_write_per_million": 0.15
+    },
+    {
+      "id": "meta/muse-spark-1.3-contributor",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.2,
+      "cache_read_per_million": 0.002,
+      "cache_write_per_million": 0.1
+    },
+    {
+      "id": "meta/muse-spark-1.3",
+      "prompt_per_million": 1.25,
+      "completion_per_million": 4.25,
+      "cache_read_per_million": 0.15,
+      "cache_write_per_million": 1.25
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.125,
+      "provider": "openai"
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-flash",
+      "prompt_per_million": 0.14,
+      "completion_per_million": 0.28,
+      "cache_read_per_million": 0.0028,
+      "cache_write_per_million": 0.14,
+      "provider": "xiaomi/fp8"
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.47,
+      "cache_read_per_million": 0.016,
+      "cache_write_per_million": 0.15,
+      "provider": "alibaba/us-east-1"
+    },
+    {
+      "id": "tencent/hy4",
+      "prompt_per_million": 0.417,
+      "completion_per_million": 1.2505,
+      "cache_read_per_million": 0.021,
+      "cache_write_per_million": 0.417,
+      "provider": "tencent/fp4"
+    },
+    {
+      "id": "minimax/minimax-m3.1-flash",
+      "prompt_per_million": 0.075,
+      "completion_per_million": 0.3,
+      "cache_read_per_million": 0.0075,
+      "cache_write_per_million": 0.075,
+      "provider": "minimax"
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "provider": "z-ai/fp8",
+      "prompt_per_million": 0.15,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.03,
+      "cache_write_per_million": 0.15
+    },
+    {
+      "id": "inclusionai/ling-3.1-flash",
+      "provider": "novita",
+      "prompt_per_million": 0.045,
+      "completion_per_million": 0.135,
+      "cache_read_per_million": 0.009,
+      "cache_write_per_million": 0.045
+    },
+    {
+      "id": "openai/gpt-6-luna-pro",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.01,
+      "cache_write_per_million": 0.125,
+      "provider": "openai"
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-pro",
+      "prompt_per_million": 0.435,
+      "completion_per_million": 0.87,
+      "cache_read_per_million": 0.0036,
+      "cache_write_per_million": 0.435,
+      "provider": "xiaomi/fp8"
+    },
+    {
+      "id": "meta/muse-ember",
+      "prompt_per_million": 0.1,
+      "completion_per_million": 0.5,
+      "cache_read_per_million": 0.004,
+      "cache_write_per_million": 0.125,
+      "provider": "meta"
+    }
+  ]
+}
+"#;
+
+const R94_OVERRIDES: &[(&str, &str)] = &[
+    (
+        "anthropic/claude-haiku-5.5",
+        "5× the prompt rate above 100k prompt tokens",
+    ),
+    ("openai/gpt-6-luna", "2× above 272k prompt tokens"),
+    (
+        "deepseek/deepseek-v4.1-flash-1017",
+        "2× in weekday peak hours",
+    ),
+    ("xiaomi/mimo-v2.6-flash", ""),
+    ("qwen/qwen3.8-flash", ""),
+    ("minimax/minimax-m3.1-flash", "2× 01:00-15:00 UTC"),
+    ("z-ai/glm-5.3-flash", ""),
+    ("inclusionai/ling-3.1-flash", ""),
+    ("openai/gpt-6-luna-pro", "2× above 272k prompt tokens"),
+    ("tencent/hy4", ""),
+    ("xiaomi/mimo-v2.6-pro", ""),
+];
+
+#[test]
+fn r94_m1_registry_matches_the_snapshot() {
+    let root = crate::config::get_repo_root();
+    let reg = ModelRegistry::load(&root.join("models/registry.json")).expect("the registry loads");
+    let old: serde_json::Value =
+        serde_json::from_str(R94_SNAPSHOT).expect("the old snapshot parses");
+    let old_models = old["models"].as_array().expect("models");
+    assert_eq!(old_models.len(), reg.models.len(), "row count");
+    for om in old_models {
+        let id = om["id"].as_str().unwrap();
+        let row = reg
+            .row(id)
+            .unwrap_or_else(|| panic!("{id} is missing from the registry"));
+        assert_eq!(
+            row.provider.as_deref(),
+            om.get("provider").and_then(|v| v.as_str()),
+            "{id} provider"
+        );
+        for (got, key) in [
+            (row.prompt_per_million, "prompt_per_million"),
+            (row.completion_per_million, "completion_per_million"),
+            (row.cache_read_per_million, "cache_read_per_million"),
+            (row.cache_write_per_million, "cache_write_per_million"),
+        ] {
+            assert_eq!(got, om[key].as_f64().unwrap(), "{id} {key}");
+        }
+        assert!(
+            !row.added.is_empty() && !row.source.is_empty(),
+            "{id} has no provenance"
+        );
+    }
+    for (id, text) in R94_OVERRIDES {
+        assert_eq!(
+            reg.row(id).and_then(|r| r.override_text.as_deref()),
+            Some(*text),
+            "{id} override"
+        );
+    }
+    assert_eq!(reg.as_of, "2026-11-09");
+}
+
+static R94_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn r94_keys(root: &std::path::Path) -> (String, String) {
+    let run = |arg: &str| {
+        let out = std::process::Command::new("bash")
+            .arg(root.join("scripts/flake-bar.sh"))
+            .arg(arg)
+            .current_dir(root)
+            .output()
+            .expect("run scripts/flake-bar.sh");
+        assert!(
+            out.status.success(),
+            "flake-bar.sh {arg}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    (run("--key"), run("--grader-key"))
+}
+
+/// R94 M1: a new registry row moves neither key nor the fingerprint.
+#[test]
+fn r94_m1_new_row_keeps_the_keys() {
+    let _lock = R94_KEY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = crate::config::get_repo_root();
+    let path = root.join("models/registry.json");
+    let orig = std::fs::read(&path).expect("the registry file");
+    struct Restore(std::path::PathBuf, Vec<u8>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, &self.1);
+        }
+    }
+    let _restore = Restore(path.clone(), orig.clone());
+    let before = r94_keys(&root);
+    let mut v: serde_json::Value = serde_json::from_slice(&orig).expect("registry JSON");
+    v["models"]
+        .as_array_mut()
+        .expect("models")
+        .push(serde_json::json!({
+            "id": "r94-test/new-model",
+            "prompt_per_million": 1.0,
+            "completion_per_million": 2.0,
+            "cache_read_per_million": 0.1,
+            "cache_write_per_million": 1.0,
+            "added": "2026-11-19",
+            "source": "r94 test"
+        }));
+    std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let after = r94_keys(&root);
+    assert_eq!(
+        before, after,
+        "adding a registry row moved the full or grader key"
     );
 }

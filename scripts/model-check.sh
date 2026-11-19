@@ -14,9 +14,9 @@
 #        scripts/model-check.sh [--harness omp|opencode] --record <model>
 #        scripts/model-check.sh --self-test
 #
-# <model> is a cell model name (`openrouter/z-ai/glm-5.3`) or a snapshot id
-# (`z-ai/glm-5.3`). A model with no row in src/cost/model_prices.json has
-# no pin and no snapshot price: the provider and bill checks are skipped
+# <model> is a cell model name (`openrouter/z-ai/glm-5.3`) or a registry id
+# (`z-ai/glm-5.3`). A model with no row in models/registry.json has
+# no pin and no registry price: the provider and bill checks are skipped
 # and the record says so.
 #
 # The record is <git-common-dir>/sdb-gates/model-check-<slug>.txt. It holds
@@ -231,7 +231,7 @@ if [[ "$mode" == "self-test" ]]; then
 
         # The snapshot rates for a fixture model (all four).
         snapshot_rates() {
-            python3 - "$ROOT/src/cost/model_prices.json" "$1" <<'PY'
+            python3 - "$ROOT/models/registry.json" "$1" <<'PY'
 import json, sys
 snap = json.load(open(sys.argv[1]))
 want = sys.argv[2].lower()
@@ -891,7 +891,7 @@ wire="openrouter/$id"
 # The snapshot row, if any: pin, prompt and completion rates. A model with
 # no row is allowed (the provider and bill checks are skipped).
 snapshot="$(
-    python3 - "$ROOT/src/cost/model_prices.json" "$id" <<'PY'
+    python3 - "$ROOT/models/registry.json" "$id" <<'PY'
 import json, sys
 snap = json.load(open(sys.argv[1]))
 want = sys.argv[2].lower()

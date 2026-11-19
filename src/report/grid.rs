@@ -1563,7 +1563,7 @@ fn strip_cell(
 /// R85 F3: one model's bill line: the surcharge named in
 /// `PRICE_OVERRIDES` and the billed / scored ratio, when either exists.
 fn bill_item(model: &str, cost: f64, billed: Option<f64>) -> Option<String> {
-    let over = crate::cost::calculator::price_override_for(model).unwrap_or("");
+    let over = crate::cost::calculator::price_override_for(model).unwrap_or_default();
     let ratio = billed.filter(|_| cost > 0.0).map(|b| b / cost);
     if over.is_empty() && ratio.is_none() {
         return None;
@@ -1572,7 +1572,7 @@ fn bill_item(model: &str, cost: f64, billed: Option<f64>) -> Option<String> {
     let display = model.strip_prefix("openrouter/").unwrap_or(model);
     let mut s = format!("<b>{}</b>", esc(display));
     if !over.is_empty() {
-        s.push_str(&format!(": {}", esc(over)));
+        s.push_str(&format!(": {}", esc(&over)));
     }
     if let Some(r) = ratio {
         s.push_str(&format!(" ({r:.2}× billed / scored)"));
@@ -2794,7 +2794,7 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
     let overrides = ranked_models
         .iter()
         .map(|m| {
-            let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
+            let detail = crate::cost::calculator::price_override_for(m).unwrap_or_default();
             if detail.is_empty() {
                 format!(
                     "{}<span title=\"{}\">{}</span> — none",
@@ -2808,7 +2808,7 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
                     swatch(m, &colours),
                     esc(m),
                     model_name_html(m),
-                    esc(detail)
+                    esc(&detail)
                 )
             }
         })
@@ -2816,8 +2816,8 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
         .join("; ");
     // R69 F1: the price list and the cap basis moved here from the board.
     let prices = format!(
-        "base rates per call from model_prices.json (snapshot {}); overrides: {}",
-        esc(crate::cost::calculator::price_snapshot_as_of()),
+        "base rates per call from models/registry.json ({}); overrides: {}",
+        esc(&crate::cost::calculator::price_snapshot_as_of()),
         if overrides.is_empty() {
             "—"
         } else {
@@ -5922,7 +5922,7 @@ mod tests {
         let board_text = visible_text(&board);
         let results_text = visible_text(&results);
         assert!(
-            !board_text.contains("model_prices.json") && !board_text.contains("cap policy"),
+            !board_text.contains("models/registry.json") && !board_text.contains("cap policy"),
             "the board header speaks plainly: {board_text}"
         );
         assert!(
@@ -5932,7 +5932,7 @@ mod tests {
             "the board leads with the plain sentence: {board_text}"
         );
         assert!(
-            results_text.contains("model_prices.json") && results_text.contains("cap policy"),
+            results_text.contains("models/registry.json") && results_text.contains("cap policy"),
             "the results page names the price list and the cap basis: {results_text}"
         );
         for (page, html) in [("board", &board), ("results", &results)] {
