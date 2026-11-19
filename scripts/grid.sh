@@ -56,6 +56,21 @@ CAP_SET=0
 
 log() { echo "[grid] $*" >&2; }
 
+# R93 G5: each grid's markers carry its ledger's name, so two grids (or a
+# rehearsal and a paid grid) never clobber each other's canary, audit or
+# stop state. The ledger lock is separate from the short-lived
+# $LEDGER.lock the ledger writes use, so a grid can hold it for its life.
+ledger_slug() {
+    local base
+    base="$(basename "${LEDGER:-grid-ledger}")"
+    base="${base%.tsv}"
+    base="${base#.}"
+    printf '%s' "$base" | sed 's/[^A-Za-z0-9._-]/_/g'
+}
+canary_ok_path() { printf '%s/.canary_ok.%s' "$RUNS" "$(ledger_slug)"; }
+canary_failed_path() { printf '%s/.canary_failed.%s' "$RUNS" "$(ledger_slug)"; }
+audit_marker_path() { printf '%s/.grid-audit-marker.%s' "$RUNS" "$(ledger_slug)"; }
+
 usage() {
     cat >&2 <<'EOF'
 usage: grid.sh --careers <file> --lanes <n> [--harness omp|opencode]
@@ -120,11 +135,16 @@ if [[ "$REHEARSAL" == "1" ]]; then
     # R54-1: a rehearsal must never feed the paid grid's resume table.
     # The hold file stays shared so `gap` pauses both.
     [[ "$LEDGER_SET" == "1" ]] || LEDGER="$RUNS/.grid-rehearsal-ledger.tsv"
-    [[ "$STOP_SET" == "1" ]] || STOP="$RUNS/.grid-rehearsal-stop"
 fi
 LEDGER="${LEDGER:-$RUNS/.grid-ledger.tsv}"
 HOLD="${HOLD:-$RUNS/.grid-hold}"
-STOP="${STOP:-$RUNS/.grid-stop}"
+if [[ "$STOP_SET" != "1" ]]; then
+    if [[ "$REHEARSAL" == "1" ]]; then
+        STOP="$RUNS/.grid-rehearsal-stop.$(ledger_slug)"
+    else
+        STOP="$RUNS/.grid-stop.$(ledger_slug)"
+    fi
+fi
 RUNNING_DIR="${LEDGER}.running"
 
 ledger_total() {
@@ -222,9 +242,21 @@ release_phase() {
 
 wait_hold() {
     if [[ -f "$HOLD" ]]; then
+        local why
+        why="$(head -1 "$HOLD" 2>/dev/null || true)"
         log "hold at $HOLD; waiting"
         while [[ -f "$HOLD" ]]; do sleep 2; done
         log "hold released"
+        # R93 G5: a balance hold rechecks on release; a top-up that did not
+        # land re-holds instead of starting a paid phase.
+        if [[ "$why" == *balance* ]]; then
+            local again
+            if ! again="$(balance_gate)"; then
+                printf 'hold: %s\n' "$again" > "$HOLD"
+                log "hold: $again (the balance is still low)"
+                wait_hold
+            fi
+        fi
     fi
 }
 
@@ -690,7 +722,7 @@ PY
                     && awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'; then
                     printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" "errors" > "$out"
                     printf 'live provider fault: %s errors in %s turns\n' "$errors" "$turns" > "$dir/.live_stop"
-                    [[ "$worker" == "$WORKER_BASE" ]] && : > "$RUNS/.canary_failed"
+                    [[ "$worker" == "$WORKER_BASE" ]] && : > "$(canary_failed_path)"
                     kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true
                     return 0
                 fi
@@ -698,12 +730,12 @@ PY
                     && awk -v e="$empty" -v t="$turns" 'BEGIN { exit !(100 * e / t > 5) }'; then
                     printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$empty" "empty responses" > "$out"
                     printf 'live provider fault: %s empty responses in %s turns\n' "$empty" "$turns" > "$dir/.live_stop"
-                    [[ "$worker" == "$WORKER_BASE" ]] && : > "$RUNS/.canary_failed"
+                    [[ "$worker" == "$WORKER_BASE" ]] && : > "$(canary_failed_path)"
                     kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true
                     return 0
                 fi
-                if (( turns >= 30 )) && [[ "$worker" == "$WORKER_BASE" && ! -f "$RUNS/.canary_failed" ]]; then
-                    : > "$RUNS/.canary_ok"
+                if (( turns >= 30 )) && [[ "$worker" == "$WORKER_BASE" && ! -f "$(canary_failed_path)" ]]; then
+                    : > "$(canary_ok_path)"
                 fi
                 if awk -v p="$p50" 'BEGIN { exit !(p > 180) }'; then
                     log "live health warning: worker $worker phase $phase median turn ${p50}s"
@@ -809,6 +841,10 @@ run_lane() {
     local worker=$((WORKER_BASE + lane))
     local idx model phase chain result id rc token last_phase last_id last_stop start_phase
     local failed=0 provider_turns=0 provider_errors=0 fault_kind="" faults=0 first_fault=""
+    local cell_pid=""
+    # R93 G5: a TERM to the grid kills the lanes it started; a lane kills
+    # the cell's process group (run_cell execs setsid) before it exits.
+    trap 'if [[ -n "${cell_pid:-}" ]]; then kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true; fi; exit 143' TERM
     for idx in "${!CAREERS[@]}"; do
         model="${CAREERS[$idx]}"
         if (( idx % LANES != lane )); then
@@ -1023,9 +1059,9 @@ run_lane() {
             fi
             # R90 M3: a clean phase on the canary lane reopens the lanes a
             # stopped canary closed; the grid's wait loop watches .canary_ok.
-            if [[ "$worker" == "$WORKER_BASE" && -f "$RUNS/.canary_failed" ]]; then
-                rm -f "$RUNS/.canary_failed"
-                : > "$RUNS/.canary_ok"
+            if [[ "$worker" == "$WORKER_BASE" && -f "$(canary_failed_path)" ]]; then
+                rm -f "$(canary_failed_path)"
+                : > "$(canary_ok_path)"
                 log "lane $lane: the canary recovered on $model phase $phase; opening the other lanes"
             fi
             chain="$id"
@@ -1039,6 +1075,17 @@ run_lane() {
         done
     done
     return "$failed"
+}
+
+# R93 G5: one grid per ledger. The lifetime lock is separate from the
+# short-lived $LEDGER.lock the ledger writes use.
+run_grid_locked() {
+    exec 9>"$LEDGER.grid.lock"
+    if ! flock -n 9; then
+        log "another grid holds $LEDGER.grid.lock; refusing to start"
+        return 1
+    fi
+    run_grid
 }
 
 run_grid() {
@@ -1070,8 +1117,8 @@ run_grid() {
     # R83 F2: the reservations go on every exit, including a SIGTERM'd
     # grid; the model check reads them as live only while their PID is.
     trap 'rm -rf "$RUNNING_DIR"' EXIT
-    trap 'rm -rf "$RUNNING_DIR"; exit 143' TERM
-    trap 'rm -rf "$RUNNING_DIR"; exit 130' INT
+    trap 'for p in "${pids[@]:-}"; do kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null || true; done; rm -rf "$RUNNING_DIR"; exit 143' TERM
+    trap 'for p in "${pids[@]:-}"; do kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null || true; done; rm -rf "$RUNNING_DIR"; exit 130' INT
     mkdir -p "$(dirname "$LEDGER")"
     # R48-7: the ledger's career column is the line index in the careers
     # file. Freeze that file next to the ledger on the first start; a later
@@ -1088,7 +1135,14 @@ run_grid() {
     fi
     rm -rf "$RUNNING_DIR"
     mkdir -p "$RUNNING_DIR"
-    rm -f "$STOP"
+    # R93 G5: a restart never deletes a stop reason silently: keep it
+    # (archived beside the stop file) and say why the last grid stopped.
+    if [[ -f "$STOP" ]]; then
+        local previous
+        previous="$(head -1 "$STOP" 2>/dev/null || true)"
+        log "previous stop ($STOP): ${previous:-no reason}"
+        mv "$STOP" "$STOP.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
+    fi
     if [[ ! -f "$LEDGER" ]]; then
         printf 'career\tmodel\tphase\tworker\tcampaign_id\tpoints\tcost_usd\tstop\tts\tharness\tbilled_usd\n' > "$LEDGER"
     fi
@@ -1100,7 +1154,7 @@ run_grid() {
         canary=0
     fi
     mkdir -p "$RUNS"
-    rm -f "$RUNS/.canary_ok" "$RUNS/.canary_failed"
+    rm -f "$(canary_ok_path)" "$(canary_failed_path)"
     if [[ "$canary" == "1" && "$LANES" -gt 1 ]]; then
         # R74 F2: lane 1 starts alone; the other lanes start only after
         # its live check passed 30 turns cleanly. A stopped canary leaves
@@ -1109,13 +1163,13 @@ run_grid() {
         local canary_pid=$!
         pids+=("$canary_pid")
         while kill -0 "$canary_pid" 2>/dev/null; do
-            [[ -f "$RUNS/.canary_ok" ]] && break
+            [[ -f "$(canary_ok_path)" ]] && break
             sleep 0.2
         done
         local canary_done=0
         kill -0 "$canary_pid" 2>/dev/null || canary_done=1
-        if [[ -f "$RUNS/.canary_ok" ]] \
-            || [[ "$canary_done" -eq 1 && ! -f "$RUNS/.canary_failed" && ! -f "$STOP" ]]; then
+        if [[ -f "$(canary_ok_path)" ]] \
+            || [[ "$canary_done" -eq 1 && ! -f "$(canary_failed_path)" && ! -f "$STOP" ]]; then
             for ((lane = 1; lane < LANES; lane++)); do
                 run_lane "$lane" &
                 pids+=("$!")
@@ -1134,7 +1188,7 @@ run_grid() {
         fi
     done
     if [[ "$canary" == "1" && "$LANES" -gt 1 && "$lanes_opened" -eq 0 ]]; then
-        log "the canary never opened the other lanes (see $RUNS/.canary_failed); lanes 2-$LANES did not start"
+        log "the canary never opened the other lanes (see $(canary_failed_path)); lanes 2-$LANES did not start"
     fi
     rm -rf "$RUNNING_DIR"
     return "$rc"
@@ -1191,6 +1245,12 @@ if [[ -n "${SDB_R90_HEALTH:-}" ]]; then
         printf '%s\n' "$SDB_R90_HEALTH" > "$runs/$id/health.json"
         [[ -n "${SDB_R90_LIVE_SLEEP:-}" ]] && sleep "$SDB_R90_LIVE_SLEEP"
     fi
+fi
+if [[ -n "${SDB_R90_PIDFILE:-}" ]]; then
+    printf '%s\n' "$$" > "$SDB_R90_PIDFILE"
+fi
+if [[ -n "${SDB_R90_SLEEP:-}" ]]; then
+    sleep "$SDB_R90_SLEEP"
 fi
 if [[ "${SDB_R90_KILL_PHASE:-0}" == "$phase" ]]; then
     kill -9 $$
@@ -1455,7 +1515,7 @@ r90_m3_recovered_canary_opens_lanes() {
     [[ -f "$HOLD" ]] || {
         r90_stop_grid "$pid"
         echo "canary: the faulted phase did not hold"; return 1; }
-    [[ -f "$RUNS/.canary_failed" ]] || {
+    [[ -f "$(canary_failed_path)" ]] || {
         r90_stop_grid "$pid"
         echo "canary: the fault did not record .canary_failed"; return 1; }
     rm -f "$HOLD"
@@ -1466,7 +1526,7 @@ r90_m3_recovered_canary_opens_lanes() {
     workers="$(awk -F'\t' 'NR > 1 { print $4 }' "$LEDGER" | sort -u | paste -sd, -)"
     [[ "$workers" == "1,2,3" ]] || {
         echo "canary: a recovered canary did not open the lanes (workers $workers)"; return 1; }
-    [[ ! -f "$RUNS/.canary_failed" ]] || {
+    [[ ! -f "$(canary_failed_path)" ]] || {
         echo "canary: .canary_failed survived the clean rerun"; return 1; }
     grep -q 'canary recovered' "$R90_DIR/out" || {
         echo "canary: the recovery was not logged"; return 1; }
@@ -1634,6 +1694,197 @@ r93_g1_empty_response_message() {
     wait "$pid" 2>/dev/null || true
     unset SDB_R90_HEALTH SDB_R90_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_R90_BILLED
     r90_case_done r93_g1_empty_response_message
+}
+
+# R93 G5: two grids on different ledgers don't affect each other's lanes,
+# the same ledger admits one grid (the lock), and the marker paths carry
+# the ledger's name.
+r93_g5_grid_state_is_per_ledger() {
+    r90_case_setup r93_g5_grid_state_is_per_ledger
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    LEDGER="$R90_DIR/a.tsv"
+    [[ "$(canary_ok_path)" == "$R90_RUNS/.canary_ok.a" ]] || {
+        echo "state: canary_ok path is $(canary_ok_path)"; return 1; }
+    [[ "$(canary_failed_path)" == "$R90_RUNS/.canary_failed.a" ]] || {
+        echo "state: canary_failed path is $(canary_failed_path)"; return 1; }
+    [[ "$(audit_marker_path)" == "$R90_RUNS/.grid-audit-marker.a" ]] || {
+        echo "state: audit marker path is $(audit_marker_path)"; return 1; }
+    a_stop="$R90_RUNS/.grid-stop.a"
+    b_stop="$R90_RUNS/.grid-stop.b"
+    export SDB_R90_SLEEP=30 SDB_R90_PIDFILE="$R90_DIR/a.pid"
+    STOP="$a_stop"
+    ( run_grid_locked >"$R90_DIR/a.out" 2>&1 ) &
+    apid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$R90_DIR/a.pid" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$R90_DIR/a.pid" ]]; then
+        kill -TERM "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        echo "state: the first grid never started its cell"
+        return 1
+    fi
+    : > "$a_stop"
+    # The same ledger is refused while the first grid holds its lock.
+    if LEDGER="$R90_DIR/a.tsv" STOP="$a_stop" run_grid_locked >"$R90_DIR/a2.out" 2>&1; then
+        kill -TERM "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        echo "state: the same ledger admitted a second grid"
+        return 1
+    fi
+    grep -q 'another grid holds' "$R90_DIR/a2.out" || {
+        kill -TERM "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        echo "state: the second grid did not name the lock"
+        return 1
+    }
+    # A different ledger is not stopped by A's stop file.
+    unset SDB_R90_SLEEP SDB_R90_PIDFILE
+    LEDGER="$R90_DIR/b.tsv"
+    STOP="$b_stop"
+    run_grid || {
+        kill -TERM "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        echo "state: the second ledger's grid failed"
+        return 1
+    }
+    rows_b=$(($(wc -l < "$R90_DIR/b.tsv") - 1))
+    [[ "$rows_b" -eq 1 ]] || {
+        kill -TERM "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        echo "state: the second ledger ran $rows_b phases"
+        return 1
+    }
+    [[ -f "$a_stop" ]] || {
+        kill -TERM "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        echo "state: A's stop file vanished"
+        return 1
+    }
+    kill -TERM "$apid" 2>/dev/null || true
+    wait "$apid" 2>/dev/null || true
+    cellpid="$(cat "$R90_DIR/a.pid" 2>/dev/null || true)"
+    if [[ -n "$cellpid" ]] && kill -0 "$cellpid" 2>/dev/null; then
+        kill -- -"$cellpid" 2>/dev/null || kill "$cellpid" 2>/dev/null || true
+        echo "state: the first grid's cell survived the TERM"
+        return 1
+    fi
+    unset SDB_R90_SLEEP SDB_R90_PIDFILE
+    r90_case_done r93_g5_grid_state_is_per_ledger
+}
+
+# R93 G5: a restart keeps the previous stop's reason (archived beside the
+# stop file) instead of deleting it silently.
+r93_g5_restart_keeps_stop_reason() {
+    r90_case_setup r93_g5_restart_keeps_stop_reason
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    printf 'STOP: old reason\n' > "$STOP"
+    run_grid 2>"$R90_DIR/out"
+    grep -q 'previous stop' "$R90_DIR/out" || {
+        echo "stop reason: the restart did not log the old stop"; return 1; }
+    archive="$(ls "$STOP".* 2>/dev/null | head -1)"
+    [[ -n "$archive" ]] || {
+        echo "stop reason: the old stop file was deleted"; return 1; }
+    grep -q 'STOP: old reason' "$archive" || {
+        echo "stop reason: the archive lost the reason"; return 1; }
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 1 ]] || {
+        echo "stop reason: expected one phase after the restart, got $rows"; return 1; }
+    r90_case_done r93_g5_restart_keeps_stop_reason
+}
+
+# R93 G5: a TERM reaps the lanes and their cells, and the run dir stays
+# for the audit.
+r93_g5_term_kills_the_lanes() {
+    r90_case_setup r93_g5_term_kills_the_lanes
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    export SDB_R90_SLEEP=30 SDB_R90_PIDFILE="$R90_DIR/cell.pid"
+    load_careers "$CAREERS_FILE"
+    ( run_grid_locked >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$R90_DIR/cell.pid" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$R90_DIR/cell.pid" ]]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "term: the cell never started"
+        return 1
+    fi
+    cellpid="$(cat "$R90_DIR/cell.pid")"
+    kill -TERM "$pid"
+    wait "$pid" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        kill -0 "$cellpid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$cellpid" 2>/dev/null; then
+        kill -- -"$cellpid" 2>/dev/null || kill "$cellpid" 2>/dev/null || true
+        echo "term: the cell survived the grid's TERM"
+        return 1
+    fi
+    [[ -d "$R90_RUNS" ]] || {
+        echo "term: the runs dir vanished"; return 1; }
+    compgen -G "$R90_RUNS/campaign_*" >/dev/null || {
+        echo "term: the run dir was deleted with the cell"; return 1; }
+    unset SDB_R90_SLEEP SDB_R90_PIDFILE
+    r90_case_done r93_g5_term_kills_the_lanes
+}
+
+# R93 G5: a released balance hold rechecks the balance and re-holds when
+# the top-up did not land.
+r93_g5_balance_rechecked_on_release() {
+    r90_case_setup r93_g5_balance_rechecked_on_release
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    bal="$R90_DIR/balance.sh"
+    printf '#!/bin/sh\necho 0.50\n' > "$bal"
+    chmod +x "$bal"
+    export SDB_GRID_BALANCE_CMD="$bal"
+    printf 'hold: balance $0.50 below $1.99\n' > "$HOLD"
+    ( wait_hold ) &
+    wpid=$!
+    sleep 0.3
+    rm -f "$HOLD"
+    got=0
+    for _ in $(seq 1 60); do
+        if [[ -f "$HOLD" ]] && grep -q 'balance' "$HOLD"; then
+            got=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "$got" -ne 1 ]]; then
+        kill "$wpid" 2>/dev/null || true
+        wait "$wpid" 2>/dev/null || true
+        echo "balance: the hold was not rechecked on release"
+        return 1
+    fi
+    rm -f "$HOLD"
+    kill "$wpid" 2>/dev/null || true
+    wait "$wpid" 2>/dev/null || true
+    unset SDB_GRID_BALANCE_CMD
+    r90_case_done r93_g5_balance_rechecked_on_release
 }
 
 # R90 M5: a rehearsal on a ledger whose careers are already complete runs
@@ -2063,7 +2314,7 @@ EOF
     paid_rc=0
     SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/paid.trace" SDB_FAKE_PREFIX=paid \
         "$ROOT/scripts/grid.sh" --careers "$scenario/careers.txt" \
-        --lanes 1 --cell "$fake" >"$scenario/paid.out" 2>&1 || paid_rc=$?
+        --lanes 1 --cell "$fake" --cap 0 >"$scenario/paid.out" 2>&1 || paid_rc=$?
     [[ "$paid_rc" -eq 0 ]] || {
         echo "paid grid after a rehearsal exited $paid_rc"
         cat "$scenario/paid.out"
@@ -2104,7 +2355,7 @@ EOF
     rc=0
     out="$(SDB_RUNS_DIR="$runs" SDB_GRID_TRACE="$scenario/trace" \
         "$ROOT/scripts/grid.sh" --careers "$scenario/careers.txt" \
-        --lanes 2 --cell "$fake" 2>&1)" || rc=$?
+        --lanes 2 --cell "$fake" --cap 0 2>&1)" || rc=$?
     [[ "$rc" -eq 1 ]] || {
         echo "a paid grid with marked rows exited $rc, want 1"
         echo "$out"
@@ -2785,7 +3036,7 @@ EOF
     run_grid || { echo "the clean-canary grid failed"; exit 1; }
     workers="$(awk -F'\t' 'NR > 1 { print $4 }' "$LEDGER" | sort -u | paste -sd, -)"
     [[ "$workers" == "1,2,3" ]] || { echo "clean canary workers: $workers"; exit 1; }
-    [[ -f "$runs/.canary_ok" ]] || { echo "the canary never passed 30 turns"; exit 1; }
+    [[ -f "$(canary_ok_path)" ]] || { echo "the canary never passed 30 turns"; exit 1; }
     echo "[self-test] a clean canary opens the other lanes after 30 turns"
     unset SDB_FAKE_HEALTH SDB_FAKE_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_GRID_CANARY
 
@@ -2817,7 +3068,7 @@ EOF
     if [[ ! -f "$HOLD" ]]; then
         echo "the stopped canary did not hold"; kill "$pid" 2>/dev/null || true; exit 1
     fi
-    [[ -f "$runs/.canary_failed" ]] || {
+    [[ -f "$(canary_failed_path)" ]] || {
         echo "the canary did not record its failure"; kill "$pid" 2>/dev/null || true; exit 1; }
     rm -f "$HOLD"
     for _ in $(seq 1 100); do
@@ -2957,18 +3208,19 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 mkdir -p "$RUNS"
-: > "$RUNS/.grid-audit-marker"
+AUDIT_MARKER="$(audit_marker_path)"
+: > "$AUDIT_MARKER"
 # R90 M5: the rehearsal record counts only the rows this run writes.
 REHEARSAL_START_LINE=0
 if [[ "$REHEARSAL" == "1" && -f "$LEDGER" ]]; then
     REHEARSAL_START_LINE="$(wc -l < "$LEDGER")"
 fi
-run_grid
+run_grid_locked
 if [[ "$REHEARSAL" == "1" ]]; then
     write_rehearsal_record
 fi
 # R74 F3: audit the runs this grid produced and put the summary in the
 # grid log. The audit's published set is the new, non-hidden campaigns;
 # the worse-rerun comparison still sees every earlier attempt.
-scripts/run-audit.sh --summary --runs-dir "$RUNS" --newer "$RUNS/.grid-audit-marker" 2>&1 \
+scripts/run-audit.sh --summary --runs-dir "$RUNS" --newer "$AUDIT_MARKER" 2>&1 \
     | while IFS= read -r line; do log "$line"; done || true

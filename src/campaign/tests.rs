@@ -5158,6 +5158,26 @@ fn r93_g1_empty_response_message() {
     r90_grid_case("r93_g1_empty_response_message");
 }
 
+#[test]
+fn r93_g5_grid_state_is_per_ledger() {
+    r90_grid_case("r93_g5_grid_state_is_per_ledger");
+}
+
+#[test]
+fn r93_g5_restart_keeps_stop_reason() {
+    r90_grid_case("r93_g5_restart_keeps_stop_reason");
+}
+
+#[test]
+fn r93_g5_term_kills_the_lanes() {
+    r90_grid_case("r93_g5_term_kills_the_lanes");
+}
+
+#[test]
+fn r93_g5_balance_rechecked_on_release() {
+    r90_grid_case("r93_g5_balance_rechecked_on_release");
+}
+
 /// R90 M3: the chain exemption needs the fault's reason: a provider-fault
 /// hide and a live stop free the chain; an operator/comparison "hidden"
 /// note does not (a genuine result still uses its chain).
