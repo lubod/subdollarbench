@@ -422,6 +422,13 @@ impl OpenCodeRunner {
     /// Backoff before resume attempt `attempt` (0-based): 60s doubling,
     /// capped at 15min. Sleeps in small slices so cancel/deadline break it.
     fn backoff_sleep(attempt: u32, deadline: SystemTime, cancel: &Option<Arc<AtomicBool>>) -> bool {
+        // The resume tests must not wait a real 60 s backoff.
+        if let Ok(ms) = std::env::var("SDB_TEST_OPENCODE_BACKOFF_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                std::thread::sleep(Duration::from_millis(ms));
+                return true;
+            }
+        }
         let secs = (60u64.saturating_mul(1u64 << attempt.min(4))).min(900);
         let slices = secs.saturating_mul(2);
         for _ in 0..slices {
@@ -1314,22 +1321,12 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
         // at the very end: dropping it earlier deadlocks the final join
         // (rx never closes while a sender lives).
         let retry_tx = tx.clone();
-        let pump_running = running.clone();
-        let pump_cancel = cancel_flag.clone();
+        // R93 G4: the pump keeps draining after READY or a limit; the
+        // reconcile and the bill are sent after the session ends, and the
+        // old `running`/deadline break dropped those [COST]/[BILLED] lines.
         let pump_handle = std::thread::spawn(move || {
             for line in rx {
                 log_fn(line);
-                if !pump_running.load(Ordering::SeqCst) {
-                    break;
-                }
-                if SystemTime::now() > deadline
-                    || pump_cancel
-                        .as_ref()
-                        .map(|f| f.load(Ordering::SeqCst))
-                        .unwrap_or(false)
-                {
-                    break;
-                }
             }
         });
 
@@ -1346,9 +1343,20 @@ impl crate::sandbox::AgentRunner for OpenCodeRunner {
             // Tool calls THIS attempt (fresh per iteration: no reset races
             // with the previous reader). Feeds the cutoff-recovery trigger.
             let attempt_tools = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let mut child = make_cmd()
-                .spawn()
-                .map_err(|e| anyhow!("Failed to spawn opencode in docker: {}", e))?;
+            let mut child = match make_cmd().spawn() {
+                Ok(child) => child,
+                Err(e) => {
+                    // R93 G4: a failed resume spawn must keep the earlier
+                    // attempts' stats (the error carries them to the
+                    // caller's OmpExecutionError handling).
+                    let st = stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    break Err(anyhow!(OmpExecutionError {
+                        message: format!("Failed to spawn opencode in docker: {e}"),
+                        started: st.steps_taken > 0 || st.total_tokens > 0,
+                        partial_stats: st,
+                    }));
+                }
+            };
 
             // Reader: NDJSON `--format json` stream -> bench log protocol.
             // step_start = turn, tool_use = [ACTION], text = [RESPONSE],
