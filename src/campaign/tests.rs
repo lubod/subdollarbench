@@ -1237,6 +1237,8 @@ fn r36_f1_chain_requires_the_same_sandbox_image() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:image-a"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .expect("the same image chains");
     let err = validate_chain(
@@ -1248,6 +1250,8 @@ fn r36_f1_chain_requires_the_same_sandbox_image() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:image-b"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -1311,6 +1315,8 @@ async fn r37_f6_rollup_uses_first_ticket_image_and_refuses_mixed() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:first"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("mixed"), "{err}");
@@ -1365,6 +1371,8 @@ async fn r43_f3_chained_mixed_image() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:image-b"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("mixed"), "{err}");
@@ -3149,6 +3157,8 @@ fn r45_f4_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -3163,6 +3173,8 @@ fn r45_f4_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .expect("a current-version phase chains");
 }
@@ -3184,6 +3196,8 @@ fn r49_f5_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -3198,8 +3212,58 @@ fn r49_f5_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .expect("a .44 phase chains onto a .44 phase");
+}
+
+/// R93 G3: a chain keeps the same budget and wall.
+#[test]
+fn r93_g3_chain_validates_budget_and_wall() {
+    let state = phase1_state();
+    let prev = chain_rollup(1, true);
+    validate_chain(
+        &prev,
+        Some(&state),
+        2,
+        "m",
+        "omp",
+        "high",
+        crate::report::rules::RULES_VERSION,
+        None,
+        prev.budget_usd,
+        prev.wall_min,
+    )
+    .expect("the same budget and wall chain");
+    let err = validate_chain(
+        &prev,
+        Some(&state),
+        2,
+        "m",
+        "omp",
+        "high",
+        crate::report::rules::RULES_VERSION,
+        None,
+        prev.budget_usd + 0.01,
+        prev.wall_min,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("budget"), "{err}");
+    let err = validate_chain(
+        &prev,
+        Some(&state),
+        2,
+        "m",
+        "omp",
+        "high",
+        crate::report::rules::RULES_VERSION,
+        None,
+        prev.budget_usd,
+        prev.wall_min + 1,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("wall"), "{err}");
 }
 
 #[test]
@@ -3215,6 +3279,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .expect("the matching chain validates");
     let err = validate_chain(
@@ -3226,6 +3292,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .unwrap_err();
     assert!(err.to_string().contains("expected phase 1"), "{err}");
@@ -3238,6 +3306,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("used model"), "{err}");
@@ -3250,6 +3320,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .unwrap_err();
     assert!(err.to_string().contains("did not finish"), "{err}");
@@ -3262,6 +3334,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("no ladder state"), "{err}");
@@ -3276,6 +3350,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("non-result"), "{err}");

@@ -927,6 +927,8 @@ pub fn validate_chain(
     effort: &str,
     rules_version: &str,
     sandbox_image: Option<&str>,
+    budget_usd: f64,
+    wall_min: u64,
 ) -> Result<LadderState> {
     if phase <= 1 {
         bail!("phase 1 has no chain");
@@ -971,6 +973,24 @@ pub fn validate_chain(
             prev.campaign_id,
             prev.sandbox_image.as_deref().unwrap_or("—"),
             sandbox_image.unwrap_or("—")
+        );
+    }
+    // R93 G3: a chain must keep the same budget and wall, or the phase
+    // would be measured under a different bound than the one it continues.
+    if (prev.budget_usd - budget_usd).abs() > 1e-9 {
+        bail!(
+            "chain cell {} used budget ${:.2}, not ${:.2}",
+            prev.campaign_id,
+            prev.budget_usd,
+            budget_usd
+        );
+    }
+    if prev.wall_min != wall_min {
+        bail!(
+            "chain cell {} used a {} min wall, not {}",
+            prev.campaign_id,
+            prev.wall_min,
+            wall_min
         );
     }
     if prev.finished_at.trim().is_empty() {
