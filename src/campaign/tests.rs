@@ -3695,11 +3695,18 @@ async fn r86_f2_timeout_scales_within_the_wall() {
         "the first ticket's timeout"
     );
     assert!(timeout > 120, "the scaled timeout is {timeout}");
-    let near_end = run(Some(1)).await;
+    // R93 G2: a two-minute wall leaves the ticket a two-minute timeout;
+    // a one-minute wall starts no attempt at all (the 60 s floor).
+    let near_end = run(Some(2)).await;
     let (_, timeout, _) = near_end[0];
     assert_eq!(
-        timeout, 1,
+        timeout, 2,
         "a ticket at the phase's edge gets the wall left"
+    );
+    let too_late = run(Some(1)).await;
+    assert!(
+        too_late.is_empty(),
+        "a one-minute wall started an attempt: {too_late:?}"
     );
 }
 
