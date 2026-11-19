@@ -480,3 +480,9 @@ not planned.
   pre-phase red-flag guard that closes the checker's race, one deadline
   per ticket, zero budget refused, chain budget validated, per-ledger
   state). The next paid model waits for these.
+
+- **2026-11-19, deepseek `.50` done** (3 careers): 73.0 / 76.0 / 74.8,
+  median 74.8 of 76; real $6.48 (key matched the phase bills within
+  0.3 %). The peak wait never fired (`openrouter/` prefix, round 93 G0):
+  careers 1-2's phase 4 billed 2x, about $1.10 extra. Publishing is the
+  operator's call.
