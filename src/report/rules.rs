@@ -30,6 +30,11 @@ mod graded_hash;
 ///   misses its deadline after a late scenario is named
 ///   `restart_after_<scenario>` and charged to ticket 4 (the store's
 ///   restart contract), with the container state and last lines logged.
+///   Also under `.51` (round 93 G2, R93-1; no `.51` cell had run): a
+///   ticket's sessions share one deadline (the full attempt and its
+///   repair no longer each get the whole ticket time-out), and no
+///   session starts with a minute or less left before the deadline or
+///   the phase wall.
 ///   Why: the 2026-11-17 audit's leftovers (four read-only reviews) and
 ///   the round-89 review's R89-1 and R89-2, with the operator's "open 92
 ///   93" (DECISIONS #38). Score impact: careers restart at phase 1; `.50`
