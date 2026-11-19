@@ -219,6 +219,9 @@ def pipe(a, b):
 
 def handle(client):
     try:
+        # R93 G4: a client that connects and sends nothing must not pin a
+        # handler thread forever.
+        client.settimeout(60)
         head = b""
         while b"\r\n\r\n" not in head:
             chunk = client.recv(4096)
@@ -392,5 +395,16 @@ srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("0.0.0.0", PORT))
 srv.listen(64)
 while True:
-    c, _ = srv.accept()
-    threading.Thread(target=handle, args=(c,), daemon=True).start()
+    # R93 G4: one bad connection (or a failed thread start) must not kill
+    # the sidecar, or the run's bill and the whole session are lost.
+    try:
+        c, _ = srv.accept()
+    except OSError:
+        continue
+    try:
+        threading.Thread(target=handle, args=(c,), daemon=True).start()
+    except Exception:
+        try:
+            c.close()
+        except OSError:
+            pass

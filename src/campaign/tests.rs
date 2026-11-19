@@ -1237,6 +1237,8 @@ fn r36_f1_chain_requires_the_same_sandbox_image() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:image-a"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .expect("the same image chains");
     let err = validate_chain(
@@ -1248,6 +1250,8 @@ fn r36_f1_chain_requires_the_same_sandbox_image() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:image-b"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -1311,6 +1315,8 @@ async fn r37_f6_rollup_uses_first_ticket_image_and_refuses_mixed() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:first"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("mixed"), "{err}");
@@ -1365,6 +1371,8 @@ async fn r43_f3_chained_mixed_image() {
         "high",
         crate::report::rules::RULES_VERSION,
         Some("sha256:image-b"),
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("mixed"), "{err}");
@@ -3149,6 +3157,8 @@ fn r45_f4_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -3163,6 +3173,8 @@ fn r45_f4_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .expect("a current-version phase chains");
 }
@@ -3184,6 +3196,8 @@ fn r49_f5_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -3198,8 +3212,58 @@ fn r49_f5_no_chain_across_the_bump() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .expect("a .44 phase chains onto a .44 phase");
+}
+
+/// R93 G3: a chain keeps the same budget and wall.
+#[test]
+fn r93_g3_chain_validates_budget_and_wall() {
+    let state = phase1_state();
+    let prev = chain_rollup(1, true);
+    validate_chain(
+        &prev,
+        Some(&state),
+        2,
+        "m",
+        "omp",
+        "high",
+        crate::report::rules::RULES_VERSION,
+        None,
+        prev.budget_usd,
+        prev.wall_min,
+    )
+    .expect("the same budget and wall chain");
+    let err = validate_chain(
+        &prev,
+        Some(&state),
+        2,
+        "m",
+        "omp",
+        "high",
+        crate::report::rules::RULES_VERSION,
+        None,
+        prev.budget_usd + 0.01,
+        prev.wall_min,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("budget"), "{err}");
+    let err = validate_chain(
+        &prev,
+        Some(&state),
+        2,
+        "m",
+        "omp",
+        "high",
+        crate::report::rules::RULES_VERSION,
+        None,
+        prev.budget_usd,
+        prev.wall_min + 1,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("wall"), "{err}");
 }
 
 #[test]
@@ -3215,6 +3279,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .expect("the matching chain validates");
     let err = validate_chain(
@@ -3226,6 +3292,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .unwrap_err();
     assert!(err.to_string().contains("expected phase 1"), "{err}");
@@ -3238,6 +3306,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("used model"), "{err}");
@@ -3250,6 +3320,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        0.99,
+        150,
     )
     .unwrap_err();
     assert!(err.to_string().contains("did not finish"), "{err}");
@@ -3262,6 +3334,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("no ladder state"), "{err}");
@@ -3276,6 +3350,8 @@ fn validate_chain_refuses_wrong_phase_model_or_unfinished_cells() {
         "high",
         crate::report::rules::RULES_VERSION,
         None,
+        prev.budget_usd,
+        prev.wall_min,
     )
     .unwrap_err();
     assert!(err.to_string().contains("non-result"), "{err}");
@@ -3619,11 +3695,18 @@ async fn r86_f2_timeout_scales_within_the_wall() {
         "the first ticket's timeout"
     );
     assert!(timeout > 120, "the scaled timeout is {timeout}");
-    let near_end = run(Some(1)).await;
+    // R93 G2: a two-minute wall leaves the ticket a two-minute timeout;
+    // a one-minute wall starts no attempt at all (the 60 s floor).
+    let near_end = run(Some(2)).await;
     let (_, timeout, _) = near_end[0];
     assert_eq!(
-        timeout, 1,
+        timeout, 2,
         "a ticket at the phase's edge gets the wall left"
+    );
+    let too_late = run(Some(1)).await;
+    assert!(
+        too_late.is_empty(),
+        "a one-minute wall started an attempt: {too_late:?}"
     );
 }
 
@@ -5138,6 +5221,46 @@ fn r90_m5_paid_grid_needs_a_cap() {
     r90_grid_case("r90_m5_paid_grid_needs_a_cap");
 }
 
+#[test]
+fn r93_g0_peak_matches_grid_model_names() {
+    r90_grid_case("r93_g0_peak_matches_grid_model_names");
+}
+
+#[test]
+fn r93_g1_pre_phase_guard() {
+    r90_grid_case("r93_g1_pre_phase_guard");
+}
+
+#[test]
+fn r93_g1_clean_phase_does_not_hold() {
+    r90_grid_case("r93_g1_clean_phase_does_not_hold");
+}
+
+#[test]
+fn r93_g1_empty_response_message() {
+    r90_grid_case("r93_g1_empty_response_message");
+}
+
+#[test]
+fn r93_g5_grid_state_is_per_ledger() {
+    r90_grid_case("r93_g5_grid_state_is_per_ledger");
+}
+
+#[test]
+fn r93_g5_restart_keeps_stop_reason() {
+    r90_grid_case("r93_g5_restart_keeps_stop_reason");
+}
+
+#[test]
+fn r93_g5_term_kills_the_lanes() {
+    r90_grid_case("r93_g5_term_kills_the_lanes");
+}
+
+#[test]
+fn r93_g5_balance_rechecked_on_release() {
+    r90_grid_case("r93_g5_balance_rechecked_on_release");
+}
+
 /// R90 M3: the chain exemption needs the fault's reason: a provider-fault
 /// hide and a live stop free the chain; an operator/comparison "hidden"
 /// note does not (a genuine result still uses its chain).
@@ -5253,4 +5376,22 @@ fn r92_f4_symlinked_workspace_is_not_copied_out() {
     let _ = std::fs::remove_file(&secret);
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&dst);
+}
+
+/// R93 G2: no lite attempt after the phase wall (or the ticket deadline)
+/// has only a minute left.
+#[test]
+fn r93_g2_no_lite_after_the_wall() {
+    use std::time::Duration;
+    // A 3 min wall: 125 s worked -> 55 s left (too late); 10 s -> 170 s.
+    assert!(wall_too_late(Duration::from_secs(125), Some(3), 0.0));
+    assert!(!wall_too_late(Duration::from_secs(10), Some(3), 0.0));
+    // The boundary is 60 s left, not the minute-floor 1 (< 120 s).
+    assert!(wall_too_late(Duration::from_secs(120), Some(3), 0.0));
+    assert!(!wall_too_late(Duration::from_secs(119), Some(3), 0.0));
+    assert!(!lite_allowed(true, true, Some(120)));
+    assert!(!lite_allowed(false, true, None));
+    assert!(lite_allowed(false, false, None));
+    assert!(!lite_allowed(true, false, None));
+    assert!(lite_allowed(false, true, Some(120)));
 }

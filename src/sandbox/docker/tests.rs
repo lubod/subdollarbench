@@ -1507,3 +1507,80 @@ fn r87_f1_client_hangup_still_billed() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// R93 G4: a handler thread that fails to start must not kill the
+/// sidecar; the next connection is still served. The wrapper makes the
+/// first `Thread.start` raise, exactly the per-connection failure G4
+/// names.
+#[test]
+fn r93_g4_sidecar_thread_failure_survives() {
+    use std::io::{Read, Write};
+    let dir = std::env::temp_dir().join(format!("r93-g4-sidecar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let wrapper = dir.join("wrapper.py");
+    std::fs::write(
+        &wrapper,
+        r#"import sys, threading
+script, port = sys.argv[1], sys.argv[2]
+class OneShotFailure(threading.Thread):
+    failed = False
+    def start(self):
+        if not OneShotFailure.failed:
+            OneShotFailure.failed = True
+            raise RuntimeError("simulated thread start failure")
+        return super().start()
+threading.Thread = OneShotFailure
+sys.argv = [script, port]
+exec(compile(open(script).read(), script, "exec"), {"__name__": "__main__"})
+"#,
+    )
+    .unwrap();
+    let script = crate::config::get_repo_root().join("extensions/egress_proxy.py");
+    let port = free_port();
+    let child = std::process::Command::new("python3")
+        .arg(&wrapper)
+        .arg(&script)
+        .arg(port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start the wrapped egress proxy");
+    let _proxy = R87Proxy(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut first = std::net::TcpStream::connect(("127.0.0.1", port)).expect("proxy listening");
+    first
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    let _ = first.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    let mut buf = [0u8; 256];
+    let _ = first.read(&mut buf);
+    let mut second = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("the sidecar survived the failed thread start");
+    second
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    second
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut text = String::new();
+    let mut buf = [0u8; 4096];
+    while !text.contains("403") {
+        let n = second.read(&mut buf).expect("read the proxy's answer");
+        if n == 0 {
+            break;
+        }
+        text.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+    assert!(
+        text.contains("403"),
+        "the sidecar died on a thread-start failure: {text:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

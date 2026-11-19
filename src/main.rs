@@ -346,6 +346,9 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
                 rehearsal,
                 smoke,
             } => {
+                if let Err(e) = subdollarbench::config::validate_budget(budget_usd, rehearsal) {
+                    anyhow::bail!("{e}");
+                }
                 main_campaign::run(
                     name,
                     model,
@@ -636,6 +639,18 @@ mod tests {
             "failed_tests" | "disqualified_cheat" => 1,
             _ => 2,
         }
+    }
+
+    /// R93 G3: `--budget-usd 0` (or negative) is refused for a paid
+    /// launch; a rehearsal is explicitly $0.
+    #[test]
+    fn r93_g3_zero_budget_refused() {
+        use subdollarbench::config::validate_budget;
+        assert!(validate_budget(0.0, false).is_err());
+        assert!(validate_budget(-0.5, false).is_err());
+        assert!(validate_budget(f64::NAN, false).is_err());
+        assert!(validate_budget(0.0, true).is_ok());
+        assert!(validate_budget(0.99, false).is_ok());
     }
 
     use std::fs;

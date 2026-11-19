@@ -55,6 +55,18 @@ pub const TICKET_BUDGET_REF_USD: f64 = 0.20;
 /// The note a run prints when its budget/wall differ from the official
 /// cell in the direction that changes what it measures (larger, or no
 /// wall). A smaller smoke cell is intentionally quiet.
+/// R93 G3: a paid launch needs a positive budget. 0 used to mean "no
+/// limit" in the pipeline, so an unset or mistyped budget could spend
+/// without a bound; only an explicit `--rehearsal` is a $0 run.
+pub fn validate_budget(budget_usd: f64, rehearsal: bool) -> Result<(), String> {
+    if !rehearsal && (!budget_usd.is_finite() || budget_usd <= 0.0) {
+        return Err(format!(
+            "--budget-usd must be greater than 0 (got {budget_usd}); a $0 run is --rehearsal"
+        ));
+    }
+    Ok(())
+}
+
 pub fn unofficial_cell_note(budget_usd: f64, wall_min: u64) -> Option<String> {
     let mut diffs = Vec::new();
     if budget_usd > OFFICIAL_CELL_BUDGET_USD {

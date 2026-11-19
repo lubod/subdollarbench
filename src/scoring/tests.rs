@@ -44,3 +44,28 @@ fn r26_repair_runs_with_money_and_is_skipped_below_the_floor() {
     let err = repair_round_spend(0.99, 0.98, None).expect_err("below the floor");
     assert!(err.contains("budget floor"), "{err}");
 }
+
+/// R93 G2: the first and repair sessions share one ticket deadline; a
+/// repair with a minute or less left gets no session.
+#[test]
+fn r93_g2_one_deadline_per_ticket() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let deadline = ticket_deadline(now, 2).expect("a 2 min ticket has a deadline");
+    assert_eq!(remaining_session_seconds(deadline, now), Some(120));
+    assert_eq!(
+        remaining_session_seconds(deadline, now + Duration::from_secs(30)),
+        Some(90)
+    );
+    assert_eq!(
+        remaining_session_seconds(deadline, now + Duration::from_secs(90)),
+        None,
+        "30 s left is not a session"
+    );
+    assert_eq!(remaining_session_seconds(deadline, deadline), None);
+    assert_eq!(
+        remaining_session_seconds(deadline, deadline + Duration::from_secs(1)),
+        None
+    );
+    assert!(ticket_deadline(now, 0).is_none());
+}

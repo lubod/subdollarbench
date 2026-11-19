@@ -14,7 +14,10 @@
 # SDB_MODEL_CHECK_NOW is the one fake clock (the model check's self-test
 # uses it; the grid's self-test uses it too).
 peak_state() {
-    local id="$1" now dow hhmm
+    # R93 G0: the grid passes the model as it appears in a careers file
+    # (`openrouter/deepseek/...`); the window matches the model family,
+    # so drop the provider prefix the grid's launcher adds.
+    local id="${1#openrouter/}" now dow hhmm
     now="${SDB_MODEL_CHECK_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
     dow="$(date -u -d "$now" +%u 2>/dev/null || echo 0)"
     hhmm="$(date -u -d "$now" +%H:%M 2>/dev/null || echo 00:00)"

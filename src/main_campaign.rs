@@ -164,6 +164,35 @@ fn status_path(cdir: &Path) -> std::path::PathBuf {
     cdir.join("status.json")
 }
 
+/// R93 G3: a pipeline error after the agent has spent writes a faulted
+/// rollup with the spend so far. The grid's R90 M1 recovery and the Run
+/// view read campaign.json; a status that still says `running` made a
+/// crashed cell look stalled and lost its spend.
+fn write_faulted_rollup(cdir: &Path, reason: &str) {
+    let Ok(text) = std::fs::read_to_string(status_path(cdir)) else {
+        return;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Some(r) = v.get_mut("rollup").filter(|r| !r.is_null()) {
+        r["harness_fault"] = serde_json::json!(reason);
+        r["finished_at"] = serde_json::json!(now.clone());
+        if let Ok(text) = serde_json::to_string_pretty(r) {
+            let _ = std::fs::write(cdir.join("campaign.json"), text);
+        }
+    }
+    update_status(cdir, |v| {
+        v["state"] = serde_json::json!("faulted");
+        v["stop_reason"] = serde_json::json!(reason);
+        if !v["rollup"].is_null() {
+            v["rollup"]["harness_fault"] = serde_json::json!(reason);
+            v["rollup"]["finished_at"] = serde_json::json!(now);
+        }
+    });
+}
+
 /// Publish the live campaign view: state + current ticket + rollup-so-far.
 fn write_status(
     cdir: &Path,
@@ -589,6 +618,8 @@ pub async fn run(
             &effort,
             subdollarbench::report::rules::RULES_VERSION,
             launch_image.as_deref(),
+            budget_usd,
+            wall_min.unwrap_or(0),
         )?;
         if let Some(ps) = &phase_spec {
             state.hints = campaign::phase_hints(&rollup, &lc.spec, ps, &state);
@@ -850,6 +881,10 @@ pub async fn run(
     let mut rollup = match rollup {
         Ok(r) => r,
         Err(e) => {
+            // R93 G3: save the spend in a faulted rollup before the error
+            // path, so the grid's recovery and the Run view see what was
+            // spent instead of a cell that still looks running.
+            write_faulted_rollup(&cdir, &format!("{e:#}"));
             // Round-11 O2: a cancel (SIGINT/SIGTERM sets the flag) leaves an
             // honest state instead of reading as a crashed cell. A dead
             // writer — a crash or kill -9 — cannot write anything and reads
@@ -1499,6 +1534,43 @@ fn print_rollup(r: &CampaignRollup) {
 
 #[cfg(test)]
 mod tests {
+
+    /// R93 G3: a pipeline error keeps the spend in a faulted rollup.
+    #[test]
+    fn r93_g3_spend_survives_exit() {
+        let dir = std::env::temp_dir().join(format!("r93-g3-fault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("status.json"),
+            r#"{"state":"running","rollup":{"campaign_id":"r93g3","total_cost_usd":0.123,"points":4.0}}"#,
+        )
+        .unwrap();
+        write_faulted_rollup(&dir, "killed while saving");
+        let status: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("status.json")).unwrap())
+                .unwrap();
+        assert_eq!(status["state"], "faulted");
+        assert!(
+            status["stop_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("killed"),
+            "{status}"
+        );
+        let rollup: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("campaign.json")).unwrap())
+                .unwrap();
+        assert_eq!(rollup["total_cost_usd"], 0.123);
+        assert!(
+            rollup["harness_fault"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("killed"),
+            "{rollup}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
     use subdollarbench::campaign::{CampaignRollup, StageRecord};
 

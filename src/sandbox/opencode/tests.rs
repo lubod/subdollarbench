@@ -3019,3 +3019,56 @@ fn r90_m4_stale_marker_does_not_delay_the_next_session() {
     assert!(dir.join("billed.jsonl.lost/this-call").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// R93 G4: the reconcile and bill lines are logged after READY too (the
+/// pump used to stop at READY and drop them).
+#[test]
+fn r93_g4_audit_lines_after_ready() {
+    let _env = R85_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("r93-g4-ready-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    let docker = root.join("bin/docker");
+    std::fs::write(&docker, FAKE_DOCKER).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}", root.join("bin").display(), old_path),
+    );
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let old_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &home);
+    let (res, logs) = run_oc_scenario_opts(
+        "ready",
+        &root,
+        covtest_limits(10, 1.0, 10),
+        None,
+        None,
+        false,
+        true,
+    );
+    std::env::set_var("PATH", old_path);
+    match old_home {
+        Some(h) => std::env::set_var("HOME", h),
+        None => std::env::remove_var("HOME"),
+    }
+    if let Err(e) = &res {
+        eprintln!("READY failed: {e}; logs: {logs:?}");
+    }
+    res.expect("READY conclusion must be Ok");
+    assert!(
+        logs.iter().any(|l| l.contains("[BILLED]")),
+        "no [BILLED] after READY: {logs:?}"
+    );
+    assert!(
+        logs.iter().any(|l| l.contains("[COST]")),
+        "no [COST] after READY: {logs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

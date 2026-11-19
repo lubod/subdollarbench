@@ -192,6 +192,27 @@ pub fn ticket_timeout_min(base_min: u64, budget_usd: f64, remaining_wall_min: Op
     }
 }
 
+/// R93 G2: a session with no more than a minute left does not start.
+pub const MIN_SESSION_SECS: u64 = 60;
+
+/// R93 G2: one absolute deadline for a ticket's sessions (the first and
+/// every repair), instead of handing each the full ticket timeout.
+pub fn ticket_deadline(now: std::time::Instant, timeout_min: u64) -> Option<std::time::Instant> {
+    (timeout_min > 0).then(|| now + std::time::Duration::from_secs(timeout_min * 60))
+}
+
+/// R93 G2: the seconds a session may still run under the ticket deadline;
+/// None when the wall has passed or a minute or less is left.
+pub fn remaining_session_seconds(
+    deadline: std::time::Instant,
+    now: std::time::Instant,
+) -> Option<u64> {
+    deadline
+        .checked_duration_since(now)
+        .map(|d| d.as_secs())
+        .filter(|s| *s > MIN_SESSION_SECS)
+}
+
 /// R26 R23-7: a repair session gets whatever remains of the guard. The old
 /// per-repair 25-turn cap is gone; the guard is shared by the sessions.
 #[derive(Debug, PartialEq, Eq)]
