@@ -544,22 +544,34 @@ export CARGO_TARGET_DIR="/tmp/sdb-cov-target"
 rm -rf "$CARGO_TARGET_DIR"
 cargo test --release --offline --locked --tests
 cargo test --release --offline --locked --no-run --message-format=json > /tmp/sdb-cov-bins.json
+# R92 F3: the server binaries integration tests spawn are instrumented
+# too (the same RUSTFLAGS, the same target dir), so black-box tests count.
+cargo build --release --offline --locked --bins --message-format=json > /tmp/sdb-cov-bins2.json
 TOOLS="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
 "$TOOLS/llvm-profdata" merge -sparse /tmp/sdb-cov-*.profraw -o /tmp/sdb-cov.profdata
 python3 - "$TOOLS/llvm-cov" <<'PY'
 import json, subprocess, sys
 llvm_cov = sys.argv[1]
 bins = []
-for line in open('/tmp/sdb-cov-bins.json'):
+for path in ('/tmp/sdb-cov-bins.json', '/tmp/sdb-cov-bins2.json'):
     try:
-        m = json.loads(line)
-    except Exception:
+        lines = open(path)
+    except OSError:
         continue
-    exe = m.get('executable')
-    if exe and m.get('profile', {}).get('test'):
-        bins.append(exe)
+    for line in lines:
+        try:
+            m = json.loads(line)
+        except Exception:
+            continue
+        exe = m.get('executable')
+        if not exe:
+            continue
+        # R92 F3: test binaries plus the bins the tests spawn.
+        if m.get('profile', {}).get('test') or 'bin' in (m.get('target') or {}).get('kind', []):
+            bins.append(exe)
+bins = sorted(set(bins))
 if not bins:
-    print('no instrumented test binaries', file=sys.stderr)
+    print('no instrumented test or bin executables', file=sys.stderr)
     sys.exit(2)
 # R88 F1: pass every test binary to one export with --object. A single
 # export whose binaries are positional arguments reads only the first
