@@ -3748,9 +3748,10 @@ async fn r92_f5_restart_failure_named_by_scenario() {
     let dir = covtest_dir("r92f5");
     let workdir = dir.join("workspace");
     crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
-    // The candidate starts twice (the run, then the memory scenario's
-    // scratch store) and refuses the third (the restore onto the real
-    // store): the restart misses its 20 s deadline.
+    // The candidate starts three times (the run, the stage-4 suite's
+    // persistence restart, and the memory scenario's scratch store) and
+    // refuses the fourth (the restore onto the real store): the restart
+    // misses its 20 s deadline.
     let start = "#!/bin/bash\n\
          n=0\n\
          if [ -f /workspace/.r92-f5-starts ]; then n=$(cat /workspace/.r92-f5-starts); fi\n\
@@ -3795,6 +3796,15 @@ async fn r92_f5_restart_failure_named_by_scenario() {
     .await;
     let log = logger.text();
     assert!(
+        log.contains("[MEMORY] gate runs on a fresh scratch store under a 64 MiB cap"),
+        "the memory scenario did not run: {log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|l| l.contains("Stage 16") && l.contains("FAIL")),
+        "the memory scenario itself failed, so the restore is not its own failure: {log}"
+    );
+    assert!(
         log.contains("restart_after_memory"),
         "the restart failure is not named: {log}"
     );
@@ -3805,6 +3815,76 @@ async fn r92_f5_restart_failure_named_by_scenario() {
         "the restart failure is not charged to ticket 4: {log}"
     );
     cleanup_covtest_network("r92f5");
+    let _ = fs::remove_dir_all(&dir);
+
+    // R92-1: the same after the perf scenario. The start-up and the two
+    // suites that include ticket 4 (stage 4's and stage 11's) restart the
+    // store, then the perf gate's scratch store and its own restart; the
+    // restore onto the real store is the sixth start and is refused. The
+    // scenario passes; the failed restart is ticket 4's, named for perf.
+    cleanup_covtest_network("r92f5p");
+    let dir = covtest_dir("r92f5p");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    let start = "#!/bin/bash\n\
+         n=0\n\
+         if [ -f /workspace/.r92-f5p-starts ]; then n=$(cat /workspace/.r92-f5p-starts); fi\n\
+         n=$((n + 1))\n\
+         echo \"$n\" > /workspace/.r92-f5p-starts\n\
+         if [ \"$n\" -ge 6 ]; then echo 'restore refused' >&2; exit 1; fi\n\
+         if [ $# -eq 0 ]; then set -- --port 0 --data /tmp; fi\n\
+         exec python3 -u /workspace/sql_server.py \"$@\"\n";
+    std::fs::write(workdir.join("start.sh"), start).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workdir.join("start.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql 92 f5 perf restart fixture").unwrap();
+    let mut config = covtest_config(workdir.clone(), worker, "r92f5p");
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage: 11,
+        prompt_path,
+        continuity: true,
+        accepted_stages: vec![0, 1, 2, 3, 4, 11],
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: (0..11).collect(),
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let _out = expect_proof(
+        BenchmarkPipeline::execute(config, logger.clone(), None),
+        &logger,
+        "the stage-11 restart fixture run must complete",
+    )
+    .await;
+    let log = logger.text();
+    assert!(
+        !log.lines()
+            .any(|l| l.contains("Stage 11") && l.contains("FAIL")),
+        "the perf scenario itself failed, so the restore is not its own failure: {log}"
+    );
+    assert!(
+        log.contains("restart_after_perf"),
+        "the perf restart failure is not named: {log}"
+    );
+    assert!(
+        log.lines().any(|l| l.contains("Stage 4: Persistence")
+            && l.contains("FAIL")
+            && l.contains("restart_after_perf")),
+        "the perf restart failure is not charged to ticket 4: {log}"
+    );
+    cleanup_covtest_network("r92f5p");
     let _ = fs::remove_dir_all(&dir);
 }
 

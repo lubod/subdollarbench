@@ -2182,7 +2182,13 @@ impl BenchmarkPipeline {
                                 );
                                 // Always back onto the real store, then
                                 // drop the scratch copy.
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "perf",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2198,7 +2204,7 @@ impl BenchmarkPipeline {
                                         "  [PERF] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((11, format!("[perf] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2344,7 +2350,13 @@ impl BenchmarkPipeline {
                                     )
                                 })(
                                 );
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "disk",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 match body {
                                     Ok(report) => logger.log(&format!("  [DISK] {report}")),
                                     Err(e) => {
@@ -2357,7 +2369,7 @@ impl BenchmarkPipeline {
                                         "  [DISK] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((17, format!("[disk] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2446,7 +2458,13 @@ impl BenchmarkPipeline {
                                     Ok(report)
                                 })(
                                 );
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "security",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2462,8 +2480,7 @@ impl BenchmarkPipeline {
                                         "  [SECURITY] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure =
-                                            Some((18, format!("[security] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2816,7 +2833,13 @@ impl BenchmarkPipeline {
                                     Ok(report)
                                 })(
                                 );
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "pg",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2832,7 +2855,7 @@ impl BenchmarkPipeline {
                                         "  [PG] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((20, format!("[pg] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
