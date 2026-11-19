@@ -422,13 +422,6 @@ impl OpenCodeRunner {
     /// Backoff before resume attempt `attempt` (0-based): 60s doubling,
     /// capped at 15min. Sleeps in small slices so cancel/deadline break it.
     fn backoff_sleep(attempt: u32, deadline: SystemTime, cancel: &Option<Arc<AtomicBool>>) -> bool {
-        // The resume tests must not wait a real 60 s backoff.
-        if let Ok(ms) = std::env::var("SDB_TEST_OPENCODE_BACKOFF_MS") {
-            if let Ok(ms) = ms.parse::<u64>() {
-                std::thread::sleep(Duration::from_millis(ms));
-                return true;
-            }
-        }
         let secs = (60u64.saturating_mul(1u64 << attempt.min(4))).min(900);
         let slices = secs.saturating_mul(2);
         for _ in 0..slices {

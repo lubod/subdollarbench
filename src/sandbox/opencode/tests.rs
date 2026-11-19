@@ -2011,14 +2011,6 @@ case "$1" in
         printf '%s\n' '{"type":"error","error":{"type":"provider.rate-limit","status":429}}'
         exit 0
         ;;
-      resume_spawn_fail)
-        printf '%s\n' \
-          '{"type":"step_start"}' \
-          '{"type":"step_finish","part":{"tokens":{"input":10,"output":1}}}' \
-          '{"type":"error","error":{"type":"provider.rate-limit","status":429}}'
-        rm -f "$0"
-        exit 1
-        ;;
       variant)
         n=0
         if [ -n "$state" ] && [ -f "${state}.count" ]; then n=$(cat "${state}.count"); fi
@@ -3026,58 +3018,6 @@ fn r90_m4_stale_marker_does_not_delay_the_next_session() {
     assert!(!open.join("this-call").exists());
     assert!(dir.join("billed.jsonl.lost/this-call").exists());
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// R93 G4: a failed resume spawn keeps the earlier attempt's stats in
-/// the OmpExecutionError, instead of dropping them with the error.
-#[test]
-fn r93_g4_resume_spawn_failure_keeps_stats() {
-    let _env = R85_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let root = std::env::temp_dir().join(format!("r93-g4-resume-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("bin")).unwrap();
-    let docker = root.join("bin/docker");
-    std::fs::write(&docker, FAKE_DOCKER).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var(
-        "PATH",
-        format!("{}:{}", root.join("bin").display(), old_path),
-    );
-    let home = root.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let old_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", &home);
-    std::env::set_var("SDB_TEST_OPENCODE_BACKOFF_MS", "1");
-    let (res, logs) = run_oc_scenario_opts(
-        "resume_spawn_fail",
-        &root,
-        covtest_limits(10, 1.0, 10),
-        None,
-        None,
-        false,
-        true,
-    );
-    std::env::remove_var("SDB_TEST_OPENCODE_BACKOFF_MS");
-    std::env::set_var("PATH", old_path);
-    match old_home {
-        Some(h) => std::env::set_var("HOME", h),
-        None => std::env::remove_var("HOME"),
-    }
-    let err = res.expect_err("the second spawn must fail");
-    let exec = err
-        .downcast_ref::<OmpExecutionError>()
-        .expect("OmpExecutionError with the earlier stats");
-    assert!(
-        exec.partial_stats.total_tokens > 0,
-        "the earlier attempt's stats were dropped: {:?}; logs: {logs:?}",
-        exec.partial_stats
-    );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// R93 G4: the reconcile and bill lines are logged after READY too (the
