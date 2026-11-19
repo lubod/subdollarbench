@@ -38,7 +38,7 @@ fn r27_f1_stamp_is_stable_across_processes() {
     let rel = put(&root, "src/scoring.rs", "fixture\n");
     let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
     assert_eq!(
-        fp, "2026-11-17.50+6e303c2cb5f8ec3fcbe2a558be6b3432",
+        fp, "2026-11-18.51+a09762f983a78eff24471b4f2c1874f4",
         "the SHA-256 stamp must be stable"
     );
     assert_eq!(fp, fingerprint_files(&root, &[rel]));

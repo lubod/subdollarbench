@@ -3136,7 +3136,7 @@ fn r45_f3_prompt_names_the_perf_score() {
 /// the current rules; a same-version phase does.
 #[test]
 fn r45_f4_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-17.50");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-18.51");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.43".to_string();
@@ -3153,7 +3153,7 @@ fn r45_f4_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
-    assert!(msg.contains("not 2026-11-17.50"), "{msg}");
+    assert!(msg.contains("not 2026-11-18.51"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -3171,7 +3171,7 @@ fn r45_f4_no_chain_across_the_bump() {
 /// current `.47` rules; a current phase chains normally.
 #[test]
 fn r49_f5_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-17.50");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-18.51");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.44".to_string();
@@ -3188,7 +3188,7 @@ fn r49_f5_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.44"), "{msg}");
-    assert!(msg.contains("not 2026-11-17.50"), "{msg}");
+    assert!(msg.contains("not 2026-11-18.51"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),

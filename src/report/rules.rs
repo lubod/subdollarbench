@@ -15,6 +15,27 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-18.51`: round 92. The audit's leftovers and the round-89
+///   review's two findings. Stage 5's torn-tail cut is capped by the
+///   victim append's own record size, so a retry whose step-start
+///   baseline also covers an earlier victim cannot tear the earlier,
+///   owed bytes; ticket 15 fails with "sensitivity is inconclusive ...
+///   no conclusive revert" when every reverted copy is inconclusive
+///   instead of passing with its sensitivity unproven (one conclusive
+///   revert still decides); the coverage measurement also counts the
+///   server binaries the tests spawn (black-box tests included; the
+///   denominator grows too, so the direction on a given workspace is
+///   indeterminate); scratch copies are regular-file-only (symlinks,
+///   FIFOs and devices are never followed or copied); a restart that
+///   misses its deadline after a late scenario is named
+///   `restart_after_<scenario>` and charged to ticket 4 (the store's
+///   restart contract), with the container state and last lines logged.
+///   Why: the 2026-11-17 audit's leftovers (four read-only reviews) and
+///   the round-89 review's R89-1 and R89-2, with the operator's "open 92
+///   93" (DECISIONS #38). Score impact: careers restart at phase 1; `.50`
+///   results are unaffected and are the published baseline once the
+///   deepseek career completes; scoring and the $0.99 cap stay at base
+///   rates (DECISIONS #32).
 /// - `2026-11-17.50`: round 89. The code audit's grader fixes. Stage 5's
 ///   torn tail cuts at most what the victim commit grew (a compact
 ///   checksummed log no longer loses the 1000-row statement before the
@@ -889,7 +910,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-17.50";
+pub const RULES_VERSION: &str = "2026-11-18.51";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
