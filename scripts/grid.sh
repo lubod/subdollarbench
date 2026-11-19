@@ -176,6 +176,20 @@ ledger_add() {
     ) 200>>"$LEDGER.lock"
 }
 
+# R93 G1: mark the row a guard just classified, without a second row (a
+# restart chains from the last row; a duplicate phase row would corrupt
+# chain_from).
+ledger_mark_last_stop() {
+    local career="$1" phase="$2" stop="$3"
+    (
+        flock 200
+        awk -F'\t' -v OFS='\t' -v c="$career" -v p="$phase" -v r="$stop" '
+            $1 == c && $3 == p { $8 = r }
+            { print }
+        ' "$LEDGER" > "$LEDGER.tmp" && mv "$LEDGER.tmp" "$LEDGER"
+    ) 200>>"$LEDGER.lock"
+}
+
 # R48-1: reserve a phase's budget atomically with the ledger spend. Prints
 # the reservation token, or returns 1 when the cap would be exceeded.
 reserve_phase() {
@@ -674,7 +688,7 @@ PY
                 read -r turns errors empty p50 refr refq rate_limited ratio <<< "$vals"
                 if (( turns >= 20 && errors >= 5 )) \
                     && awk -v e="$errors" -v t="$turns" 'BEGIN { exit !(100 * e / t > 2) }'; then
-                    printf '%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" > "$out"
+                    printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" "errors" > "$out"
                     printf 'live provider fault: %s errors in %s turns\n' "$errors" "$turns" > "$dir/.live_stop"
                     [[ "$worker" == "$WORKER_BASE" ]] && : > "$RUNS/.canary_failed"
                     kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true
@@ -682,7 +696,7 @@ PY
                 fi
                 if (( turns >= 20 && empty >= 5 )) \
                     && awk -v e="$empty" -v t="$turns" 'BEGIN { exit !(100 * e / t > 5) }'; then
-                    printf '%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$errors" > "$out"
+                    printf '%s\t%s\t%s\t%s\n' "$(basename "$dir")" "$turns" "$empty" "empty responses" > "$out"
                     printf 'live provider fault: %s empty responses in %s turns\n' "$empty" "$turns" > "$dir/.live_stop"
                     [[ "$worker" == "$WORKER_BASE" ]] && : > "$RUNS/.canary_failed"
                     kill -- -"$cell_pid" 2>/dev/null || kill "$cell_pid" 2>/dev/null || true
@@ -731,11 +745,70 @@ run_cell() {
         "$CELL" "$model" "$PHASE_BUDGET" "$PHASE_WALL"
 }
 
+# R93 G1: the audit's red flags on a finished phase, read here (before the
+# next phase) rather than by an external checker after the fact. Prints one
+# line naming the reason, or nothing. A missing rollup/health is not a flag
+# (a killed cell is R90 M1's spend case, and the grid's own stop already
+# covers it).
+phase_guard_reason() {
+    local dir="$1" points="$2" cost="$3" billed="$4" rehearsal="$5"
+    [[ -f "$dir/campaign.json" ]] || return 0
+    python3 - "$dir" "$points" "$cost" "$billed" "$rehearsal" <<'PY'
+import json, sys
+dir, points, cost, billed, rehearsal = sys.argv[1:6]
+points = float(points or 0)
+cost = float(cost or 0)
+billed = float(billed or 0)
+try:
+    r = json.load(open(dir + "/campaign.json"))
+except Exception:
+    raise SystemExit(0)
+flags = ("measurement failed", "no source lines",
+         "Timed out waiting for response", "panicked")
+for st in r.get("stages") or []:
+    f = st.get("failure") or {}
+    if isinstance(f, str):
+        f = {"line": f}
+    text = " ".join(str(f.get(k) or "") for k in ("line", "detail", "stderr_tail"))
+    low = text.lower()
+    for flag in flags:
+        if flag.lower() in low:
+            line = (f.get("line") or f.get("detail") or text).replace("\n", " ")
+            print("stage %s: %s: %s" % (st.get("id"), flag, line[:160]))
+            raise SystemExit(0)
+try:
+    h = json.load(open(dir + "/health.json"))
+except Exception:
+    h = {}
+turns = int(h.get("turns") or 0)
+errors = int(h.get("tool_errors") or 0)
+empty = int(h.get("empty_responses") or 0)
+p50 = float(h.get("turn_secs_p50") or 0)
+refq = int(h.get("ref_queries") or 0)
+refr = int(h.get("ref_refused") or 0)
+ratio = float(h.get("billed_ratio") or 0)
+if turns >= 20 and errors >= 5 and 100.0 * errors / turns > 2:
+    print("health: %d tool errors in %d turns" % (errors, turns))
+elif turns >= 20 and empty >= 5 and 100.0 * empty / turns > 5:
+    print("health: %d empty responses in %d turns" % (empty, turns))
+elif ratio > 1.25:
+    print("health: billed ratio %.2f" % ratio)
+elif p50 > 180:
+    print("health: median turn %.0fs" % p50)
+elif refq > 0 and 100.0 * refr / refq > 10:
+    print("health: ref-sql %d/%d refused" % (refr, refq))
+elif rehearsal != "1" and points == 0:
+    print("0 points on an ok phase")
+elif cost > 0.01 and billed < 0.5 * cost:
+    print("bill $%.4f under half the list $%.4f" % (billed, cost))
+PY
+}
+
 run_lane() {
     local lane="$1"
     local worker=$((WORKER_BASE + lane))
     local idx model phase chain result id rc token last_phase last_id last_stop start_phase
-    local failed=0 provider_turns=0 provider_errors=0 faults=0 first_fault=""
+    local failed=0 provider_turns=0 provider_errors=0 fault_kind="" faults=0 first_fault=""
     for idx in "${!CAREERS[@]}"; do
         model="${CAREERS[$idx]}"
         if (( idx % LANES != lane )); then
@@ -857,8 +930,9 @@ run_lane() {
                 stop="cost > 0.99"
             fi
             if [[ -s "$live_result" ]]; then
-                read -r live_id provider_turns provider_errors < "$live_result"
+                read -r live_id provider_turns provider_errors fault_kind < "$live_result"
                 [[ -n "$live_id" ]] && id="$live_id"
+                [[ -n "$fault_kind" ]] || fault_kind="errors"
                 stop="provider_fault"
             fi
             # R68 F5: a finished phase whose live.log carries provider
@@ -866,10 +940,11 @@ run_lane() {
             # not a model result. The ledger row says so and the run is
             # hidden before anything can publish it.
             if [[ "$stop" == "ok" && -n "$id" && "$id" != "—" ]] && provider_fault "$id"; then
-                local fault_turns fault_count fault_kind
-                read -r fault_turns fault_count fault_kind < <(provider_fault_detail "$id")
+                local fault_turns fault_count detail_kind
+                read -r fault_turns fault_count detail_kind < <(provider_fault_detail "$id")
                 provider_turns="$fault_turns"
                 provider_errors="$fault_count"
+                fault_kind="$detail_kind"
                 stop="provider_fault"
             fi
             # R90 M2: the cap counts the larger of the list spend and the
@@ -895,14 +970,35 @@ run_lane() {
                     {
                         echo "STOP: career $idx $model phase $phase provider fault twice"
                         echo "fault 1: $first_fault"
-                        echo "fault 2: $provider_errors errors in $provider_turns turns"
+                        echo "fault 2: $provider_errors ${fault_kind:-errors} in $provider_turns turns"
                     } > "$STOP"
                     log "lane $lane: career $idx $model phase $phase faulted twice; STOP"
                     return 1
                 fi
-                first_fault="$provider_errors errors in $provider_turns turns"
+                first_fault="$provider_errors ${fault_kind:-errors} in $provider_turns turns"
                 phase=$((phase - 1))
                 continue
+            fi
+            # R93 G1: the audit's red flags on the finished phase, after its
+            # ledger row and before the next phase starts. The row is
+            # marked (not duplicated) so a restart skips the career.
+            local guard=""
+            if [[ "$stop" == "ok" && -n "$id" && "$id" != "—" && -n "$dir" ]]; then
+                guard="$(phase_guard_reason "$dir" "${points:-0}" "${cost:-0}" "${billed:-0}" "$REHEARSAL")"
+            fi
+            if [[ -n "$guard" ]]; then
+                stop="guard: $guard"
+            fi
+            if [[ "$stop" == guard:* ]]; then
+                ledger_mark_last_stop "$idx" "$phase" "$stop"
+                mkdir -p "$RUNS/$id"
+                printf '%s\n' "$stop" > "$RUNS/$id/.portal_hidden"
+                if [[ ! -f "$HOLD" ]]; then
+                    printf 'hold: phase %s: %s\n' "$phase" "${stop#guard: }" > "$HOLD"
+                fi
+                log "lane $lane: career $idx $model phase $phase held: ${stop#guard: }"
+                wait_hold
+                return "$failed"
             fi
             # R67 F2: a bill above 1.25x list means the pin did not hold.
             if [[ "$stop" == "ok" && -n "$billed" && "$cost" != "0" ]] \
@@ -912,6 +1008,15 @@ run_lane() {
                 wait_hold
             fi
             if [[ "$stop" != "ok" ]]; then
+                # R93 G1: a non-ok stop is a red flag too: name it in the
+                # hold and hide the phase before the existing STOP.
+                if [[ -n "${id:-}" && "$id" != "—" ]]; then
+                    mkdir -p "$RUNS/$id"
+                    printf 'stop: %s\n' "$stop" > "$RUNS/$id/.portal_hidden" 2>/dev/null || true
+                fi
+                if [[ ! -f "$HOLD" ]]; then
+                    printf 'hold: phase %s stopped: %s\n' "$phase" "$stop" > "$HOLD"
+                fi
                 log "lane $lane: career $idx $model phase $phase stopped: $stop"
                 touch "$STOP"
                 return "$failed"
@@ -1071,6 +1176,9 @@ if [[ -n "${SDB_R90_BILLED:-}" ]]; then
     printf '{"id":"call-1","model":"m","cost":%s,"status":200}\n' \
         "$SDB_R90_BILLED" > "$runs/$id/billed.jsonl"
 fi
+if [[ -n "${SDB_R90_ROLLUP:-}" ]]; then
+    printf '%s\n' "$SDB_R90_ROLLUP" > "$runs/$id/campaign.json"
+fi
 if [[ -n "${SDB_R90_HEALTH:-}" ]]; then
     n=0
     if [[ -n "${SDB_R90_FAULT_ATTEMPTS:-}" ]]; then
@@ -1139,6 +1247,10 @@ r90_case_setup() {
     export SDB_GRID_SKIP_PREFLIGHT=1
     export SDB_GRID_CANARY=0
     export SDB_GRID_TRACE="$R90_DIR/trace.tsv"
+    # R93 G1: a real phase records the provider's bill beside the list;
+    # the clean self-test phases do too, so the guard's lost-bill check
+    # does not fire on them.
+    export SDB_R90_BILLED=0.1
 }
 
 r90_case_done() {
@@ -1397,6 +1509,131 @@ r90_m3_post_phase_fault_reads_health() {
     wait "$pid" 2>/dev/null || true
     unset SDB_R90_HEALTH
     r90_case_done r90_m3_post_phase_fault_reads_health
+}
+
+# R93 G1: a phase whose rollup carries a grader/infra failure is held
+# before the next phase, and the hold names it.
+r93_g1_pre_phase_guard() {
+    r90_case_setup r93_g1_pre_phase_guard
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=2
+    export SDB_R90_BILLED=0.1
+    export SDB_R90_ROLLUP='{"points":10.0,"stages":[{"id":1,"passed":false,"failure":{"kind":"own_stage","line":"ticket 15: coverage measurement failed","detail":"coverage measurement failed: the measurement did not finish"}}]}'
+    load_careers "$CAREERS_FILE"
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "guard: the failing phase did not hold"
+        return 1
+    fi
+    grep -q 'coverage measurement failed' "$HOLD" || {
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "guard: the hold does not name the failure: $(cat "$HOLD")"
+        return 1
+    }
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 1 ]] || {
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "guard: the next phase started ($rows rows)"
+        return 1
+    }
+    id="$(awk -F'\t' 'NR == 2 { print $5 }' "$LEDGER")"
+    [[ -f "$RUNS/$id/.portal_hidden" ]] || {
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "guard: the phase was not hidden"
+        return 1
+    }
+    rm -f "$HOLD"
+    wait "$pid" 2>/dev/null || true
+    unset SDB_R90_ROLLUP SDB_R90_BILLED
+    r90_case_done r93_g1_pre_phase_guard
+}
+
+# R93 G1: a clean phase (no failure text, ten points, a real bill) does
+# not hold.
+r93_g1_clean_phase_does_not_hold() {
+    r90_case_setup r93_g1_clean_phase_does_not_hold
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=2
+    export SDB_R90_BILLED=0.1
+    export SDB_R90_ROLLUP='{"points":10.0,"stages":[{"id":1,"passed":true,"failure":null}]}'
+    load_careers "$CAREERS_FILE"
+    rc=0
+    run_grid || rc=$?
+    [[ "$rc" -eq 0 ]] || {
+        echo "clean phase: the grid failed (rc=$rc)"; return 1; }
+    [[ ! -f "$HOLD" ]] || {
+        echo "clean phase: a clean phase held: $(cat "$HOLD")"; return 1; }
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 2 ]] || {
+        echo "clean phase: expected two phases, got $rows"; return 1; }
+    unset SDB_R90_ROLLUP SDB_R90_BILLED
+    r90_case_done r93_g1_clean_phase_does_not_hold
+}
+
+# R87-1: an empty-response stop says "empty responses", not "0 errors".
+r93_g1_empty_response_message() {
+    r90_case_setup r93_g1_empty_response_message
+    printf 'c1\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    export SDB_R90_BILLED=0.1
+    export SDB_R90_HEALTH='{"turns":20,"tool_errors":0,"empty_responses":5,"turn_secs_p50":1.0,"ref_queries":0,"ref_refused":0,"rate_limited":0,"billed_ratio":1.0}'
+    export SDB_R90_LIVE_SLEEP=0.8 SDB_GRID_HEALTH_POLL=0.1
+    load_careers "$CAREERS_FILE"
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$HOLD" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -f "$HOLD" ]]; then
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "empty response: the live stop did not hold"
+        return 1
+    fi
+    grep -q 'empty responses' "$HOLD" || {
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "empty response: the hold does not say empty responses: $(cat "$HOLD")"
+        return 1
+    }
+    if grep -q '0 errors' "$HOLD"; then
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "empty response: the hold says 0 errors: $(cat "$HOLD")"
+        return 1
+    fi
+    id="$(awk -F'\t' 'NR == 2 { print $5 }' "$LEDGER")"
+    grep -q 'empty responses' "$RUNS/$id/.portal_hidden" 2>/dev/null || {
+        rm -f "$HOLD"
+        r90_stop_grid "$pid"
+        echo "empty response: the hidden file does not say empty responses"
+        return 1
+    }
+    rm -f "$HOLD"
+    : > "$STOP"
+    wait "$pid" 2>/dev/null || true
+    unset SDB_R90_HEALTH SDB_R90_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_R90_BILLED
+    r90_case_done r93_g1_empty_response_message
 }
 
 # R90 M5: a rehearsal on a ledger whose careers are already complete runs
