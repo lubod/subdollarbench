@@ -139,7 +139,7 @@ fn reference_passes_the_crash_and_txn_checks_twenty_times() {
         let before = crash::snapshot_files(&proc.data).expect("stamps");
         crash::append_row(&addr, t, &format!("r{rep}_a"), acked + 1).expect("victim");
         proc.kill();
-        let (_, _, cut) = crash::tear_victim(&proc.data, &before)
+        let (_, _, cut) = crash::tear_victim(&proc.data, &before, 0)
             .expect("changed")
             .expect("the victim commit wrote something");
         assert!(cut > 0, "rep {rep}: nothing to tear");
@@ -401,7 +401,7 @@ fn reference_survives_the_crash_safety_ladder() {
     let before = crash::snapshot_files(&proc.data).expect("store stamps");
     crash::append_row(&addr, t, "crash_acked", acked + 1).expect("victim row");
     proc.kill();
-    let (_, _, cut) = crash::tear_victim(&proc.data, &before)
+    let (_, _, cut) = crash::tear_victim(&proc.data, &before, 0)
         .expect("changed file")
         .expect("the victim commit wrote something");
     assert!(cut > 0, "the store must have a newest file to tear");

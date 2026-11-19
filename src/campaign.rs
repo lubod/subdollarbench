@@ -3971,7 +3971,13 @@ fn copy_dir_inner(src: &Path, dst: &Path, include_git: bool) -> Result<()> {
         }
         let from = entry.path();
         let to = dst.join(&name);
-        if entry.file_type()?.is_dir() {
+        // R92 F4: lstat, not stat. A symlink (to a host file or a
+        // directory) and a FIFO/device are never followed or copied: the
+        // candidate controls the workspace, and a scratch copy must not
+        // pull host content in (and back into the model's feedback) or
+        // block on a FIFO. crash::copy_tree has the same rule.
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             // R89 F4: the build cache is not part of the source. A
             // scratch copy with the candidate's `target/` let a `start.sh`
             // that builds only when the binary is missing run the stale,
@@ -3980,9 +3986,11 @@ fn copy_dir_inner(src: &Path, dst: &Path, include_git: bool) -> Result<()> {
                 continue;
             }
             copy_dir_inner(&from, &to, include_git)?;
-        } else {
+        } else if kind.is_file() {
             std::fs::copy(&from, &to)
                 .map_err(|e| anyhow::anyhow!("copy {} -> {}: {e}", from.display(), to.display()))?;
+        } else {
+            eprintln!("[COPY] skipped non-regular {}", from.display());
         }
     }
     Ok(())

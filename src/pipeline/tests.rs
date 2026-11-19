@@ -3735,6 +3735,271 @@ fn r63_f2_stage20_proofs_keep_the_full_ladder() {
     );
 }
 
+/// R92 F5: a restart that misses its deadline after the memory scenario
+/// is labeled `restart_after_memory` and charged to ticket 4 (the store's
+/// restart contract), not to the memory scenario's own check.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r92_f5_restart_failure_named_by_scenario() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    cleanup_covtest_network("r92f5");
+    let worker = 109u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r92f5");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    // The candidate starts three times (the run, the stage-4 suite's
+    // persistence restart, and the memory scenario's scratch store) and
+    // refuses the fourth (the restore onto the real store): the restart
+    // misses its 20 s deadline.
+    let start = "#!/bin/bash\n\
+         n=0\n\
+         if [ -f /workspace/.r92-f5-starts ]; then n=$(cat /workspace/.r92-f5-starts); fi\n\
+         n=$((n + 1))\n\
+         echo \"$n\" > /workspace/.r92-f5-starts\n\
+         if [ \"$n\" -ge 4 ]; then echo 'restart refused' >&2; exit 1; fi\n\
+         if [ $# -eq 0 ]; then set -- --port 0 --data /tmp; fi\n\
+         exec python3 -u /workspace/sql_server.py \"$@\"\n";
+    std::fs::write(workdir.join("start.sh"), start).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workdir.join("start.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql 92 f5 restart fixture").unwrap();
+    let mut config = covtest_config(workdir.clone(), worker, "r92f5");
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage: 16,
+        prompt_path,
+        continuity: true,
+        accepted_stages: vec![0, 1, 2, 3, 4, 16],
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: Vec::new(),
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let _out = expect_proof(
+        BenchmarkPipeline::execute(config, logger.clone(), None),
+        &logger,
+        "the stage-16 restart fixture run must complete",
+    )
+    .await;
+    let log = logger.text();
+    assert!(
+        log.contains("[MEMORY] gate runs on a fresh scratch store under a 64 MiB cap"),
+        "the memory scenario did not run: {log}"
+    );
+    assert!(
+        !log.lines()
+            .any(|l| l.contains("Stage 16") && l.contains("FAIL")),
+        "the memory scenario itself failed, so the restore is not its own failure: {log}"
+    );
+    assert!(
+        log.contains("restart_after_memory"),
+        "the restart failure is not named: {log}"
+    );
+    assert!(
+        log.lines().any(|l| l.contains("Stage 4: Persistence")
+            && l.contains("FAIL")
+            && l.contains("restart_after_memory")),
+        "the restart failure is not charged to ticket 4: {log}"
+    );
+    cleanup_covtest_network("r92f5");
+    let _ = fs::remove_dir_all(&dir);
+
+    // R92-1: the same after the perf scenario. The start-up and the two
+    // suites that include ticket 4 (stage 4's and stage 11's) restart the
+    // store, then the perf gate's scratch store and its own restart; the
+    // restore onto the real store is the sixth start and is refused. The
+    // scenario passes; the failed restart is ticket 4's, named for perf.
+    cleanup_covtest_network("r92f5p");
+    let dir = covtest_dir("r92f5p");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    let start = "#!/bin/bash\n\
+         n=0\n\
+         if [ -f /workspace/.r92-f5p-starts ]; then n=$(cat /workspace/.r92-f5p-starts); fi\n\
+         n=$((n + 1))\n\
+         echo \"$n\" > /workspace/.r92-f5p-starts\n\
+         if [ \"$n\" -ge 6 ]; then echo 'restore refused' >&2; exit 1; fi\n\
+         if [ $# -eq 0 ]; then set -- --port 0 --data /tmp; fi\n\
+         exec python3 -u /workspace/sql_server.py \"$@\"\n";
+    std::fs::write(workdir.join("start.sh"), start).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workdir.join("start.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql 92 f5 perf restart fixture").unwrap();
+    let mut config = covtest_config(workdir.clone(), worker, "r92f5p");
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage: 11,
+        prompt_path,
+        continuity: true,
+        accepted_stages: vec![0, 1, 2, 3, 4, 11],
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: (0..11).collect(),
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let _out = expect_proof(
+        BenchmarkPipeline::execute(config, logger.clone(), None),
+        &logger,
+        "the stage-11 restart fixture run must complete",
+    )
+    .await;
+    let log = logger.text();
+    assert!(
+        !log.lines()
+            .any(|l| l.contains("Stage 11") && l.contains("FAIL")),
+        "the perf scenario itself failed, so the restore is not its own failure: {log}"
+    );
+    assert!(
+        log.contains("restart_after_perf"),
+        "the perf restart failure is not named: {log}"
+    );
+    assert!(
+        log.lines().any(|l| l.contains("Stage 4: Persistence")
+            && l.contains("FAIL")
+            && l.contains("restart_after_perf")),
+        "the perf restart failure is not charged to ticket 4: {log}"
+    );
+    cleanup_covtest_network("r92f5p");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// R92 F2: ticket 15 cannot pass when every reverted copy is
+/// inconclusive. The stage-7 and stage-8 commits add modules the later
+/// main.rs uses, so reverting either leaves a symbol main.rs needs and
+/// the build fails: no conclusive revert exists, and the ticket fails
+/// with the inconclusive reason instead of passing silently.
+#[test]
+fn r92_f2_no_conclusive_revert_cannot_pass() {
+    use crate::sandbox::docker::{RunGuard, SandboxManager};
+    let dir = std::env::temp_dir().join(format!("r92-f2-revert-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let workdir = dir.join("workspace");
+    std::fs::create_dir_all(workdir.join("src")).unwrap();
+    std::fs::create_dir_all(workdir.join("tests")).unwrap();
+    std::fs::write(
+        workdir.join("Cargo.toml"),
+        "[package]\nname = \"s15-ref-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workdir.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n\
+         # It is not intended for manual editing.\n\
+         version = 4\n\n\
+         [[package]]\nname = \"s15-ref-fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workdir.join("test.sh"),
+        "#!/bin/sh\nset -eu\ncargo test --release --offline --locked\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workdir.join("test.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workdir)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "ref@example.com"]);
+    git(&["config", "user.name", "reference"]);
+    std::fs::write(
+        workdir.join("src/lib.rs"),
+        "pub fn base() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn base_is_one() {\n        assert_eq!(super::base(), 1);\n    }\n}\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "stage 6: Transactions [pass]"]);
+    std::fs::write(
+        workdir.join("src/seven.rs"),
+        "pub fn seven() -> i32 { 7 }\n",
+    )
+    .unwrap();
+    let lib = std::fs::read_to_string(workdir.join("src/lib.rs")).unwrap();
+    std::fs::write(workdir.join("src/lib.rs"), format!("{lib}pub mod seven;\n")).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "stage 7: Aggregates [pass]"]);
+    std::fs::write(
+        workdir.join("src/eight.rs"),
+        "pub fn eight() -> i32 { 8 }\n",
+    )
+    .unwrap();
+    let lib = std::fs::read_to_string(workdir.join("src/lib.rs")).unwrap();
+    std::fs::write(workdir.join("src/lib.rs"), format!("{lib}pub mod eight;\n")).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "stage 8: Joins [pass]"]);
+    std::fs::write(
+        workdir.join("src/main.rs"),
+        "fn main() {\n    println!(\"{}\", s15_ref_fixture::seven::seven() + s15_ref_fixture::eight::eight());\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workdir.join("tests/uses.rs"),
+        "#[test]\nfn both() {\n    assert_eq!(s15_ref_fixture::seven::seven() + s15_ref_fixture::eight::eight(), 15);\n}\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "stage 9: Subqueries [pass]"]);
+    let sm = SandboxManager::with_id(&format!("r92-f2-{}", std::process::id()));
+    let _guard = RunGuard::new(SandboxManager::with_id(&format!(
+        "r92-f2-{}",
+        std::process::id()
+    )));
+    sm.cleanup();
+    let logger = Arc::new(RecordingLogger::default());
+    let res = run_tests_gate_blocking(sm, workdir.clone(), logger.clone(), true);
+    let why = res.error.clone().unwrap_or_default();
+    assert!(
+        !res.passed
+            && why.contains("sensitivity is inconclusive")
+            && why.contains("no conclusive revert"),
+        "ticket 15 passed or failed for another reason: passed={} why={why}\n{}",
+        res.passed,
+        logger.text()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// R81 F4: measured Rust coverage. A crate with one tested and one
 /// untested function measures 50% of its `src/` lines (within 1 point);
 /// the integration test file is excluded.
@@ -3782,6 +4047,58 @@ fn r81_f4_rust_coverage_measured() {
     assert!(
         (cov - 50.0).abs() <= 1.0,
         "expected 50.0 +/- 1.0, got {cov}"
+    );
+    sm.cleanup();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R92 F3: a crate whose only integration test spawns the server binary
+/// must count the `src/` lines the black-box test exercises. The test
+/// binaries alone hold no `src/` lines (the old measurement errored with
+/// "no source lines under src/"); the instrumented bin's profile adds them.
+#[test]
+fn r92_f3_spawned_server_lines_count() {
+    use crate::sandbox::docker::{RunGuard, SandboxManager};
+    // No SQL lock: a tiny Docker test, so CI (which skips live proofs)
+    // still runs it.
+    let dir = std::env::temp_dir().join(format!("r92-f3-spawn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"sdb-cov-srv\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [[bin]]\nname = \"sdb-cov-srv\"\npath = \"src/main.rs\"\ntest = false\n\n\
+         [dependencies]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n\
+         # It is not intended for manual editing.\nversion = 4\n\n\
+         [[package]]\nname = \"sdb-cov-srv\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.rs"),
+        "pub fn served() -> i32 { 1 }\n\nfn main() {\n    println!(\"{}\", served());\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tests/spawn.rs"),
+        "#[test]\nfn the_server_answers() {\n    let exe = env!(\"CARGO_BIN_EXE_sdb-cov-srv\");\n    let out = std::process::Command::new(exe).output().expect(\"spawn\");\n    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), \"1\");\n}\n",
+    )
+    .unwrap();
+    let sm = SandboxManager::with_id(&format!("r92-f3-{}", std::process::id()));
+    let _guard = RunGuard::new(SandboxManager::with_id(&format!(
+        "r92-f3-{}",
+        std::process::id()
+    )));
+    sm.cleanup();
+    let cov = measure_rust_coverage(&sm, &dir).expect("the spawned server's coverage");
+    assert!(
+        cov >= 99.0,
+        "the spawned server's src lines were not counted: {cov}"
     );
     sm.cleanup();
     let _ = std::fs::remove_dir_all(&dir);

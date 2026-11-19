@@ -84,10 +84,11 @@ pub fn ack_kill(
 }
 
 /// Commit one more row (the torn-tail victim).
-pub fn append_row(addr: &str, timeout: Duration, table: &str, k: usize) -> Result<(), String> {
+pub fn append_row(addr: &str, timeout: Duration, table: &str, k: usize) -> Result<u64, String> {
     let mut c = TcpCandidate::connect(addr, timeout)?;
-    match c.exec(&format!("INSERT INTO {table} VALUES ({k}, 'v{k}')"))? {
-        Response::Ok(1) => Ok(()),
+    let sql = format!("INSERT INTO {table} VALUES ({k}, 'v{k}')");
+    match c.exec(&sql)? {
+        Response::Ok(1) => Ok(sql.len() as u64 + 1),
         other => Err(format!("victim INSERT answered {other:?}")),
     }
 }
@@ -333,12 +334,25 @@ pub fn read_keys(addr: &str, timeout: Duration, table: &str) -> Result<Vec<usize
 pub fn tear_victim(
     dir: &Path,
     before: &BTreeMap<PathBuf, FileStamp>,
+    max_record: u64,
 ) -> Result<Option<(PathBuf, u64, u64)>, String> {
     let Some((path, grew)) = changed_file(dir, before)? else {
         return Ok(None);
     };
+    // R92 F1: even when `before` is the step's start (R89 F1 needs that to
+    // see an unflushed first append), the cut is bounded by the victim
+    // append's own serialized size, so a retry cannot reach an earlier,
+    // owed victim. A rewritten log keeps the old-style constant tail cut
+    // (the operator's answer to R89's spec question 1). Under-cutting is
+    // always safe for the invariant; over-cutting is not.
     let cut = if grew > 0 {
-        torn_tail(&path, 256.min(grew))?
+        let cap = 256.min(grew);
+        let cap = if max_record > 0 {
+            cap.min(max_record)
+        } else {
+            cap
+        };
+        torn_tail(&path, cap)?
     } else {
         torn_tail(&path, 256)?
     };

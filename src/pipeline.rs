@@ -61,6 +61,51 @@ fn restart_candidate(
     )
 }
 
+/// R92 F5: a failed restart after a late scenario is the store's
+/// restart contract (ticket 4), not the scenario's own check. The error
+/// names the scenario and carries the container state and its last lines.
+fn restart_after_scenario(
+    scenario: &str,
+    instance_id: &str,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+) -> Result<(), String> {
+    restart_candidate(instance_id, workdir, port, extras, true).map_err(|e| {
+        format!(
+            "restart_after_{scenario}: {e}\n{}",
+            candidate_diagnostics(instance_id)
+        )
+    })
+}
+
+/// R92 F5: the container state and its last lines, for a restart that
+/// missed its 20 s deadline.
+fn candidate_diagnostics(instance_id: &str) -> String {
+    let sb = crate::sandbox::docker::SandboxManager::with_id(instance_id);
+    let name = sb.candidate_container_name();
+    let state = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Status}} {{.State.ExitCode}}",
+            &name,
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let logs = std::process::Command::new("docker")
+        .args(["logs", "--tail", "20", &name])
+        .output()
+        .map(|o| {
+            let mut t = String::from_utf8_lossy(&o.stdout).to_string();
+            t.push_str(&String::from_utf8_lossy(&o.stderr));
+            t
+        })
+        .unwrap_or_default();
+    format!("container {name}: state {state}; last lines:\n{logs}")
+}
+
 /// Stage 5's crash ladder against the candidate: acked rows survive a
 /// SIGKILL, a mid-flight bulk UPDATE is all-or-nothing, a torn newest data
 /// file recovers every committed statement, and a second restart changes
@@ -239,7 +284,8 @@ fn crash_ladder(
             // changed nothing (seen in the full gate under load).
             let before_c = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
             for attempt in 0..3 {
-                crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
+                // R92 F1: the victim record's own size bounds the cut.
+                let record = crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
                     .map_err(|e| format!("(c) {e}"))?;
                 victims += 1;
                 let _ = sandbox.kill_candidate();
@@ -248,8 +294,8 @@ fn crash_ladder(
                 // compact log keeps the record before the newest one); a
                 // file it rewrote in place (SQLite's reused WAL) takes
                 // the old-style tail cut.
-                if let Some(victim) =
-                    crash::tear_victim(&scratch, &before_c).map_err(|e| format!("(c) {e}"))?
+                if let Some(victim) = crash::tear_victim(&scratch, &before_c, record)
+                    .map_err(|e| format!("(c) {e}"))?
                 {
                     torn = Some(victim);
                     break;
@@ -509,6 +555,15 @@ pub(crate) fn coverage_error_is_infra(error: &str) -> bool {
     error.contains(COVERAGE_TIMEOUT_MARKER)
 }
 
+/// R92 F2: a reverted copy that does not answer SELECT 1 is an
+/// inconclusive revert, not a pass: the sensitivity check still has to
+/// find one conclusive revert elsewhere.
+pub(crate) fn revert_probe_inconclusive(output: &str) -> String {
+    format!(
+        "sensitivity is inconclusive: the reverted copy does not answer SELECT 1, so ./test.sh failing proves nothing: {output}"
+    )
+}
+
 /// R89 F4: a reverted copy that does not compile is inconclusive, not a
 /// ticket-15 failure: the sensitivity check has nothing to prove.
 pub(crate) fn revert_build_inconclusive(reason: &str) -> String {
@@ -534,22 +589,34 @@ export CARGO_TARGET_DIR="/tmp/sdb-cov-target"
 rm -rf "$CARGO_TARGET_DIR"
 cargo test --release --offline --locked --tests
 cargo test --release --offline --locked --no-run --message-format=json > /tmp/sdb-cov-bins.json
+# R92 F3: the server binaries integration tests spawn are instrumented
+# too (the same RUSTFLAGS, the same target dir), so black-box tests count.
+cargo build --release --offline --locked --bins --message-format=json > /tmp/sdb-cov-bins2.json
 TOOLS="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
 "$TOOLS/llvm-profdata" merge -sparse /tmp/sdb-cov-*.profraw -o /tmp/sdb-cov.profdata
 python3 - "$TOOLS/llvm-cov" <<'PY'
 import json, subprocess, sys
 llvm_cov = sys.argv[1]
 bins = []
-for line in open('/tmp/sdb-cov-bins.json'):
+for path in ('/tmp/sdb-cov-bins.json', '/tmp/sdb-cov-bins2.json'):
     try:
-        m = json.loads(line)
-    except Exception:
+        lines = open(path)
+    except OSError:
         continue
-    exe = m.get('executable')
-    if exe and m.get('profile', {}).get('test'):
-        bins.append(exe)
+    for line in lines:
+        try:
+            m = json.loads(line)
+        except Exception:
+            continue
+        exe = m.get('executable')
+        if not exe:
+            continue
+        # R92 F3: test binaries plus the bins the tests spawn.
+        if m.get('profile', {}).get('test') or 'bin' in (m.get('target') or {}).get('kind', []):
+            bins.append(exe)
+bins = sorted(set(bins))
 if not bins:
-    print('no instrumented test binaries', file=sys.stderr)
+    print('no instrumented test or bin executables', file=sys.stderr)
     sys.exit(2)
 # R88 F1: pass every test binary to one export with --object. A single
 # export whose binaries are positional arguments reads only the first
@@ -733,6 +800,12 @@ fn run_tests_gate_blocking(
         Ok(l) => l,
         Err(e) => return fail(format!("git log failed: {e}")),
     };
+    // R92 F2: a stage-15 pass needs at least one conclusive revert (the
+    // suite goes red on a reverted copy). A revert that cannot build or
+    // cannot answer SELECT 1 proves nothing, so it is skipped; if every
+    // revert is inconclusive the ticket fails instead of passing with its
+    // sensitivity unproven.
+    let mut conclusive = 0u32;
     for stage in [7u32, 8u32] {
         let Some(commit) = parse_stage_commit(&log, stage) else {
             return fail(format!(
@@ -864,10 +937,11 @@ fn run_tests_gate_blocking(
                 Ok((false, out)) => {
                     let _ = std::fs::remove_dir_all(&scenario);
                     let _ = std::fs::remove_file(&patch_path);
-                    return fail(format!(
-                        "sensitivity is inconclusive: the reverted copy does not answer SELECT 1, so ./test.sh failing proves nothing: {}",
-                        output_tail(&out, 400)
+                    logger.log(&format!(
+                        "  [TESTS] {}",
+                        revert_probe_inconclusive(&output_tail(&out, 400))
                     ));
+                    continue;
                 }
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&scenario);
@@ -881,6 +955,7 @@ fn run_tests_gate_blocking(
         let _ = std::fs::remove_file(&patch_path);
         match red {
             Ok((false, _)) => {
+                conclusive += 1;
                 let how = if narrow {
                     format!("stage-{stage} diff reversed")
                 } else {
@@ -906,6 +981,12 @@ fn run_tests_gate_blocking(
                 ))
             }
         }
+    }
+    if conclusive == 0 {
+        return fail(
+            "sensitivity is inconclusive: no conclusive revert (the stage-7 and stage-8 reverted copies did not compile or did not answer SELECT 1)"
+                .to_string(),
+        );
     }
     crate::verifier::StageResult {
         stage: 15,
@@ -2101,7 +2182,13 @@ impl BenchmarkPipeline {
                                 );
                                 // Always back onto the real store, then
                                 // drop the scratch copy.
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "perf",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2117,7 +2204,7 @@ impl BenchmarkPipeline {
                                         "  [PERF] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((11, format!("[perf] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2176,7 +2263,13 @@ impl BenchmarkPipeline {
                                 // Always back onto the real store (and its
                                 // normal memory limit), then drop the heavy
                                 // scratch copy.
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "memory",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2192,7 +2285,9 @@ impl BenchmarkPipeline {
                                         "  [MEMORY] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((16, format!("[memory] restart: {e}")));
+                                        // R92 F5: the store's restart (ticket
+                                        // 4) failed, not the memory scenario.
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2255,7 +2350,13 @@ impl BenchmarkPipeline {
                                     )
                                 })(
                                 );
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "disk",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 match body {
                                     Ok(report) => logger.log(&format!("  [DISK] {report}")),
                                     Err(e) => {
@@ -2268,7 +2369,7 @@ impl BenchmarkPipeline {
                                         "  [DISK] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((17, format!("[disk] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2357,7 +2458,13 @@ impl BenchmarkPipeline {
                                     Ok(report)
                                 })(
                                 );
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "security",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2373,8 +2480,7 @@ impl BenchmarkPipeline {
                                         "  [SECURITY] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure =
-                                            Some((18, format!("[security] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
@@ -2727,7 +2833,13 @@ impl BenchmarkPipeline {
                                     Ok(report)
                                 })(
                                 );
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "pg",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2743,7 +2855,7 @@ impl BenchmarkPipeline {
                                         "  [PG] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((20, format!("[pg] restart: {e}")));
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }
