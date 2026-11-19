@@ -200,6 +200,9 @@ while [[ $# -gt 0 ]]; do
         --record)
             [[ $# -ge 2 ]] || { echo "[model-check] --record needs a model" >&2; exit 2; }
             mode=record; model="$2"; shift 2 ;;
+        --row-check)
+            [[ $# -ge 2 ]] || { echo "[model-check] --row-check needs a model" >&2; exit 2; }
+            mode=row-check; model="$2"; shift 2 ;;
         -h|--help) usage ;;
         -*) echo "[model-check] unknown argument: $1" >&2; exit 2 ;;
         *)
@@ -216,6 +219,28 @@ case "$mode" in
     slug) model_slug "$model"; echo; exit 0 ;;
     record) record_path "$model"; echo; exit 0 ;;
 esac
+# R94 M2: the model check is tied to the exact price row it ran under; a
+# changed row means the check must be rerun before the model's next cell.
+if [[ "$mode" == "row-check" ]]; then
+    [[ -n "$model" ]] || usage
+    record="$(record_path "$model")"
+    if [[ ! -f "$record" ]]; then
+        echo "[model-check] no model-check record for $model ($record); run scripts/model-check.sh $model" >&2
+        exit 1
+    fi
+    recorded="$(awk '$1 == "row_sha:" { print $2; exit }' "$record")"
+    current="$("$ROOT/scripts/model-row.sh" --sha "$model" 2>/dev/null || true)"
+    if [[ -z "$recorded" ]]; then
+        echo "[model-check] the record for $model has no row_sha (a pre-R94 check); rerun scripts/model-check.sh $model" >&2
+        exit 1
+    fi
+    if [[ -z "$current" || "$recorded" != "$current" ]]; then
+        echo "[model-check] the record for $model checked price row ${recorded:-?}, not ${current:-?}; rerun scripts/model-check.sh $model after the price change" >&2
+        exit 1
+    fi
+    echo "[model-check] the record's price row matches $model"
+    exit 0
+fi
 
 if [[ "$mode" == "self-test" ]]; then
     self_test() {
@@ -887,8 +912,10 @@ if [[ "$peak" != "off-peak" ]]; then
     exit 1
 fi
 wire="openrouter/$id"
+# R94 M2: the canonical registry row hash this check covers.
+row_sha="$("$ROOT/scripts/model-row.sh" --sha "$id" 2>/dev/null || true)"
 
-# The snapshot row, if any: pin, prompt and completion rates. A model with
+# The registry row, if any: pin, prompt and completion rates. A model with
 # no row is allowed (the provider and bill checks are skipped).
 snapshot="$(
     python3 - "$ROOT/models/registry.json" "$id" <<'PY'
@@ -944,6 +971,7 @@ if [[ -z "$image" ]]; then
         echo "bill:     (not run)"
         echo "time:     $time_utc"
         echo "image:    (missing)"
+        echo "row_sha:  $row_sha"
         echo "RESULT: FAIL (no subdollar-sandbox image)"
     } > "$record"
     echo "[model-check] FATAL: no subdollar-sandbox image ($record)" >&2
@@ -997,6 +1025,7 @@ if [[ -z "$canonical" ]]; then
         echo "canonical: (missing)"
         echo "time:     $time_utc"
         echo "image:    $image"
+        echo "row_sha:  $row_sha"
         echo "RESULT: FAIL (no canonical_slug for $id in /api/v1/models)"
     } > "$record"
     echo "[model-check] FATAL: no canonical_slug for $id ($record)" >&2
@@ -1566,6 +1595,7 @@ for c in json.loads(sys.argv[1])["calls"]:
         echo "$neg_line"
         echo "time:     $time_utc"
         echo "image:    $image"
+        echo "row_sha:  $row_sha"
         if [[ "$ok" == "1" ]]; then
             echo "RESULT: PASS"
         else
@@ -1595,6 +1625,7 @@ if ! run_omp reply "Reply with exactly: ok" "read" "$session_file"; then
         echo "bill:     (not queried)"
         echo "time:     $time_utc"
         echo "image:    $image"
+        echo "row_sha:  $row_sha"
         echo "RESULT: FAIL ($RUN_ERROR)"
     } > "$record"
     echo "[model-check] FATAL: $RUN_ERROR ($record); output tail:" >&2
@@ -1640,6 +1671,7 @@ if [[ -z "$response_id" ]]; then
         echo "bill:     (not queried)"
         echo "time:     $time_utc"
         echo "image:    $image"
+        echo "row_sha:  $row_sha"
         echo "RESULT: FAIL (omp session has no responseId)"
     } > "$record"
     echo "[model-check] FATAL: no responseId in $session_file ($record)" >&2
@@ -1764,6 +1796,7 @@ then
         echo "tool-calls: $tool_outputs/2 output, $tool_errors/2 errors"
         echo "time:     $time_utc"
         echo "image:    $image"
+        echo "row_sha:  $row_sha"
         echo "RESULT: FAIL (${GEN_ERROR:-generation API}; ${gen_note:-no record})"
     } > "$record"
     echo "[model-check] FATAL: ${GEN_ERROR:-generation API}; ${gen_note:-no record} ($record)" >&2

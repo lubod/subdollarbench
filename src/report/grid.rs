@@ -59,6 +59,8 @@ pub struct CareerCell {
     pub sqlite_version: Option<String>,
     pub cap_price_basis: Option<String>,
     pub sandbox_image: Option<String>,
+    /// R94 M2: the canonical price-row hashes this career's cells recorded.
+    pub price_row_sha: Option<String>,
     /// Full rules fingerprints recorded by this career's ticket manifests.
     pub fingerprints: Vec<String>,
     /// R47 F2: the career's latest measured perf block, or the phase's own
@@ -647,6 +649,10 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         sandbox_image: parsed
             .and_then(|r| r.sandbox_image.clone())
             .or_else(|| leaf.rollup["sandbox_image"].as_str().map(str::to_string)),
+        price_row_sha: leaf.rollup["price_row_sha"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| parsed.and_then(|r| r.price_row_sha.clone())),
         fingerprints,
         perf,
         cost,
@@ -2815,8 +2821,21 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     // R69 F1: the price list and the cap basis moved here from the board.
+    // R94 M2: the price row the cells ran under, by its hash prefix.
+    let mut row_hashes: Vec<String> = current
+        .iter()
+        .filter_map(|c| c.price_row_sha.as_deref())
+        .map(|s| s.chars().take(12).collect())
+        .collect();
+    row_hashes.sort();
+    row_hashes.dedup();
+    let row_note = if row_hashes.is_empty() {
+        String::new()
+    } else {
+        format!("; price row {}", row_hashes.join(", "))
+    };
     let prices = format!(
-        "base rates per call from models/registry.json ({}); overrides: {}",
+        "base rates per call from models/registry.json ({}); overrides: {}{row_note}",
         esc(&crate::cost::calculator::price_snapshot_as_of()),
         if overrides.is_empty() {
             "—"

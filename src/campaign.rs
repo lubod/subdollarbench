@@ -2171,10 +2171,14 @@ fn live_rollup_stub_at_with(
 ) -> CampaignRollup {
     let live = &v["live"];
     let s = |k: &str, fb: &str| live[k].as_str().unwrap_or(fb).to_string();
+    let model = s("model", "?");
+    let price_row_model = crate::cost::calculator::row_for_model(&model);
+    let price_row_sha = price_row_model.as_ref().map(|r| r.sha());
+    let price_row = price_row_model.and_then(|r| serde_json::to_value(r).ok());
     CampaignRollup {
         campaign_id: campaign_id.to_string(),
         name: s("campaign", "sdb-sql"),
-        model: s("model", "?"),
+        model: model.clone(),
         harness: s("harness", "omp"),
         // R51 F6 (R43-1): an unknown effort stays empty, never "high".
         effort: s("effort", ""),
@@ -2194,6 +2198,8 @@ fn live_rollup_stub_at_with(
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
         sandbox_image: live_cell_image(campaign_id, v, runs_dir, fallback),
+        price_row,
+        price_row_sha,
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         worker: 0,
@@ -2729,6 +2735,12 @@ pub struct CampaignRollup {
     /// onto the same image ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_image: Option<String>,
+    /// R94 M2: the model's registry row used for this cell and the row's
+    /// canonical hash. A chain refuses a changed row; the board shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_row: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_row_sha: Option<String>,
     /// Campaign-wide budget cap in USD (0 = uncapped), for the Run view's
     /// spend bar.
     #[serde(default)]
@@ -3233,6 +3245,9 @@ where
     let mut dirty = chain.map(|c| c.dirty).unwrap_or(false);
     let chain_last_green = chain.and_then(|c| c.last_green.clone());
     let chain_hints = chain.and_then(|c| c.hints.clone());
+    let price_row_model = crate::cost::calculator::row_for_model(&opts.model);
+    let price_row_sha = price_row_model.as_ref().map(|r| r.sha());
+    let price_row = price_row_model.and_then(|r| serde_json::to_value(r).ok());
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
         name: lc.spec.name.clone(),
@@ -3255,6 +3270,8 @@ where
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
         sandbox_image: chain_image.map(str::to_string),
+        price_row,
+        price_row_sha,
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         worker: 0,
