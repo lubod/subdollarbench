@@ -5138,6 +5138,11 @@ fn r90_m5_paid_grid_needs_a_cap() {
     r90_grid_case("r90_m5_paid_grid_needs_a_cap");
 }
 
+#[test]
+fn r93_g0_peak_matches_grid_model_names() {
+    r90_grid_case("r93_g0_peak_matches_grid_model_names");
+}
+
 /// R90 M3: the chain exemption needs the fault's reason: a provider-fault
 /// hide and a live stop free the chain; an operator/comparison "hidden"
 /// note does not (a genuine result still uses its chain).

@@ -1284,6 +1284,44 @@ r90_m2_no_phase_starts_at_peak() {
     r90_case_done r90_m2_no_phase_starts_at_peak
 }
 
+# R93 G0: the grid's model string carries the provider prefix; the peak
+# window must match it, and the grid must actually wait at peak.
+r93_g0_peak_matches_grid_model_names() {
+    r90_case_setup r93_g0_peak_matches_grid_model_names
+    printf 'openrouter/deepseek/deepseek-v4.1-flash-1017\n' > "$CAREERS_FILE"
+    LANES=1
+    CAP=0
+    PHASE_BUDGET=0.99
+    MAX_PHASE=1
+    load_careers "$CAREERS_FILE"
+    got="$(SDB_MODEL_CHECK_NOW="2026-11-16T01:30:00Z" peak_state "openrouter/deepseek/deepseek-v4.1-flash-1017")"
+    [[ "$got" == peak* ]] || {
+        echo "peak: openrouter/deepseek at 01:30 is '$got'"; return 1; }
+    export SDB_MODEL_CHECK_NOW="2026-11-16T01:30:00Z" SDB_GRID_PEAK_POLL=0.1
+    ( run_grid >"$R90_DIR/out" 2>&1 ) &
+    pid=$!
+    for _ in $(seq 1 50); do
+        grep -q 'waits: peak' "$R90_DIR/out" 2>/dev/null && break
+        sleep 0.1
+    done
+    if ! grep -q 'waits: peak' "$R90_DIR/out"; then
+        r90_stop_grid "$pid"
+        echo "peak: the grid did not wait for openrouter/deepseek"
+        return 1
+    fi
+    if [[ -f "$SDB_GRID_TRACE" ]]; then
+        r90_stop_grid "$pid"
+        echo "peak: a phase started at peak"
+        return 1
+    fi
+    r90_stop_grid "$pid"
+    rows=$(($(wc -l < "$LEDGER") - 1))
+    [[ "$rows" -eq 0 ]] || {
+        echo "peak: a phase ran after the STOP during the wait ($rows rows)"; return 1; }
+    unset SDB_MODEL_CHECK_NOW SDB_GRID_PEAK_POLL
+    r90_case_done r93_g0_peak_matches_grid_model_names
+}
+
 # R90 M3: a canary phase that faults on its first attempt is held and
 # rerun; the clean rerun reopens the lanes the stopped canary closed.
 r90_m3_recovered_canary_opens_lanes() {
@@ -1513,7 +1551,7 @@ EOF
     export SDB_GRID_BALANCE_CMD
     if [[ -n "${SELF_TEST_CASE:-}" ]]; then
         case "$SELF_TEST_CASE" in
-            r90_m1_*|r90_m2_*|r90_m3_*|r90_m5_*) "$SELF_TEST_CASE" ;;
+            r90_m1_*|r90_m2_*|r90_m3_*|r90_m5_*|r93_*) "$SELF_TEST_CASE" ;;
             *) echo "unknown self-test case: $SELF_TEST_CASE" >&2; return 2 ;;
         esac
         return 0
