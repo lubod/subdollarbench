@@ -967,6 +967,11 @@ pub struct BenchmarkConfig {
     /// requires >= PERF_GATE_RATIO x this value. None outside campaigns or
     /// when the genesis measurement is missing.
     pub baseline_rps: Option<f64>,
+    /// R91 B4: the workspace is the harness's own reference adapter with a
+    /// deliberate defect (a negative proof). The embedded-SQL scan targets
+    /// candidate code, so it is skipped for such a fixture; every other
+    /// compliance check still runs. Only tests set it.
+    pub reference_fixture: bool,
 }
 
 /// R56 F3: the first other live lane in the cells' runs dir, if any.
@@ -1239,6 +1244,8 @@ impl BenchmarkPipeline {
         // eval-only run is a harness proof (the SQL live proofs present
         // the Python reference as the candidate), so it is not.
         lang_check: bool,
+        // R91 B4: a negative proof's reference fixture (mutated reference).
+        reference_fixture: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = VerificationOutcome> + Send + 'a>> {
         Box::pin(async move {
             logger
@@ -1248,7 +1255,7 @@ impl BenchmarkPipeline {
             // sdb-sql adds its own scan: no embedded engine or SQL parser.
             // Task-scoped so the other tasks' grading is unchanged.
             let compliance = ComplianceChecker::check_no_frameworks(workdir).and_then(|()| {
-                if matches!(task, TaskType::Sql) {
+                if matches!(task, TaskType::Sql) && !reference_fixture {
                     ComplianceChecker::check_no_embedded_sql(workdir)
                 } else {
                     Ok(())
@@ -3368,6 +3375,7 @@ impl BenchmarkPipeline {
                     .map(|c| c.passed_lite.as_slice())
                     .unwrap_or(&[]),
                 lang_check_enabled(&config),
+                config.reference_fixture,
             )
             .await
         };
@@ -3661,6 +3669,7 @@ impl BenchmarkPipeline {
                             .map(|c| c.passed_lite.as_slice())
                             .unwrap_or(&[]),
                         lang_check_enabled(&config),
+                        config.reference_fixture,
                     )
                     .await;
 

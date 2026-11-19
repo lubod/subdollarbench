@@ -1,0 +1,13 @@
+[package]
+name = "sdb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+# Unwind rather than abort: a hostile statement that trips a bug is contained
+# by `catch_unwind` at the statement boundary instead of killing the server.
+panic = "unwind"

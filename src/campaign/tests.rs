@@ -5184,3 +5184,44 @@ fn r90_m3_hidden_fault_markers_do_not_use_the_chain() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// R91 B2: the bar's targets follow the change since the last passing bar
+/// (the same proof-map selection `--ready` makes), all 20 after a global
+/// change or with no previous bar, and a resumed bar reads its pinned
+/// targets. The shell self-test drives the real target rules through its
+/// seams; the bar pins them as TARGET lines.
+#[test]
+fn r91_b2_targets_follow_the_change() {
+    let root = crate::config::get_repo_root();
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/bar-targets.sh"))
+        .arg("--self-test")
+        .output()
+        .expect("run scripts/bar-targets.sh --self-test");
+    assert!(
+        out.status.success(),
+        "bar targets self-test failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// R91 B3: the bar's plan runs only correctness-only proofs in parallel,
+/// at most 3 at once, on distinct workers and ports; a proof not in the
+/// table (and every timing proof) runs alone. The shell self-test also
+/// checks the table against each proof's own worker.
+#[test]
+fn r91_b3_parallel_only_untimed() {
+    let root = crate::config::get_repo_root();
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/bar-scheduler.sh"))
+        .arg("--self-test")
+        .output()
+        .expect("run scripts/bar-scheduler.sh --self-test");
+    assert!(
+        out.status.success(),
+        "bar scheduler self-test failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

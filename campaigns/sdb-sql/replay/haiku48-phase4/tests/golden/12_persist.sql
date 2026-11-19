@@ -1,0 +1,26 @@
+CREATE TABLE p_t (id INTEGER PRIMARY KEY, s TEXT UNIQUE)
+INSERT INTO p_t VALUES (NULL, 'a'), (NULL, 'b')
+UPDATE p_t SET s = 'bb' WHERE id = 2
+.restart
+SELECT * FROM p_t ORDER BY id
+INSERT INTO p_t VALUES (NULL, 'c')
+.restart
+SELECT * FROM p_t ORDER BY id
+INSERT INTO p_t VALUES (NULL, 'bb')
+BEGIN
+INSERT INTO p_t VALUES (NULL, 'tmp')
+ROLLBACK
+.restart
+SELECT id AS id, s AS s FROM p_t ORDER BY id
+CREATE TABLE p_u (a INTEGER)
+INSERT INTO p_u VALUES (1)
+ALTER TABLE p_u ADD COLUMN b TEXT DEFAULT 'd'
+.restart
+SELECT * FROM p_u
+DELETE FROM p_t WHERE id = 1
+.restart
+.restart
+SELECT id AS id FROM p_t ORDER BY id
+CREATE INDEX p_ix ON p_u (b)
+.restart
+SELECT b AS b, a AS a FROM p_u ORDER BY a

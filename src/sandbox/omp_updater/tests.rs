@@ -120,6 +120,7 @@ async fn upd_driver() {
         feedback_rounds: 0,
         campaign_stage: None,
         baseline_rps: None,
+        reference_fixture: false,
     };
     let out =
         crate::pipeline::BenchmarkPipeline::execute(cfg, std::sync::Arc::new(PipeLogger), None)

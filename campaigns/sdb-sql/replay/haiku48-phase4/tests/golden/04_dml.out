@@ -1,0 +1,62 @@
+OK 0
+OK 3
+OK 1
+ROWS 2
+a	b
+2	1
+3	4
+5	6
+END 3
+OK 0
+OK 1
+OK 3
+ROWS 3
+a	b	s
+2	1	same
+3	4	same
+15	6	same
+END 3
+OK 1
+ROWS 2
+a	b
+2	1
+3	\N
+15	6
+END 3
+OK 3
+OK 0
+OK 0
+ROWS 3
+a	b	s
+2	1	\N
+3	\N	\N
+15	6	\N
+END 3
+OK 0
+OK 3
+ROWS 3
+a	b	s
+END 0
+ERR no_column
+ERR no_table
+ERR no_table
+OK 2
+ERR type
+ERR type
+ROWS 2
+a	b
+1	1
+2	2
+END 2
+OK 1
+OK 2
+ROWS 3
+a	b	s
+1	1	rx
+1	\N	rx
+END 2
+OK 0
+ROWS 1
+c
+2
+END 1

@@ -15,6 +15,8 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 # same list scripts/gate.sh reads.
 . "$BAR_ROOT/scripts/graded-filter.sh"
 . "$BAR_ROOT/scripts/bar-proofs.sh"
+. "$BAR_ROOT/scripts/bar-targets.sh"
+. "$BAR_ROOT/scripts/bar-scheduler.sh"
 mapfile -t graded_paths < <(graded_path_entries)
 mapfile -t grader_paths < <(grader_path_entries)
 # R68 F1: the full key covers every graded path (the fingerprint and the
@@ -92,7 +94,9 @@ tests_from_source() {
 # R61 F7: the ready gate's self-test compares its map against this list.
 # `--list` is read-only, like --key, so it stays allowed beside a cell.
 if [[ "$list_only" -eq 1 ]]; then
-    tests_from_source
+    # R91 B2: a dry run of the next bar's targets, with each reason.
+    mapfile -t list_tests < <(tests_from_source)
+    bar_targets_for "$(git rev-parse --show-toplevel)" "${list_tests[@]}"
     exit 0
 fi
 
@@ -136,7 +140,8 @@ summary() {
     fi
     for t in "${tests[@]}"; do
         local runs passes fails cured rf target
-        target="$(bar_target "$t")"
+        # R91 B2: the target pinned in this record (fallback: fixed, 20).
+        target="$(bar_target_for "$record" "$t")"
         runs=$(runs_for "$t" "$record")
         passes=$(passes_for "$t" "$record")
         fails=$(fails_for "$t" "$record")
@@ -205,54 +210,112 @@ harness_reason() {
     return 1
 }
 
+# R91 B3: record one finished run, and on a failure its immediate rerun.
+# Returns 1 only when the rerun is a harness failure (the bar must stop);
+# a real rerun FAIL sets the bar's failed state and the chunk goes on.
+record_result() {
+    local record="$1" t="$2" rc="$3" run_log="$4" elapsed="$5"
+    local reason
+    if [[ "$rc" -eq 0 ]]; then
+        echo "TEST $t PASS $elapsed $(date -u +%FT%TZ)" >> "$record"
+        return 0
+    fi
+    local utc base full_log r0 rrc
+    utc="$(date -u +%Y%m%dT%H%M%SZ)"
+    base="${record%.txt}"
+    full_log="${base}-${t}-${utc}.log"
+    cp "$run_log" "$full_log"
+    echo "TEST $t FAIL $elapsed $(date -u +%FT%TZ) log=$full_log" >> "$record"
+    echo "OUTPUT-BEGIN" >> "$record"
+    tail -n 40 "$run_log" | sed 's/^/  /' >> "$record"
+    echo "OUTPUT-END" >> "$record"
+    r0=$SECONDS
+    rrc=0
+    run_one "$t" > "$run_log" 2>&1 || rrc=$?
+    if reason="$(harness_reason "$rrc" "$run_log")"; then
+        echo "HARNESS $t rerun: $reason" >> "$record"
+        failed=1
+        return 1
+    fi
+    if [[ "$rrc" -eq 0 ]]; then
+        echo "TEST $t RERUN PASS $((SECONDS - r0)) $(date -u +%FT%TZ)" >> "$record"
+    else
+        cp "$run_log" "${base}-${t}-rerun-${utc}.log"
+        echo "TEST $t RERUN FAIL $((SECONDS - r0)) $(date -u +%FT%TZ) log=${base}-${t}-rerun-${utc}.log" >> "$record"
+        failed=1
+    fi
+    return 0
+}
+
 # R28 F3: one failure is recorded and the chunk continues; the caller's
-# summary always covers the full test list.
+# summary always covers the full test list. R91 B3: the plan (bar_plan)
+# runs up to three correctness-only proofs at once on distinct workers;
+# every timing proof runs alone, with nothing beside it.
 run_chunk() {
     local record="$1" passes="$2"
     shift 2
     local tests=("$@")
-    for _ in $(seq 1 "$passes"); do
+    local pass t line rc reason t0 elapsed idx mlog
+    local -a remaining plan members pids mlogs mtests
+    for ((pass = 1; pass <= passes; pass++)); do
+        remaining=()
         for t in "${tests[@]}"; do
-            if [[ "$(runs_for "$t" "$record")" -ge "$(bar_target "$t")" ]]; then
-                continue
+            if [[ "$(runs_for "$t" "$record")" -lt "$(bar_target_for "$record" "$t")" ]]; then
+                remaining+=("$t")
             fi
-            local t0=$SECONDS
-            local rc=0
-            run_one "$t" > "$log" 2>&1 || rc=$?
-            local reason
-            if reason="$(harness_reason "$rc" "$log")"; then
-                echo "HARNESS $t $reason" >> "$record"
-                failed=1
-                return 1
-            fi
-            if [[ "$rc" -eq 0 ]]; then
-                echo "TEST $t PASS $((SECONDS - t0)) $(date -u +%FT%TZ)" >> "$record"
-            else
-                local utc base full_log
-                utc="$(date -u +%Y%m%dT%H%M%SZ)"
-                base="${record%.txt}"
-                full_log="${base}-${t}-${utc}.log"
-                cp "$log" "$full_log"
-                echo "TEST $t FAIL $((SECONDS - t0)) $(date -u +%FT%TZ) log=$full_log" >> "$record"
-                echo "OUTPUT-BEGIN" >> "$record"
-                tail -n 40 "$log" | sed 's/^/  /' >> "$record"
-                echo "OUTPUT-END" >> "$record"
-                local r0=$SECONDS
-                local rrc=0
-                run_one "$t" > "$log" 2>&1 || rrc=$?
-                if reason="$(harness_reason "$rrc" "$log")"; then
-                    echo "HARNESS $t rerun: $reason" >> "$record"
+        done
+        [[ ${#remaining[@]} -gt 0 ]] || break
+        mapfile -t plan < <(bar_plan "${remaining[@]}")
+        for line in "${plan[@]}"; do
+            case "$line" in
+                BATCH\ *)
+                    members=(${line#BATCH })
+                    pids=()
+                    mlogs=()
+                    mtests=()
+                    t0=$SECONDS
+                    for t in "${members[@]}"; do
+                        mlog="$record.run.$$.$t.log"
+                        ( run_one "$t" > "$mlog" 2>&1; echo $? > "$mlog.rc" ) &
+                        pids+=($!)
+                        mtests+=("$t")
+                        mlogs+=("$mlog")
+                    done
+                    local any_harness=0
+                    for idx in "${!pids[@]}"; do
+                        wait "${pids[$idx]}" || true
+                        t="${mtests[$idx]}"
+                        rc="$(cat "${mlogs[$idx]}.rc" 2>/dev/null || echo 1)"
+                        elapsed=$((SECONDS - t0))
+                        if reason="$(harness_reason "$rc" "${mlogs[$idx]}")"; then
+                            echo "HARNESS $t $reason" >> "$record"
+                            failed=1
+                            any_harness=1
+                        elif ! record_result "$record" "$t" "$rc" "${mlogs[$idx]}" "$elapsed"; then
+                            any_harness=1
+                        fi
+                        rm -f "${mlogs[$idx]}" "${mlogs[$idx]}.rc"
+                    done
+                    [[ "$any_harness" -eq 1 ]] && return 1
+                    ;;
+                ALONE\ *)
+                    t="${line#ALONE }"
+                    t0=$SECONDS
+                    rc=0
+                    run_one "$t" > "$log" 2>&1 || rc=$?
+                    if reason="$(harness_reason "$rc" "$log")"; then
+                        echo "HARNESS $t $reason" >> "$record"
+                        failed=1
+                        return 1
+                    fi
+                    record_result "$record" "$t" "$rc" "$log" "$((SECONDS - t0))" || return 1
+                    ;;
+                *)
+                    echo "HARNESS plan bad line: $line" >> "$record"
                     failed=1
                     return 1
-                fi
-                if [[ "$rrc" -eq 0 ]]; then
-                    echo "TEST $t RERUN PASS $((SECONDS - r0)) $(date -u +%FT%TZ)" >> "$record"
-                else
-                    cp "$log" "${base}-${t}-rerun-${utc}.log"
-                    echo "TEST $t RERUN FAIL $((SECONDS - r0)) $(date -u +%FT%TZ) log=${base}-${t}-rerun-${utc}.log" >> "$record"
-                    failed=1
-                fi
-            fi
+                    ;;
+            esac
         done
     done
 }
@@ -277,8 +340,10 @@ if [[ "$self_test" -eq 1 ]]; then
         printf '%s\n' "${bar_tests[@]}" | grep -qx "$t" \
             || { echo "[flake] bar list missing $t"; exit 1; }
     done
-    [[ ${#bar_tests[@]} -eq 28 ]] \
-        || { echo "[flake] bar list has ${#bar_tests[@]} tests, expected 28"; exit 1; }
+    # 30 before round 91 (round 89 added the two reference proofs); R91 B4
+    # adds the four negative proofs and the replay.
+    [[ ${#bar_tests[@]} -eq 35 ]] \
+        || { echo "[flake] bar list has ${#bar_tests[@]} tests, expected 35"; exit 1; }
 
     dir="$(mktemp -d)"
     trap 'rm -rf "$dir"' EXIT
@@ -682,6 +747,8 @@ if [[ ! -f "$record" ]]; then
 else
     echo "resumed: $(date -u +%FT%TZ) commit $commit (passes requested: $passes)" >> "$record"
 fi
+# R91 B2: pin the targets once, at start; a resume reads them back.
+bar_write_targets "$record" "$(git rev-parse --show-toplevel)" "${all_tests[@]}"
 log="$(mktemp)"
 load_key=""
 cleanup() {
