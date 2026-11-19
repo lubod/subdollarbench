@@ -91,4 +91,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [90](90.md) | Money and the grid: every dollar counted, every rerun possible | merged |
 | [91](91.md) | A faster bar that also catches wrong grades | merged |
 | [92](92.md) | Rules `.51`: the audit leftover grader fixes | merged |
-| [93](93.md) | Harness and grid guards from the audit | open |
+| [93](93.md) | Harness and grid guards from the audit | merged |
