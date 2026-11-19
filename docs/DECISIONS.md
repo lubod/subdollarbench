@@ -936,6 +936,22 @@ The benchmark answers "what does a dollar buy" (round 23):
 - **Impact:** the `.50` deepseek careers (median 74.8) stay valid under
   `.50`; `.51` careers restart at phase 1.
 
+## 39. Models are data (2026-11-19)
+
+- **Operator** (2026-11-19, on adding `tencent/hy4-flash`): "I need to be
+  able to add models in future, why is it graded?", then "94 models as
+  data".
+- **Why:** the price table was compiled into the binary and part of the
+  full key, so adding any model forced a rebuild and a rehearsal and
+  blocked running grids, although only the new model's row was new.
+- **Change** (round 94): a run-time model registry outside the global
+  key; each cell records its row and hash, a career refuses a changed
+  row, and the model check is tied to the row hash;
+  `scripts/add-model.sh` writes a row from OpenRouter's endpoints at the
+  base price. Adding a model needs the script, the model check and the
+  operator's word, not a round; changing an existing model's row is a
+  reviewed change.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
