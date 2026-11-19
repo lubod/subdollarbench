@@ -375,7 +375,7 @@ fn r89_f1_rewritten_log_keeps_older_records() {
         f.write_all(&[5u8; 40]).unwrap();
         f.flush().unwrap();
     }
-    let (victim, grew, cut) = tear_victim(&dir, &before).unwrap().expect("a victim");
+    let (victim, grew, cut) = tear_victim(&dir, &before, 0).unwrap().expect("a victim");
     assert_eq!(victim, path);
     assert_eq!(grew, 0, "the commit rewrote the log, it did not grow it");
     assert_eq!(cut, 200, "the old-style tail cut is min(256, len / 2)");
@@ -393,6 +393,49 @@ fn r89_f1_rewritten_log_keeps_older_records() {
     assert!(
         cut_line(&path, 40, 40).contains("grew 40 bytes, cut 40"),
         "a grown log's (c) line names its growth"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R92 F1: the (c) cut is bounded by the victim append's own record size.
+/// The step-start baseline (R89 F1, so an unflushed first append is seen
+/// by a retry) also covers an earlier victim's growth; without the bound
+/// the cut reaches those earlier, owed bytes.
+#[test]
+fn r92_f1_retry_cut_is_bounded_by_its_own_victim() {
+    let dir = std::env::temp_dir().join(format!("sdb-r92-f1-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.log");
+    std::fs::write(&path, []).unwrap();
+    let before_step = snapshot_files(&dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // The first attempt's write (an earlier, owed victim) lands late.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[1u8; 100])
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // The retry's victim: a 30-byte record.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&[2u8; 30])
+        .unwrap();
+    let (victim, grew, cut) = tear_victim(&dir, &before_step, 30)
+        .unwrap()
+        .expect("the store changed");
+    assert_eq!(victim, path);
+    assert_eq!(grew, 130, "the step-start baseline sees both writes");
+    assert_eq!(cut, 30, "the cut is the retry victim's own record size");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 100);
+    let data = std::fs::read(&path).unwrap();
+    assert!(
+        data.iter().all(|b| *b == 1),
+        "the earlier victim's owed bytes survive"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

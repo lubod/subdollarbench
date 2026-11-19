@@ -239,7 +239,8 @@ fn crash_ladder(
             // changed nothing (seen in the full gate under load).
             let before_c = crash::snapshot_files(&scratch).map_err(|e| format!("(c) {e}"))?;
             for attempt in 0..3 {
-                crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
+                // R92 F1: the victim record's own size bounds the cut.
+                let record = crash::append_row(&addr, t, &acked_table, acked + 1 + attempt)
                     .map_err(|e| format!("(c) {e}"))?;
                 victims += 1;
                 let _ = sandbox.kill_candidate();
@@ -248,8 +249,8 @@ fn crash_ladder(
                 // compact log keeps the record before the newest one); a
                 // file it rewrote in place (SQLite's reused WAL) takes
                 // the old-style tail cut.
-                if let Some(victim) =
-                    crash::tear_victim(&scratch, &before_c).map_err(|e| format!("(c) {e}"))?
+                if let Some(victim) = crash::tear_victim(&scratch, &before_c, record)
+                    .map_err(|e| format!("(c) {e}"))?
                 {
                     torn = Some(victim);
                     break;
