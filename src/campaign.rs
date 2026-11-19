@@ -3630,7 +3630,7 @@ where
                     runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
                 );
                 let lite_timeout = match ticket_left {
-                    Some(secs) => ((secs + 59) / 60).max(1),
+                    Some(secs) => secs.div_ceil(60).max(1),
                     None => crate::scoring::ticket_timeout_min(timeout_min, lite_budget, wall_left),
                 };
                 let attempt_lite = StageAttempt {
