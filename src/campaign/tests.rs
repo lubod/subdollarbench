@@ -5568,3 +5568,30 @@ fn r94_m2_row_change_refuses_the_chain() {
     let err = chain(&prev).unwrap_err();
     assert!(err.to_string().contains("did not record"), "{err}");
 }
+
+/// R94 M3: the add-model self-test (a recorded endpoints fixture, one
+/// provider with discount 0.5 -> base price + warning; several providers
+/// without --provider refuse, listing them; no tool support refuses).
+#[test]
+fn r94_m3_add_model_base_price() {
+    let root = crate::config::get_repo_root();
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/add-model.sh"))
+        .arg("--self-test")
+        .current_dir(&root)
+        .output()
+        .expect("scripts/add-model.sh --self-test");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "the add-model self-test failed: {text}"
+    );
+    assert!(
+        text.contains("RESULT: PASS (add-model self-test)"),
+        "{text}"
+    );
+}

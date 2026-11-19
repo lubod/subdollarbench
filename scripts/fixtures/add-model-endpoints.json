@@ -1,0 +1,42 @@
+{
+  "data": {
+    "id": "tencent/hy4-flash",
+    "name": "Tencent: Hy4 flash",
+    "endpoints": [
+      {
+        "name": "Tencent | tencent/hy4-flash-20261116",
+        "model_id": "tencent/hy4-flash",
+        "pricing": {
+          "prompt": "0.000000035",
+          "completion": "0.0000001405",
+          "input_cache_read": "0.0000000015",
+          "discount": 0.5
+        },
+        "provider_name": "Tencent",
+        "tag": "tencent/fp8",
+        "service_tier": null,
+        "quantization": "fp8",
+        "max_completion_tokens": 65536,
+        "supported_parameters": [
+          "reasoning",
+          "include_reasoning",
+          "response_format",
+          "structured_outputs",
+          "tools",
+          "tool_choice",
+          "temperature",
+          "stop",
+          "max_completion_tokens",
+          "max_tokens"
+        ],
+        "supports_tool_choice": {
+          "none": true,
+          "auto": true,
+          "required": false,
+          "function": false
+        },
+        "status": 0
+      }
+    ]
+  }
+}
