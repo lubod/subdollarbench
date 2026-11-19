@@ -5376,11 +5376,15 @@ fn r92_f4_symlinked_workspace_is_not_copied_out() {
 #[test]
 fn r93_g2_no_lite_after_the_wall() {
     use std::time::Duration;
-    // A 3 min wall with 125 s worked has 55 s left: the minute floor.
+    // A 3 min wall: 125 s worked -> 55 s left (too late); 10 s -> 170 s.
     assert!(wall_too_late(Duration::from_secs(125), Some(3), 0.0));
     assert!(!wall_too_late(Duration::from_secs(10), Some(3), 0.0));
-    assert!(!lite_allowed(Some(1), true, Some(120)));
-    assert!(!lite_allowed(Some(2), true, None));
-    assert!(lite_allowed(Some(2), false, None));
-    assert!(lite_allowed(Some(2), true, Some(120)));
+    // The boundary is 60 s left, not the minute-floor 1 (< 120 s).
+    assert!(wall_too_late(Duration::from_secs(120), Some(3), 0.0));
+    assert!(!wall_too_late(Duration::from_secs(119), Some(3), 0.0));
+    assert!(!lite_allowed(true, true, Some(120)));
+    assert!(!lite_allowed(false, true, None));
+    assert!(lite_allowed(false, false, None));
+    assert!(!lite_allowed(true, false, None));
+    assert!(lite_allowed(false, true, Some(120)));
 }

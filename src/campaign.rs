@@ -2897,14 +2897,19 @@ pub fn wall_too_late(
     wall_min: Option<u64>,
     grading_wait_s: f64,
 ) -> bool {
-    wall_exceeded(elapsed, wall_min, grading_wait_s)
-        || remaining_wall_min(elapsed, wall_min, grading_wait_s) == Some(1)
+    let Some(m) = wall_min.filter(|m| *m > 0) else {
+        return false;
+    };
+    let wait = std::time::Duration::from_secs_f64(grading_wait_s.max(0.0));
+    let worked = elapsed.saturating_sub(wait);
+    let left_s = (m * 60).saturating_sub(worked.as_secs());
+    left_s <= crate::scoring::MIN_SESSION_SECS
 }
 
 /// R93 G2: a lite attempt also needs its ticket deadline to have time
-/// left (when the ticket has one).
-pub fn lite_allowed(wall_left: Option<u64>, has_deadline: bool, ticket_left: Option<u64>) -> bool {
-    wall_left != Some(1) && (!has_deadline || ticket_left.is_some())
+/// left (when the ticket has one) and the phase wall to allow it.
+pub fn lite_allowed(wall_late: bool, has_deadline: bool, ticket_left: Option<u64>) -> bool {
+    !wall_late && (!has_deadline || ticket_left.is_some())
 }
 
 /// Run the ladder. `exec` performs one ticket (agent + verification) and
@@ -3602,11 +3607,13 @@ where
                 .unwrap_or(f64::INFINITY);
             let wall_left =
                 remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
+            let wall_late =
+                wall_too_late(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
             let ticket_left = ticket_deadline.and_then(|d| {
                 crate::scoring::remaining_session_seconds(d, std::time::Instant::now())
             });
             if !cap_allows(opts.budget_usd, total_cost, largest_call_usd)
-                || !lite_allowed(wall_left, ticket_deadline.is_some(), ticket_left)
+                || !lite_allowed(wall_late, ticket_deadline.is_some(), ticket_left)
             {
                 // D3: the full attempt already spent; no lite when the
                 // remaining headroom is below the floor. R93 G2: nor when
