@@ -920,6 +920,22 @@ The benchmark answers "what does a dollar buy" (round 23):
   coverage, proxy, torn-tail and ticket-2 bugs (rounds 87-89) passed
   every bar.
 
+## 38. Rounds 92 and 93: the audit's leftovers, rules `.51` (2026-11-19)
+
+- **Operator** (2026-11-19): "open 92 93".
+- **Round 92** (rules `.51`): the stage-5 retry cut bounded by its own
+  victim (R89-2); ticket 15 needs one conclusive revert (R89-1);
+  coverage counts the server binaries tests spawn; scratch copies never
+  follow symlinks or FIFOs; a restart failure after a scenario is named
+  by the scenario and charged to the store's restart.
+- **Round 93** (no bump): the peak wait matches `openrouter/` model names
+  (G0; deepseek `.50` careers 1-2 phase 4 billed 2x, about $1.10); the
+  grid checks a finished phase before the next (the checker's race);
+  one deadline per ticket; spend survives a crash; zero budget refused;
+  per-ledger grid state.
+- **Impact:** the `.50` deepseek careers (median 74.8) stay valid under
+  `.50`; `.51` careers restart at phase 1.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.
