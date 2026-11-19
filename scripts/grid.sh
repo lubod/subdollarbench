@@ -203,9 +203,19 @@ ledger_mark_last_stop() {
     local career="$1" phase="$2" stop="$3"
     (
         flock 200
-        awk -F'\t' -v OFS='\t' -v c="$career" -v p="$phase" -v r="$stop" '
-            $1 == c && $3 == p { $8 = r }
-            { print }
+        awk -F'\t' -v c="$career" -v p="$phase" -v r="$stop" '
+            { line[NR] = $0 }
+            $1 == c && $3 == p { last = NR }
+            END {
+                for (i = 1; i <= NR; i++) {
+                    if (i != last) { print line[i]; continue }
+                    n = split(line[i], f, "\t")
+                    f[8] = r
+                    out = f[1]
+                    for (j = 2; j <= n; j++) out = out "\t" f[j]
+                    print out
+                }
+            }
         ' "$LEDGER" > "$LEDGER.tmp" && mv "$LEDGER.tmp" "$LEDGER"
     ) 200>>"$LEDGER.lock"
 }
