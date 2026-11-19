@@ -5225,3 +5225,32 @@ fn r91_b3_parallel_only_untimed() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// R92 F4: the scratch copy never follows a symlink out of the workspace
+/// (a link to a host file must not leak its content into the copy) and
+/// skips non-regular files (a FIFO must not block it).
+#[test]
+fn r92_f4_symlinked_workspace_is_not_copied_out() {
+    let src = tmp_dir("r92-f4-sym");
+    let dst = tmp_dir("r92-f4-sym-dst");
+    std::fs::write(src.join("server.py"), "x = 1\n").unwrap();
+    let secret = src.with_file_name("r92-f4-host-secret.txt");
+    std::fs::write(&secret, "HOST-SECRET\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&secret, src.join("leak")).unwrap();
+    let fifo = src.join("pipe");
+    let _ = std::process::Command::new("mkfifo").arg(&fifo).status();
+    copy_dir_with_git(&src, &dst).unwrap();
+    assert!(
+        dst.join("server.py").is_file(),
+        "the regular file is copied"
+    );
+    assert!(
+        !dst.join("leak").exists(),
+        "the symlink was followed into the scratch copy"
+    );
+    assert!(!dst.join("pipe").exists(), "the FIFO was copied");
+    let _ = std::fs::remove_file(&secret);
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&dst);
+}
