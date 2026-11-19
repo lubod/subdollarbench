@@ -510,6 +510,15 @@ pub(crate) fn coverage_error_is_infra(error: &str) -> bool {
     error.contains(COVERAGE_TIMEOUT_MARKER)
 }
 
+/// R92 F2: a reverted copy that does not answer SELECT 1 is an
+/// inconclusive revert, not a pass: the sensitivity check still has to
+/// find one conclusive revert elsewhere.
+pub(crate) fn revert_probe_inconclusive(output: &str) -> String {
+    format!(
+        "sensitivity is inconclusive: the reverted copy does not answer SELECT 1, so ./test.sh failing proves nothing: {output}"
+    )
+}
+
 /// R89 F4: a reverted copy that does not compile is inconclusive, not a
 /// ticket-15 failure: the sensitivity check has nothing to prove.
 pub(crate) fn revert_build_inconclusive(reason: &str) -> String {
@@ -734,6 +743,12 @@ fn run_tests_gate_blocking(
         Ok(l) => l,
         Err(e) => return fail(format!("git log failed: {e}")),
     };
+    // R92 F2: a stage-15 pass needs at least one conclusive revert (the
+    // suite goes red on a reverted copy). A revert that cannot build or
+    // cannot answer SELECT 1 proves nothing, so it is skipped; if every
+    // revert is inconclusive the ticket fails instead of passing with its
+    // sensitivity unproven.
+    let mut conclusive = 0u32;
     for stage in [7u32, 8u32] {
         let Some(commit) = parse_stage_commit(&log, stage) else {
             return fail(format!(
@@ -865,10 +880,11 @@ fn run_tests_gate_blocking(
                 Ok((false, out)) => {
                     let _ = std::fs::remove_dir_all(&scenario);
                     let _ = std::fs::remove_file(&patch_path);
-                    return fail(format!(
-                        "sensitivity is inconclusive: the reverted copy does not answer SELECT 1, so ./test.sh failing proves nothing: {}",
-                        output_tail(&out, 400)
+                    logger.log(&format!(
+                        "  [TESTS] {}",
+                        revert_probe_inconclusive(&output_tail(&out, 400))
                     ));
+                    continue;
                 }
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&scenario);
@@ -882,6 +898,7 @@ fn run_tests_gate_blocking(
         let _ = std::fs::remove_file(&patch_path);
         match red {
             Ok((false, _)) => {
+                conclusive += 1;
                 let how = if narrow {
                     format!("stage-{stage} diff reversed")
                 } else {
@@ -907,6 +924,12 @@ fn run_tests_gate_blocking(
                 ))
             }
         }
+    }
+    if conclusive == 0 {
+        return fail(
+            "sensitivity is inconclusive: no conclusive revert (the stage-7 and stage-8 reverted copies did not compile or did not answer SELECT 1)"
+                .to_string(),
+        );
     }
     crate::verifier::StageResult {
         stage: 15,
