@@ -2890,6 +2890,23 @@ pub fn wall_exceeded(
         .unwrap_or(false)
 }
 
+/// R93 G2: a new attempt starts only with more than a minute of the phase
+/// wall left; the old check waited for the wall to pass completely.
+pub fn wall_too_late(
+    elapsed: std::time::Duration,
+    wall_min: Option<u64>,
+    grading_wait_s: f64,
+) -> bool {
+    wall_exceeded(elapsed, wall_min, grading_wait_s)
+        || remaining_wall_min(elapsed, wall_min, grading_wait_s) == Some(1)
+}
+
+/// R93 G2: a lite attempt also needs its ticket deadline to have time
+/// left (when the ticket has one).
+pub fn lite_allowed(wall_left: Option<u64>, has_deadline: bool, ticket_left: Option<u64>) -> bool {
+    wall_left != Some(1) && (!has_deadline || ticket_left.is_some())
+}
+
 /// Run the ladder. `exec` performs one ticket (agent + verification) and
 /// returns its outcome; orchestration (stops, regressions, rollup) is pure
 /// and unit-tested with a mock executor. `on_stage` receives the
@@ -3431,7 +3448,7 @@ where
             v
         };
         let over_wall_now =
-            wall_exceeded(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
+            wall_too_late(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
         if over_budget_now || floor_now || over_wall_now {
             rollup.over_budget |= over_budget_now;
             rollup.cap_reached |= floor_now && !over_budget_now;
@@ -3492,6 +3509,10 @@ where
         let full_budget = pool_budget(headroom, stage.tier as f64, phase_weight);
         let remaining_wall =
             remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
+        let full_timeout =
+            crate::scoring::ticket_timeout_min(timeout_min, full_budget, remaining_wall);
+        let ticket_deadline =
+            crate::scoring::ticket_deadline(std::time::Instant::now(), full_timeout);
         let attempt_full = StageAttempt {
             stage,
             variant: StageVariant::Full,
@@ -3500,11 +3521,7 @@ where
             // API dollars OMP actually enforces.
             budget_usd: full_budget,
             max_turns: crate::scoring::ticket_turns(stage.max_turns, full_budget),
-            timeout_min: crate::scoring::ticket_timeout_min(
-                timeout_min,
-                full_budget,
-                remaining_wall,
-            ),
+            timeout_min: full_timeout,
             lite_profile: Vec::new(),
             passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
             passed: passed_all.iter().copied().collect(),
@@ -3583,10 +3600,17 @@ where
             // uses the raised value (round-17 P0).
             let headroom2 = cap_headroom(opts.budget_usd, total_cost, largest_call_usd)
                 .unwrap_or(f64::INFINITY);
-            if !cap_allows(opts.budget_usd, total_cost, largest_call_usd) {
+            let wall_left =
+                remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
+            let ticket_left = ticket_deadline.and_then(|d| {
+                crate::scoring::remaining_session_seconds(d, std::time::Instant::now())
+            });
+            if !cap_allows(opts.budget_usd, total_cost, largest_call_usd)
+                || !lite_allowed(wall_left, ticket_deadline.is_some(), ticket_left)
+            {
                 // D3: the full attempt already spent; no lite when the
-                // remaining headroom is below the floor. The stage stays
-                // failed and the next iteration stops on budget.
+                // remaining headroom is below the floor. R93 G2: nor when
+                // the phase wall or the ticket deadline is nearly gone.
                 outcomes.insert(stage.id, LadderOutcome::Failed);
                 dirty = true;
             } else {
@@ -3598,19 +3622,17 @@ where
                     stage_lite_weight(stage),
                     runnable_weight_sum(&stage_list, &outcomes) - stage.tier as f64,
                 );
-                let remaining_wall =
-                    remaining_wall_min(wall_start.elapsed(), opts.wall_min, rollup.grading_wait_s);
+                let lite_timeout = match ticket_left {
+                    Some(secs) => ((secs + 59) / 60).max(1),
+                    None => crate::scoring::ticket_timeout_min(timeout_min, lite_budget, wall_left),
+                };
                 let attempt_lite = StageAttempt {
                     stage,
                     variant: StageVariant::Lite,
                     prompt_path: lc.root.join(&lite.prompt),
                     budget_usd: lite_budget,
                     max_turns: crate::scoring::ticket_turns(lite.max_turns, lite_budget),
-                    timeout_min: crate::scoring::ticket_timeout_min(
-                        timeout_min,
-                        lite_budget,
-                        remaining_wall,
-                    ),
+                    timeout_min: lite_timeout,
                     lite_profile: lite.profile.clone(),
                     passed_lite: liters.iter().map(|(k, v)| (*k, v.clone())).collect(),
                     passed: passed_all.iter().copied().collect(),

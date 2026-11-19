@@ -3281,6 +3281,10 @@ impl BenchmarkPipeline {
         // agent never started, or the provider rejected the key/billing).
         // A campaign stops on it and the cell never publishes.
         let mut harness_fault: Option<String> = None;
+        // R93 G2: one absolute deadline for the ticket's first and repair
+        // sessions; the repair gets only the remainder.
+        let ticket_deadline =
+            crate::scoring::ticket_deadline(std::time::Instant::now(), config.timeout_min);
         // Campaign rounds (§5.1 of gui-spec.md): one record per
         // verification, the initial try and every repair round.
         let mut campaign_rounds: Vec<crate::report::archive::CampaignRound> = Vec::new();
@@ -3311,11 +3315,9 @@ impl BenchmarkPipeline {
                         None
                     },
                     max_effective_usd: None,
-                    timeout_seconds: if config.timeout_min > 0 {
-                        Some(config.timeout_min * 60)
-                    } else {
-                        None
-                    },
+                    timeout_seconds: ticket_deadline.and_then(|d| {
+                        crate::scoring::remaining_session_seconds(d, std::time::Instant::now())
+                    }),
                 };
 
                 // Round-13 R1: an agent that exits before its first turn
@@ -3591,6 +3593,15 @@ impl BenchmarkPipeline {
                         crate::scoring::TurnAllowance::Uncapped => None,
                         crate::scoring::TurnAllowance::Capped(n) => Some(n),
                     };
+                    let repair_timeout = ticket_deadline.and_then(|d| {
+                        crate::scoring::remaining_session_seconds(d, std::time::Instant::now())
+                    });
+                    if ticket_deadline.is_some() && repair_timeout.is_none() {
+                        logger.log(&format!(
+                            "[LIMIT] Repair round {round} not started: the ticket's wall passed"
+                        ));
+                        break;
+                    }
                     feedback_rounds_used = round;
                     round_started = std::time::Instant::now();
                     let round_tokens_before = (prompt_tokens, cached_tokens, completion_tokens);
@@ -3624,11 +3635,7 @@ impl BenchmarkPipeline {
                         max_turns: turns_remaining,
                         max_budget_usd: repair_budget,
                         max_effective_usd: None,
-                        timeout_seconds: if config.timeout_min > 0 {
-                            Some(config.timeout_min * 60)
-                        } else {
-                            None
-                        },
+                        timeout_seconds: repair_timeout,
                     };
 
                     let round_run_id = format!("{}_r{}", run_id, round);

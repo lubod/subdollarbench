@@ -5370,3 +5370,17 @@ fn r92_f4_symlinked_workspace_is_not_copied_out() {
     let _ = std::fs::remove_dir_all(&src);
     let _ = std::fs::remove_dir_all(&dst);
 }
+
+/// R93 G2: no lite attempt after the phase wall (or the ticket deadline)
+/// has only a minute left.
+#[test]
+fn r93_g2_no_lite_after_the_wall() {
+    use std::time::Duration;
+    // A 3 min wall with 125 s worked has 55 s left: the minute floor.
+    assert!(wall_too_late(Duration::from_secs(125), Some(3), 0.0));
+    assert!(!wall_too_late(Duration::from_secs(10), Some(3), 0.0));
+    assert!(!lite_allowed(Some(1), true, Some(120)));
+    assert!(!lite_allowed(Some(2), true, None));
+    assert!(lite_allowed(Some(2), false, None));
+    assert!(lite_allowed(Some(2), true, Some(120)));
+}
