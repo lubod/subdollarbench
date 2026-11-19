@@ -61,6 +61,51 @@ fn restart_candidate(
     )
 }
 
+/// R92 F5: a failed restart after a late scenario is the store's
+/// restart contract (ticket 4), not the scenario's own check. The error
+/// names the scenario and carries the container state and its last lines.
+fn restart_after_scenario(
+    scenario: &str,
+    instance_id: &str,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+) -> Result<(), String> {
+    restart_candidate(instance_id, workdir, port, extras, true).map_err(|e| {
+        format!(
+            "restart_after_{scenario}: {e}\n{}",
+            candidate_diagnostics(instance_id)
+        )
+    })
+}
+
+/// R92 F5: the container state and its last lines, for a restart that
+/// missed its 20 s deadline.
+fn candidate_diagnostics(instance_id: &str) -> String {
+    let sb = crate::sandbox::docker::SandboxManager::with_id(instance_id);
+    let name = sb.candidate_container_name();
+    let state = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Status}} {{.State.ExitCode}}",
+            &name,
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let logs = std::process::Command::new("docker")
+        .args(["logs", "--tail", "20", &name])
+        .output()
+        .map(|o| {
+            let mut t = String::from_utf8_lossy(&o.stdout).to_string();
+            t.push_str(&String::from_utf8_lossy(&o.stderr));
+            t
+        })
+        .unwrap_or_default();
+    format!("container {name}: state {state}; last lines:\n{logs}")
+}
+
 /// Stage 5's crash ladder against the candidate: acked rows survive a
 /// SIGKILL, a mid-flight bulk UPDATE is all-or-nothing, a torn newest data
 /// file recovers every committed statement, and a second restart changes
@@ -2212,7 +2257,13 @@ impl BenchmarkPipeline {
                                 // Always back onto the real store (and its
                                 // normal memory limit), then drop the heavy
                                 // scratch copy.
-                                let restored = run(&extras);
+                                let restored = restart_after_scenario(
+                                    "memory",
+                                    &sandbox.instance_id,
+                                    workdir,
+                                    port,
+                                    &extras,
+                                );
                                 if let Some(scratch) = &scratch {
                                     let _ = std::fs::remove_dir_all(scratch);
                                 }
@@ -2228,7 +2279,9 @@ impl BenchmarkPipeline {
                                         "  [MEMORY] FAILED: back on the real store: {e}"
                                     ));
                                     if late_failure.is_none() {
-                                        late_failure = Some((16, format!("[memory] restart: {e}")));
+                                        // R92 F5: the store's restart (ticket
+                                        // 4) failed, not the memory scenario.
+                                        late_failure = Some((4, e));
                                     }
                                 }
                             }

@@ -3735,6 +3735,79 @@ fn r63_f2_stage20_proofs_keep_the_full_ladder() {
     );
 }
 
+/// R92 F5: a restart that misses its deadline after the memory scenario
+/// is labeled `restart_after_memory` and charged to ticket 4 (the store's
+/// restart contract), not to the memory scenario's own check.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r92_f5_restart_failure_named_by_scenario() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    cleanup_covtest_network("r92f5");
+    let worker = 109u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir("r92f5");
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+    // The candidate starts twice (the run, then the memory scenario's
+    // scratch store) and refuses the third (the restore onto the real
+    // store): the restart misses its 20 s deadline.
+    let start = "#!/bin/bash\n\
+         n=0\n\
+         if [ -f /workspace/.r92-f5-starts ]; then n=$(cat /workspace/.r92-f5-starts); fi\n\
+         n=$((n + 1))\n\
+         echo \"$n\" > /workspace/.r92-f5-starts\n\
+         if [ \"$n\" -ge 4 ]; then echo 'restart refused' >&2; exit 1; fi\n\
+         if [ $# -eq 0 ]; then set -- --port 0 --data /tmp; fi\n\
+         exec python3 -u /workspace/sql_server.py \"$@\"\n";
+    std::fs::write(workdir.join("start.sh"), start).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workdir.join("start.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql 92 f5 restart fixture").unwrap();
+    let mut config = covtest_config(workdir.clone(), worker, "r92f5");
+    config.task = TaskType::Sql;
+    config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+        campaign: "covtest-sdb-sql".to_string(),
+        stage: 16,
+        prompt_path,
+        continuity: true,
+        accepted_stages: vec![0, 1, 2, 3, 4, 16],
+        lite_profile: Vec::new(),
+        passed_lite: Vec::new(),
+        passed_stages: Vec::new(),
+        spec_md: None,
+        preamble: None,
+        cap_headroom_usd: None,
+    });
+    let logger = Arc::new(RecordingLogger::default());
+    let _out = expect_proof(
+        BenchmarkPipeline::execute(config, logger.clone(), None),
+        &logger,
+        "the stage-16 restart fixture run must complete",
+    )
+    .await;
+    let log = logger.text();
+    assert!(
+        log.contains("restart_after_memory"),
+        "the restart failure is not named: {log}"
+    );
+    assert!(
+        log.lines().any(|l| l.contains("Stage 4: Persistence")
+            && l.contains("FAIL")
+            && l.contains("restart_after_memory")),
+        "the restart failure is not charged to ticket 4: {log}"
+    );
+    cleanup_covtest_network("r92f5");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// R92 F2: ticket 15 cannot pass when every reverted copy is
 /// inconclusive. The stage-7 and stage-8 commits add modules the later
 /// main.rs uses, so reverting either leaves a symbol main.rs needs and
