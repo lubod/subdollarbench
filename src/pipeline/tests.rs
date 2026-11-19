@@ -2600,7 +2600,7 @@ async fn r91_b4_replay_real_workspaces() {
                 )
                 .expect("build the replay fixture");
         }
-        let worker = 121 + i as u8;
+        let worker = 110u8;
         let prompt_path = dir.join("ticket_prompt.md");
         fs::write(&prompt_path, format!("sdb-sql replay {name}")).unwrap();
         let mut config = covtest_config(workdir.clone(), worker, &tag);
@@ -2682,7 +2682,7 @@ async fn r91_b4_replay_real_workspaces() {
 async fn r91_b4_neg_stage5_lost_older_record() {
     let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
     cleanup_covtest_network("r91neg5");
-    let worker = 80u8;
+    let worker = 82u8;
     let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
     let dir = covtest_dir("r91neg5");
     let workdir = dir.join("workspace");
@@ -2727,7 +2727,7 @@ async fn r91_b4_neg_stage5_lost_older_record() {
 async fn r91_b4_neg_stage11_full_scan() {
     let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
     cleanup_covtest_network("r91neg11");
-    let worker = 21u8;
+    let worker = 83u8;
     let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
     let dir = covtest_dir("r91neg11");
     let workdir = dir.join("workspace");
@@ -2767,7 +2767,7 @@ async fn r91_b4_neg_stage11_full_scan() {
 async fn r91_b4_neg_isolation() {
     let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
     cleanup_covtest_network("r91neg6");
-    let worker = 70u8;
+    let worker = 92u8;
     let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
     let dir = covtest_dir("r91neg6");
     let workdir = dir.join("workspace");
@@ -2808,7 +2808,7 @@ async fn r91_b4_neg_isolation() {
 async fn r91_b4_neg_stage15_insensitive_suite() {
     let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
     cleanup_covtest_network("r91neg15");
-    let worker = 45u8;
+    let worker = 95u8;
     let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
     let dir = covtest_dir("r91neg15");
     let workdir = dir.join("workspace");
@@ -3708,25 +3708,31 @@ fn r56_f3_spend_delta_only_alone() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// R63 F2: the two stage-20 proofs keep the whole ladder, so every stage's
-/// grader still runs once per proof run in the cumulative order.
+/// R63 F2 / R91 B1: the full stage-20 proof keeps the whole ladder, so
+/// every stage's grader still runs once per proof run in the cumulative
+/// order; the lite proof grades its own branch (0-4 and 20), like the
+/// other below-20 lite proofs (B1 stops it re-grading the ladder).
 #[test]
 fn r63_f2_stage20_proofs_keep_the_full_ladder() {
     let src = include_str!("tests.rs");
-    for name in [
-        "test_pipeline_eval_only_sql_stage20_pgwire_live",
-        "test_pipeline_eval_only_sql_stage20_pgwire_lite_live",
-    ] {
+    let body_of = |name: &str| {
         let start = src
             .find(&format!("fn {name}()"))
             .expect("the stage-20 proof is in this file");
         let body = &src[start..];
         let end = body.find("\n}\n").unwrap_or(body.len());
-        assert!(
-            body[..end].contains("accepted_stages: (0..=20).collect()"),
-            "{name} must keep the full ladder (0..=20)"
-        );
-    }
+        &body[..end]
+    };
+    assert!(
+        body_of("test_pipeline_eval_only_sql_stage20_pgwire_live")
+            .contains("accepted_stages: (0..=20).collect()"),
+        "the full stage-20 proof must keep the full ladder (0..=20)"
+    );
+    assert!(
+        body_of("test_pipeline_eval_only_sql_stage20_pgwire_lite_live")
+            .contains("accepted_stages: vec![0, 1, 2, 3, 4, 20]"),
+        "the lite stage-20 proof must grade its branch (0-4 and 20), not the ladder"
+    );
 }
 
 /// R81 F4: measured Rust coverage. A crate with one tested and one
