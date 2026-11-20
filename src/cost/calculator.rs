@@ -543,6 +543,11 @@ pub fn registry() -> Result<Arc<ModelRegistry>, String> {
     registry_at(&registry_path())
 }
 
+/// R94 test lock: the registry is a file; a test that adds a temporary row
+/// and tests that read the real registry must not interleave.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 fn log_registry_error(e: &str) {
     static ONCE: Mutex<Option<String>> = Mutex::new(None);
     let mut once = ONCE.lock().unwrap_or_else(|e| e.into_inner());

@@ -975,6 +975,25 @@ pub fn validate_chain(
             sandbox_image.unwrap_or("—")
         );
     }
+    // R94 M2: a model's price row decides its result, so a chain keeps the
+    // row it started under. A cell without a recorded row is a pre-R94
+    // career (start a new one); a model outside the registry is left to
+    // the paid-launch refusal (the fixtures' synthetic models).
+    if let Some(current) = crate::cost::calculator::row_for_model(model).map(|r| r.sha()) {
+        match prev.price_row_sha.as_deref() {
+            Some(prev_sha) if prev_sha == current => {}
+            Some(prev_sha) => bail!(
+                "chain cell {} used price row {}, not {}; an existing model's row change is a reviewed change and needs a fresh career",
+                prev.campaign_id,
+                prev_sha,
+                current
+            ),
+            None => bail!(
+                "chain cell {} did not record its price row (a pre-R94 cell); start a new career",
+                prev.campaign_id
+            ),
+        }
+    }
     // R93 G3: a chain must keep the same budget and wall, or the phase
     // would be measured under a different bound than the one it continues.
     if (prev.budget_usd - budget_usd).abs() > 1e-9 {

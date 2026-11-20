@@ -5504,6 +5504,9 @@ fn r94_m2_row_change_needs_a_new_check() {
 /// R94 M2: every cell records the model's registry row and its hash.
 #[tokio::test]
 async fn r94_m2_cell_records_its_row() {
+    let _lock = crate::cost::calculator::REGISTRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let lc = load_campaign("sdb-sql").expect("the campaign loads");
     let opts = CampaignRunOptions {
         campaign_id: "r94row".into(),
@@ -5541,6 +5544,9 @@ async fn r94_m2_cell_records_its_row() {
 /// row chains, and a pre-R94 cell without a row refuses.
 #[test]
 fn r94_m2_row_change_refuses_the_chain() {
+    let _lock = crate::cost::calculator::REGISTRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.model = "deepseek/deepseek-chat".into();

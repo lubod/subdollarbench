@@ -1009,6 +1009,7 @@ const R94_OVERRIDES: &[(&str, &str)] = &[
 
 #[test]
 fn r94_m1_registry_matches_the_snapshot() {
+    let _lock = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let root = crate::config::get_repo_root();
     let reg = ModelRegistry::load(&root.join("models/registry.json")).expect("the registry loads");
     let old: serde_json::Value =
@@ -1048,8 +1049,6 @@ fn r94_m1_registry_matches_the_snapshot() {
     assert_eq!(reg.as_of, "2026-11-09");
 }
 
-static R94_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn r94_keys(root: &std::path::Path) -> (String, String) {
     let run = |arg: &str| {
         let out = std::process::Command::new("bash")
@@ -1071,7 +1070,7 @@ fn r94_keys(root: &std::path::Path) -> (String, String) {
 /// R94 M1: a new registry row moves neither key nor the fingerprint.
 #[test]
 fn r94_m1_new_row_keeps_the_keys() {
-    let _lock = R94_KEY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let root = crate::config::get_repo_root();
     let path = root.join("models/registry.json");
     let orig = std::fs::read(&path).expect("the registry file");
