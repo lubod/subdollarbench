@@ -1074,13 +1074,39 @@ fn r94_m1_new_row_keeps_the_keys() {
     let root = crate::config::get_repo_root();
     let path = root.join("models/registry.json");
     let orig = std::fs::read(&path).expect("the registry file");
-    struct Restore(std::path::PathBuf, Vec<u8>);
-    impl Drop for Restore {
+    let head = {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse HEAD");
+        assert!(out.status.success(), "git rev-parse HEAD");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    // The key is commit-based, so the temporary row must be a commit; the
+    // Drop returns the branch to the captured head and the registry file.
+    struct TempCommit {
+        root: std::path::PathBuf,
+        head: String,
+    }
+    impl Drop for TempCommit {
         fn drop(&mut self) {
-            let _ = std::fs::write(&self.0, &self.1);
+            let git = |args: &[&str]| {
+                let _ = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&self.root)
+                    .args(args)
+                    .output();
+            };
+            git(&["reset", "--soft", self.head.as_str()]);
+            git(&["checkout", self.head.as_str(), "--", "models/registry.json"]);
         }
     }
-    let _restore = Restore(path.clone(), orig.clone());
+    let _temp = TempCommit {
+        root: root.clone(),
+        head,
+    };
     let before = r94_keys(&root);
     let mut v: serde_json::Value = serde_json::from_slice(&orig).expect("registry JSON");
     v["models"]
@@ -1096,6 +1122,30 @@ fn r94_m1_new_row_keeps_the_keys() {
             "source": "r94 test"
         }));
     std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["add", "models/registry.json"])
+        .output()
+        .expect("git add");
+    assert!(add.status.success(), "git add the registry");
+    let commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args([
+            "-c",
+            "user.name=r94",
+            "-c",
+            "user.email=r94@example.com",
+            "commit",
+            "--no-verify",
+            "-q",
+            "-m",
+            "r94 key-test row",
+        ])
+        .output()
+        .expect("git commit");
+    assert!(commit.status.success(), "git commit the test row");
     let after = r94_keys(&root);
     assert_eq!(
         before, after,
