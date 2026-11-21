@@ -2801,6 +2801,113 @@ async fn r91_b4_neg_isolation() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// R95 F1: stage 6's kill-with-open-transaction check runs on a scratch
+/// copy of the store. The real store's files stay byte-identical and the
+/// older sentinels still read on it; the copy is dropped after the check.
+#[test]
+fn r95_f1_txn_kill_on_a_scratch_copy() {
+    use crate::sandbox::docker::{CandidateRunExtras, RunGuard, SandboxManager};
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let tag = format!("r95f1-{}", std::process::id());
+    cleanup_covtest_network(&tag);
+    let dir = covtest_dir(&tag);
+    let workdir = dir.join("workspace");
+    let data = dir.join("sql-data");
+    fs::create_dir_all(&data).unwrap();
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), 93);
+    crate::verifier::sql::ref_server::write_reference_compact(&workdir, port)
+        .expect("the compact reference");
+    // The compact log must carry BEGIN/COMMIT/ROLLBACK too, or its replay
+    // commits the doomed transaction the kill test expects discarded.
+    r91_patch(
+        &workdir.join("sql_server.py"),
+        "            if COMPACT and first_keyword(sql) in WRITE_KEYWORDS:",
+        "            if COMPACT and first_keyword(sql) in LOG_KEYWORDS:",
+    );
+    let extras = CandidateRunExtras {
+        binds: vec![(data.display().to_string(), "/sdb-data".to_string())],
+        launch_args: vec![
+            "--port".to_string(),
+            port.to_string(),
+            "--data".to_string(),
+            "/sdb-data".to_string(),
+        ],
+        env: vec![
+            ("SDB_PORT".to_string(), port.to_string()),
+            ("SDB_DATA_DIR".to_string(), "/sdb-data".to_string()),
+        ],
+        ..Default::default()
+    };
+    SandboxManager::with_id(&tag).cleanup();
+    let guard = RunGuard::new(SandboxManager::with_id(&tag));
+    let addr = format!("127.0.0.1:{port}");
+    let t = std::time::Duration::from_secs(20);
+    guard
+        .manager()
+        .start_candidate_in_docker_with(&workdir, port, &extras)
+        .expect("the reference starts");
+    crate::verifier::sql::driver::wait_until_answering(&addr, t).expect("the reference answers");
+
+    // An older ticket's data, written through the candidate like the
+    // harness does when its ticket passes.
+    let profile = crate::verifier::sql::driver::sentinel_profile(&[0, 1, 2, 3, 4], &[])
+        .expect("a stage-4 grammar");
+    let sent = crate::verifier::sql::sentinel::build(0x5D95_0001, 4, &profile)
+        .expect("the sentinel builds");
+    crate::verifier::sql::sentinel::write(&addr, t, &sent).expect("the sentinel writes");
+    crate::verifier::sql::sentinel::check(&addr, t, &sent).expect("the sentinel reads back");
+
+    // Every regular file of the store, byte for byte.
+    fn store_files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else if let Ok(bytes) = fs::read(&path) {
+                    out.insert(
+                        path.strip_prefix(root).unwrap().display().to_string(),
+                        bytes,
+                    );
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+    let before = store_files(&data);
+    let logger: Arc<dyn PipelineLogger> = Arc::new(RecordingLogger::default());
+    txn_scenario(
+        guard.manager(),
+        &workdir,
+        port,
+        &extras,
+        &data,
+        std::slice::from_ref(&sent),
+        "r95-f1-seed",
+        &logger,
+    )
+    .expect("the reference passes the transaction checks");
+    assert_eq!(
+        before,
+        store_files(&data),
+        "the transaction kill changed the real store's files"
+    );
+    assert!(
+        !data.with_file_name("sql-data-txn").exists(),
+        "the scratch copy is dropped"
+    );
+    // The candidate is back on the real store and the sentinel still reads.
+    crate::verifier::sql::sentinel::check(&addr, t, &sent)
+        .expect("the real store still holds the sentinel");
+    drop(guard);
+    cleanup_covtest_network(&tag);
+}
+
 /// R91 B4 negative, stage 15: a suite that stays green when the feature
 /// is reverted must fail the sensitivity check.
 #[tokio::test]

@@ -150,7 +150,12 @@ fn crash_ladder(
             .map(|n| n.to_string_lossy())
             .unwrap_or_default()
     ));
-    let _ = sandbox.kill_candidate();
+    // R95 F1: quiesce with ticket 4's clean stop, never a kill: the real
+    // store must not pay the recovery this check is about just to be
+    // copied (a clean stop flushes it, and the copy is complete).
+    if let Err(e) = sandbox.stop_candidate_gracefully(5) {
+        logger.log(&format!("  [CRASH] clean stop before the copy failed: {e}"));
+    }
     let _ = std::fs::remove_dir_all(&scratch);
     crash::copy_tree(data, &scratch).map_err(|e| format!("scratch copy: {e}"))?;
     let mut scratch_extras = extras.clone();
@@ -385,6 +390,114 @@ fn crash_ladder(
     body?;
     restored?;
     Ok(())
+}
+
+/// R95 F1: the first sentinel whose reads drift on `addr`, with the stage
+/// that wrote it. A transport error is not drift: an unreachable server is
+/// the caller's own failure, not evidence that data was lost.
+fn sentinel_drift(
+    sentinels: &[crate::verifier::sql::sentinel::Sentinel],
+    addr: &str,
+    timeout: std::time::Duration,
+) -> Option<(u32, String)> {
+    sentinels.iter().find_map(|sent| {
+        match crate::verifier::sql::sentinel::check(addr, timeout, sent) {
+            Err(e) if e.starts_with("drift:") => Some((sent.stage, e)),
+            _ => None,
+        }
+    })
+}
+
+/// R95 F1/F3: stage 6's isolation and kill-with-open-transaction checks.
+/// The kill forces the candidate to recover; a recovery that drops
+/// committed data (the mimo `.51` case) must cost stage 6, not the store
+/// every later ticket reads. Both checks run on a scratch copy of the
+/// store (taken from a quiesced one, like the crash ladder), the older
+/// sentinels are read *there* after the kill, and the candidate is
+/// restarted onto the real store on every exit path.
+///
+/// The error carries the stage the contract belongs to: 6 for the checks,
+/// 4 for a failed restart back onto the real store (round-92 F5: a
+/// restart after a scenario is the store's ticket-4 contract).
+#[allow(clippy::too_many_arguments)]
+fn txn_scenario(
+    sandbox: &crate::sandbox::docker::SandboxManager,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+    data: &Path,
+    sentinels: &[crate::verifier::sql::sentinel::Sentinel],
+    verifier_seed: &str,
+    logger: &Arc<dyn PipelineLogger>,
+) -> Result<(), (u32, String)> {
+    let scratch = data.with_file_name(format!(
+        "{}-txn",
+        data.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    // R95 F1: the same clean quiesce as the crash ladder; the real store
+    // is never killed for a copy.
+    if let Err(e) = sandbox.stop_candidate_gracefully(5) {
+        logger.log(&format!("  [TXN] clean stop before the copy failed: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    crate::verifier::sql::crash::copy_tree(data, &scratch)
+        .map_err(|e| (6, format!("scratch copy: {e}")))?;
+    let mut scratch_extras = extras.clone();
+    let real_src = data.display().to_string();
+    for b in scratch_extras.binds.iter_mut() {
+        if b.0 == real_src {
+            b.0 = scratch.display().to_string();
+        }
+    }
+    let addr = format!("127.0.0.1:{port}");
+    let t = std::time::Duration::from_secs(20);
+    let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 6) ^ 0x5E27_1E10_0000_0006;
+    let body = (|| -> Result<(), String> {
+        restart_candidate(&sandbox.instance_id, workdir, port, &scratch_extras, false)
+            .map_err(|e| format!("restart on the scratch store: {e}"))?;
+        logger.log(&format!(
+            "  [TXN] isolation and the kill run on a scratch copy of the store ({})",
+            scratch.display()
+        ));
+        crate::verifier::sql::txn::isolation(&addr, t, &format!("c{ns:x}_iso"))?;
+        logger.log("  [TXN] uncommitted rows stay invisible across connections");
+        let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+        let mut restart = || {
+            restart_candidate(&sandbox.instance_id, workdir, port, &scratch_extras, false)
+                .map_err(|e| format!("restart on the scratch store: {e}"))
+        };
+        crate::verifier::sql::txn::kill_with_open_transaction(
+            &addr,
+            t,
+            &format!("c{ns:x}_kill"),
+            &mut kill,
+            &mut restart,
+        )?;
+        logger.log("  [TXN] a kill with an open transaction discarded it");
+        // R95 F1: the recovery the kill forced must keep what earlier
+        // tickets wrote; the scratch copy shows the loss here, before the
+        // real store is touched.
+        if let Some((stage, e)) = sentinel_drift(sentinels, &addr, t) {
+            return Err(format!(
+                "store lost after txn-kill: sentinel from stage {stage}: {e}"
+            ));
+        }
+        Ok(())
+    })();
+    // Always: back onto the real store, then drop the scratch copy.
+    let restored = restart_after_scenario("txn", &sandbox.instance_id, workdir, port, extras);
+    let _ = std::fs::remove_dir_all(&scratch);
+    match (body, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) => Err((6, e)),
+        (Err(e), Err(r)) => {
+            logger.log(&format!("  [TXN] the store restart also failed: {r}"));
+            Err((6, e))
+        }
+        (Ok(()), Err(e)) => Err((4, e)),
+    }
 }
 
 /// One raw `GET /` probe against a candidate: true when any HTTP response
@@ -1946,47 +2059,36 @@ impl BenchmarkPipeline {
                             // Stage 6's suite: cross-connection isolation and
                             // a kill with a transaction open (needs the
                             // sandbox's kill/restart, so it runs here too).
+                            // R95 F1: both run on a scratch copy of the
+                            // store; the kill's recovery cannot damage the
+                            // store every later ticket reads, and an older
+                            // sentinel lost on the copy fails this ticket's
+                            // stage 6 here.
                             if late_failure.is_none() && wanted.contains(&6) {
-                                late_ran.push(6);
-                                let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 6)
-                                    ^ 0x5E27_1E10_0000_0006;
-                                let addr = format!("127.0.0.1:{port}");
-                                let t = std::time::Duration::from_secs(20);
-                                let iso = crate::verifier::sql::txn::isolation(
-                                    &addr,
-                                    t,
-                                    &format!("c{ns:x}_iso"),
-                                );
-                                let killed = iso.and_then(|()| {
-                                    logger.log(
-                                        "  [TXN] uncommitted rows stay invisible across connections",
-                                    );
-                                    let mut kill =
-                                        || sandbox.kill_candidate().map_err(|e| e.to_string());
-                                    let mut restart = || {
-                                        restart_candidate(
-                                            &sandbox.instance_id,
-                                            workdir,
-                                            port,
-                                            &extras,
-                                            false,
-                                        )
-                                    };
-                                    crate::verifier::sql::txn::kill_with_open_transaction(
-                                        &addr,
-                                        t,
-                                        &format!("c{ns:x}_kill"),
-                                        &mut kill,
-                                        &mut restart,
-                                    )
-                                });
-                                match killed {
-                                    Ok(()) => logger.log(
-                                        "  [TXN] a kill with an open transaction discarded it",
-                                    ),
-                                    Err(e) => {
-                                        logger.log(&format!("  [TXN] FAILED: {e}"));
-                                        late_failure = Some((6, format!("[txn] {e}")));
+                                if let Some(data) = &sql_data {
+                                    late_ran.push(6);
+                                    match txn_scenario(
+                                        sandbox,
+                                        workdir,
+                                        port,
+                                        &extras,
+                                        data,
+                                        &sentinels,
+                                        verifier_seed,
+                                        logger,
+                                    ) {
+                                        Ok(()) => {}
+                                        Err((stage, why)) => {
+                                            logger.log(&format!("  [TXN] FAILED: {why}"));
+                                            late_failure = Some((
+                                                stage,
+                                                if stage == 6 {
+                                                    format!("[txn] {why}")
+                                                } else {
+                                                    why
+                                                },
+                                            ));
+                                        }
                                     }
                                 }
                             }
