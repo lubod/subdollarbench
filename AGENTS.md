@@ -172,6 +172,12 @@ A round's "done" record lives in its round file, not in
     sandbox image builds wait for a gap (`gap`) or the end of the grid.
     When a round's next step needs a gap, the implementer says so in its
     notes and stops.
+- **Adding a model** (round 94, DECISIONS #39): `scripts/add-model.sh
+  <openrouter id> [--provider <tag>]` writes its row to
+  `models/registry.json` at the base price, then `scripts/model-check.sh`
+  for it, then the operator's word; no round. Changing an **existing**
+  model's row is a reviewed change (a round), because it changes that
+  model's results; its running careers refuse the changed row.
 - **Long jobs outlive the session** (`docs/DECISIONS.md` #24): the flake
   bar, the load bar, the grid and multi-hour probes start through
   `scripts/detach.sh <name> -- <command...>`. It runs them as a systemd

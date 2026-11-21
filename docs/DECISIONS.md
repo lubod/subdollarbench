@@ -968,6 +968,22 @@ The benchmark answers "what does a dollar buy" (round 23):
   started); `.52` careers start at phase 1; deepseek `.50` stands as
   `.50`.
 
+## 41. A messy rehearsal and a free canary before paid runs (2026-11-21)
+
+- **Why** (operator, 2026-11-21: "analyze why we are still having these
+  bugs in real tests, how to avoid them sooner?", then "96"): nine bugs
+  since round 85 surfaced in paid runs or post-hoc audits. Every proof
+  and rehearsal graded one perfect reference server behind a friendly
+  stub, and the rehearsal never failed a ticket, so rollbacks, store
+  snapshots, catch-ups and chaining after a failure were never exercised.
+- **Change** (round 96): flawed candidates (lossy recovery, compact log,
+  no ticket 2, weak tests, real replays) run whole careers in the `$0`
+  rehearsal against written expectations; a chaos stub (slow streams,
+  429s, empty answers, trigger words, calls open at a session's end);
+  the rehearsal on the real entry points with real model names and a
+  fake clock; and a free-model canary phase required before a paid grid
+  on a new rules version.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

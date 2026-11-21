@@ -8,7 +8,7 @@ import json
 import sys
 import urllib.request
 
-snapshot = json.load(open("src/cost/model_prices.json"))
+snapshot = json.load(open("models/registry.json"))
 try:
     with urllib.request.urlopen("https://openrouter.ai/api/v1/models", timeout=30) as r:
         catalog = json.load(r)

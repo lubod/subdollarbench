@@ -1616,6 +1616,8 @@ mod tests {
             sqlite_version: None,
             cap_price_basis: None,
             sandbox_image: None,
+            price_row: None,
+            price_row_sha: None,
             points: 0.0,
             max_points: 0.0,
             phase: None,

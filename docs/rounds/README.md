@@ -92,5 +92,6 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [91](91.md) | A faster bar that also catches wrong grades | merged |
 | [92](92.md) | Rules `.51`: the audit leftover grader fixes | merged |
 | [93](93.md) | Harness and grid guards from the audit | merged |
-| [94](94.md) | Models are data: add a model without a round | open |
+| [94](94.md) | Models are data: add a model without a round | merged |
 | [95](95.md) | Rules `.52`: one store loss cannot poison a career | open |
+| [96](96.md) | A messy rehearsal: catch real-candidate bugs before paid runs | open |

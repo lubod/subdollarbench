@@ -975,6 +975,25 @@ pub fn validate_chain(
             sandbox_image.unwrap_or("—")
         );
     }
+    // R94 M2: a model's price row decides its result, so a chain keeps the
+    // row it started under. A cell without a recorded row is a pre-R94
+    // career (start a new one); a model outside the registry is left to
+    // the paid-launch refusal (the fixtures' synthetic models).
+    if let Some(current) = crate::cost::calculator::row_for_model(model).map(|r| r.sha()) {
+        match prev.price_row_sha.as_deref() {
+            Some(prev_sha) if prev_sha == current => {}
+            Some(prev_sha) => bail!(
+                "chain cell {} used price row {}, not {}; an existing model's row change is a reviewed change and needs a fresh career",
+                prev.campaign_id,
+                prev_sha,
+                current
+            ),
+            None => bail!(
+                "chain cell {} did not record its price row (a pre-R94 cell); start a new career",
+                prev.campaign_id
+            ),
+        }
+    }
     // R93 G3: a chain must keep the same budget and wall, or the phase
     // would be measured under a different bound than the one it continues.
     if (prev.budget_usd - budget_usd).abs() > 1e-9 {
@@ -2171,10 +2190,14 @@ fn live_rollup_stub_at_with(
 ) -> CampaignRollup {
     let live = &v["live"];
     let s = |k: &str, fb: &str| live[k].as_str().unwrap_or(fb).to_string();
+    let model = s("model", "?");
+    let price_row_model = crate::cost::calculator::row_for_model(&model);
+    let price_row_sha = price_row_model.as_ref().map(|r| r.sha());
+    let price_row = price_row_model.and_then(|r| serde_json::to_value(r).ok());
     CampaignRollup {
         campaign_id: campaign_id.to_string(),
         name: s("campaign", "sdb-sql"),
-        model: s("model", "?"),
+        model: model.clone(),
         harness: s("harness", "omp"),
         // R51 F6 (R43-1): an unknown effort stays empty, never "high".
         effort: s("effort", ""),
@@ -2194,6 +2217,8 @@ fn live_rollup_stub_at_with(
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
         sandbox_image: live_cell_image(campaign_id, v, runs_dir, fallback),
+        price_row,
+        price_row_sha,
         budget_usd: live["campaign_budget"].as_f64().unwrap_or(0.0),
         wall_min: v["wall_cap_min"].as_u64().unwrap_or(0),
         worker: 0,
@@ -2227,31 +2252,42 @@ fn live_rollup_stub_at_with(
     }
 }
 
-/// R23 D3/R24: a paid campaign launch must have a price in the committed
-/// snapshot (`src/cost/model_prices.json`); eval-only runs do not spend and
-/// are exempt. `_at` is the offline-testable form; the URL is ignored.
-pub async fn require_model_list_price_at(
+/// R94 M1: a paid launch needs the model's row in the run-time registry
+/// (`models/registry.json`, or `SDB_MODEL_REGISTRY`). A missing or
+/// unparsable registry is an error naming its path, never a silent price.
+pub async fn require_model_list_price_from(
+    registry: &std::path::Path,
     model: &str,
-    url: &str,
     eval_only: bool,
 ) -> Result<(), String> {
     if eval_only {
         return Ok(());
     }
-    if crate::cost::calculator::ModelPricing::list_price_for_model_async_at(model, url)
-        .await
-        .is_none()
-    {
+    let reg = crate::cost::calculator::registry_at(registry)
+        .map_err(|e| format!("{e}; a paid campaign launch needs a readable model registry"))?;
+    let Some(row) = reg.row(model) else {
         return Err(format!(
-            "model {model} has no entry in the price snapshot src/cost/model_prices.json; add the model's catalog id there, then retry the paid campaign launch"
+            "model {model} has no entry in the model registry {}; add the model's row (scripts/add-model.sh) and retry the paid campaign launch",
+            registry.display()
         ));
-    }
-    if crate::cost::calculator::provider_for_model(model).is_none() {
+    };
+    if row.provider.is_none() {
         return Err(format!(
-            "model {model} has no pinned provider in src/cost/model_prices.json; add the provider endpoint and its prices, then retry the paid campaign launch"
+            "model {model} has no pinned provider in the model registry {}; add the provider endpoint and its prices, then retry the paid campaign launch",
+            registry.display()
         ));
     }
     Ok(())
+}
+
+/// R23 D3/R24: the eval-only exemption and the default registry path.
+/// `_at` is the offline-testable form; the URL is ignored.
+pub async fn require_model_list_price_at(
+    model: &str,
+    _url: &str,
+    eval_only: bool,
+) -> Result<(), String> {
+    require_model_list_price_from(&crate::cost::calculator::registry_path(), model, eval_only).await
 }
 
 pub async fn require_model_list_price(model: &str, eval_only: bool) -> Result<(), String> {
@@ -2718,6 +2754,12 @@ pub struct CampaignRollup {
     /// onto the same image ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_image: Option<String>,
+    /// R94 M2: the model's registry row used for this cell and the row's
+    /// canonical hash. A chain refuses a changed row; the board shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_row: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_row_sha: Option<String>,
     /// Campaign-wide budget cap in USD (0 = uncapped), for the Run view's
     /// spend bar.
     #[serde(default)]
@@ -3222,6 +3264,9 @@ where
     let mut dirty = chain.map(|c| c.dirty).unwrap_or(false);
     let chain_last_green = chain.and_then(|c| c.last_green.clone());
     let chain_hints = chain.and_then(|c| c.hints.clone());
+    let price_row_model = crate::cost::calculator::row_for_model(&opts.model);
+    let price_row_sha = price_row_model.as_ref().map(|r| r.sha());
+    let price_row = price_row_model.and_then(|r| serde_json::to_value(r).ok());
     let mut rollup = CampaignRollup {
         campaign_id: opts.campaign_id.clone(),
         name: lc.spec.name.clone(),
@@ -3244,6 +3289,8 @@ where
         sqlite_version: Some(crate::report::rules::sqlite_version().to_string()),
         cap_price_basis: Some(crate::report::rules::CAP_PRICE_BASIS.to_string()),
         sandbox_image: chain_image.map(str::to_string),
+        price_row,
+        price_row_sha,
         budget_usd: opts.budget_usd,
         wall_min: opts.wall_min.unwrap_or(0),
         worker: 0,

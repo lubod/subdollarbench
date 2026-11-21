@@ -420,6 +420,8 @@ fn backfill_reads_rounds_from_the_console_and_classifies_the_failure() {
         sqlite_version: None,
         cap_price_basis: None,
         sandbox_image: None,
+        price_row: None,
+        price_row_sha: None,
         budget_usd: 0.0,
         wall_min: 0,
         worker: 0,
@@ -951,6 +953,8 @@ fn ladder_derives_every_ticket() {
         sqlite_version: None,
         cap_price_basis: None,
         sandbox_image: None,
+        price_row: None,
+        price_row_sha: None,
         budget_usd: 0.25,
         wall_min: 30,
         worker: 0,
@@ -1602,8 +1606,8 @@ async fn r24_7_refusal_names_the_price_snapshot() {
         .await
         .expect_err("unknown model must be refused");
     assert!(
-        err.contains("src/cost/model_prices.json"),
-        "refusal does not name the snapshot: {err}"
+        err.contains("models/registry.json"),
+        "refusal does not name the registry: {err}"
     );
     assert!(
         !err.contains("OpenRouter catalog or offline table"),
@@ -2667,6 +2671,8 @@ fn chain_rollup(phase: u32, finished: bool) -> CampaignRollup {
         sqlite_version: None,
         cap_price_basis: None,
         sandbox_image: None,
+        price_row: None,
+        price_row_sha: None,
         budget_usd: 0.99,
         wall_min: 150,
         worker: 0,
@@ -5394,4 +5400,205 @@ fn r93_g2_no_lite_after_the_wall() {
     assert!(lite_allowed(false, false, None));
     assert!(!lite_allowed(true, false, None));
     assert!(lite_allowed(false, true, Some(120)));
+}
+
+/// R94 M1: a missing or unparsable registry refuses a paid launch, names
+/// the registry, and never falls back to a default price; eval-only is
+/// exempt.
+#[tokio::test]
+async fn r94_m1_bad_registry_refuses() {
+    let dir = std::env::temp_dir().join(format!("r94-m1-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad = dir.join("registry.json");
+    std::fs::write(&bad, "{ this is not json").unwrap();
+    let err = crate::campaign::require_model_list_price_from(&bad, "deepseek/deepseek-chat", false)
+        .await
+        .expect_err("a bad registry must refuse a paid launch");
+    assert!(
+        err.contains(&bad.display().to_string()) && err.contains("model registry"),
+        "the refusal does not name the registry: {err}"
+    );
+    crate::campaign::require_model_list_price_from(&bad, "deepseek/deepseek-chat", true)
+        .await
+        .expect("eval-only is exempt");
+    let missing = dir.join("missing.json");
+    let err =
+        crate::campaign::require_model_list_price_from(&missing, "deepseek/deepseek-chat", false)
+            .await
+            .expect_err("a missing registry must refuse a paid launch");
+    assert!(
+        err.contains(&missing.display().to_string()),
+        "the refusal does not name the missing registry: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R94 M2: the model check's record must match the model's current price
+/// row; a changed row refuses the preflight until the check is rerun.
+#[test]
+fn r94_m2_row_change_needs_a_new_check() {
+    let root = crate::config::get_repo_root();
+    let dir = std::env::temp_dir().join(format!("r94-m2-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let gates = dir.join("gates");
+    let record_out = std::process::Command::new("bash")
+        .arg(root.join("scripts/model-check.sh"))
+        .arg("--record")
+        .arg("deepseek/deepseek-chat")
+        .env("SDB_MODEL_CHECK_DIR", &gates)
+        .output()
+        .expect("model-check --record");
+    assert!(record_out.status.success(), "{record_out:?}");
+    let record = String::from_utf8(record_out.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    std::fs::create_dir_all(std::path::Path::new(&record).parent().unwrap()).unwrap();
+    let stub = dir.join("model-row.sh");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\necho 1111111111111111111111111111111111111111111111111111111111111111\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let check = |text: &str| {
+        std::fs::write(&record, text).unwrap();
+        std::process::Command::new("bash")
+            .arg(root.join("scripts/model-check.sh"))
+            .arg("--row-check")
+            .arg("deepseek/deepseek-chat")
+            .env("SDB_MODEL_CHECK_DIR", &gates)
+            .env("SDB_MODEL_ROW_BIN", &stub)
+            .output()
+            .expect("model-check --row-check")
+    };
+    let out = check(
+        "model:    deepseek/deepseek-chat\nrow_sha:  2222222222222222222222222222222222222222222222222222222222222222\nRESULT: PASS\n",
+    );
+    assert!(!out.status.success(), "a stale row_sha passed: {out:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("price row") && text.contains("rerun"),
+        "the refusal does not say why: {text}"
+    );
+    let out = check(
+        "model:    deepseek/deepseek-chat\nrow_sha:  1111111111111111111111111111111111111111111111111111111111111111\nRESULT: PASS\n",
+    );
+    assert!(
+        out.status.success(),
+        "the matching row was refused: {out:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R94 M2: every cell records the model's registry row and its hash.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // the registry test lock; the fake campaign is immediate
+async fn r94_m2_cell_records_its_row() {
+    let _lock = crate::cost::calculator::REGISTRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let lc = load_campaign("sdb-sql").expect("the campaign loads");
+    let opts = CampaignRunOptions {
+        campaign_id: "r94row".into(),
+        model: "deepseek/deepseek-chat".into(),
+        harness: "omp".into(),
+        effort: "high".into(),
+        budget_usd: 1.0,
+        wall_min: None,
+    };
+    let rollup = run_campaign(
+        &lc,
+        &opts,
+        |attempt| {
+            let id = attempt.stage.id;
+            async move { Ok(outcome(true, &[(id, true)])) }
+        },
+        None,
+    )
+    .await
+    .expect("the fake campaign");
+    let row =
+        crate::cost::calculator::row_for_model("deepseek/deepseek-chat").expect("the registry row");
+    assert_eq!(rollup.price_row_sha.as_deref(), Some(row.sha().as_str()));
+    assert_eq!(
+        rollup
+            .price_row
+            .as_ref()
+            .and_then(|r| r.get("id"))
+            .and_then(|v| v.as_str()),
+        Some("deepseek/deepseek-chat")
+    );
+}
+
+/// R94 M2: a changed price row between phases refuses the chain; the same
+/// row chains, and a pre-R94 cell without a row refuses.
+#[test]
+fn r94_m2_row_change_refuses_the_chain() {
+    let _lock = crate::cost::calculator::REGISTRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let state = phase1_state();
+    let mut prev = chain_rollup(1, true);
+    prev.model = "deepseek/deepseek-chat".into();
+    let model = "deepseek/deepseek-chat";
+    prev.price_row_sha = Some("0".repeat(64));
+    let chain = |prev: &CampaignRollup| {
+        validate_chain(
+            prev,
+            Some(&state),
+            2,
+            model,
+            "omp",
+            "high",
+            crate::report::rules::RULES_VERSION,
+            None,
+            prev.budget_usd,
+            prev.wall_min,
+        )
+    };
+    let err = chain(&prev).unwrap_err();
+    assert!(err.to_string().contains("price row"), "{err}");
+    prev.price_row_sha = crate::cost::calculator::row_for_model(model).map(|r| r.sha());
+    chain(&prev).expect("the same row chains");
+    prev.price_row_sha = None;
+    let err = chain(&prev).unwrap_err();
+    assert!(err.to_string().contains("did not record"), "{err}");
+}
+
+/// R94 M3: the add-model self-test (a recorded endpoints fixture, one
+/// provider with discount 0.5 -> base price + warning; several providers
+/// without --provider refuse, listing them; no tool support refuses).
+#[test]
+fn r94_m3_add_model_base_price() {
+    let root = crate::config::get_repo_root();
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/add-model.sh"))
+        .arg("--self-test")
+        .current_dir(&root)
+        .output()
+        .expect("scripts/add-model.sh --self-test");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "the add-model self-test failed: {text}"
+    );
+    assert!(
+        text.contains("RESULT: PASS (add-model self-test)"),
+        "{text}"
+    );
 }
