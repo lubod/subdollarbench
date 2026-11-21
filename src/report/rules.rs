@@ -15,6 +15,30 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-21.52`: round 95. A store loss costs the ticket that saw
+///   it, never the rest of the career. The transaction checks
+///   (cross-connection isolation and the kill with an open transaction)
+///   run on a scratch copy of the store, like the crash ladder; the older
+///   sentinels are read on that copy after the kill, so a recovery that
+///   drops committed data fails stage 6 of the ticket that ran the check
+///   (`store lost after txn-kill`). After the differential suite and after
+///   every late check that restarts the candidate on the real store, the
+///   older sentinels are read once more on the real store; a drift fails
+///   the current ticket with that check named and the ticket the lost data
+///   belongs to, so the next ticket no longer reports it as `broke ticket
+///   N`. The rollback snapshot is written only by a passed ticket's
+///   verification whose closing read passed, store and sentinel chain
+///   together, so a damaged store never becomes the state a later attempt
+///   rolls back to (round-92 F5's attribution stays: a failed restart
+///   after a scenario is ticket 4's contract).
+///   Why: mimo `.51` career 0 (2026-11-20/21) scored 10/10 and 12/12 at
+///   phases 1-2, then 4/22 and 0/32: the stage-6 kill during ticket 11's
+///   verification damaged the real store, the next attempt's snapshot
+///   captured the damage, and every later rollback restored it (DECISIONS
+///   #40).
+///   Score impact: careers restart at phase 1; mimo `.51` career 0 is void
+///   (careers 1 and 2 never started); deepseek `.50` stands as `.50`;
+///   scoring and the $0.99 cap stay at base rates.
 /// - `2026-11-18.51`: round 92. The audit's leftovers and the round-89
 ///   review's two findings. Stage 5's torn-tail cut is capped by the
 ///   victim append's own record size, so a retry whose step-start
@@ -915,7 +939,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-18.51";
+pub const RULES_VERSION: &str = "2026-11-21.52";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.

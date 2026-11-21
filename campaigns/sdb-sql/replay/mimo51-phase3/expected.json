@@ -1,0 +1,32 @@
+{
+  "captured_rules": "2026-11-21.52",
+  "fixture": "mimo51-phase3",
+  "note": "the mimo .51 phase-3 ticket-11 green commit (source only). Under .52 the store loss the career saw is charged where it happens: the first restart after the suite grew the store (the crash ladder's restore) drops the stage-10 sentinel, so stage 5 fails with 'store lost after crash-ladder' while ticket 11's own suite still passes. The synthetic r95_f3 test covers the transaction-kill attribution. Stages 12-20 were never graded at this commit.",
+  "source_run": "campaign_sdb-sql_openrouter_xiaomi_mimo-v2.6-flash_20261120_112540_w1",
+  "stages": {
+    "0": "pass",
+    "1": "pass",
+    "2": "pass",
+    "3": "pass",
+    "4": "pass",
+    "5": "fail",
+    "6": "pass",
+    "7": "pass",
+    "8": "pass",
+    "9": "pass",
+    "10": "pass",
+    "11": "pass",
+    "12": "not graded",
+    "13": "not graded",
+    "14": "not graded",
+    "15": "not graded",
+    "16": "not graded",
+    "17": "not graded",
+    "18": "not graded",
+    "19": "not graded",
+    "20": "not graded"
+  },
+  "errors": {
+    "5": "store lost after crash-ladder"
+  }
+}

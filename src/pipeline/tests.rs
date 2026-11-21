@@ -2570,6 +2570,10 @@ async fn r91_b4_replay_real_workspaces() {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.join("expected.json").is_file())
+        // R95 F4: a career-slice fixture (`replay.json`) is graded by
+        // `r95_f4_replay_mimo_store_loss`: it replays one ticket with a
+        // prepass sentinel, not the final ticket of a career.
+        .filter(|p| !p.join("replay.json").is_file())
         .collect();
     fixtures.sort();
     assert!(
@@ -3149,6 +3153,157 @@ async fn r95_f3_store_loss_charged_where_it_happened() {
     crate::verifier::sql::sentinel::check(&addr, std::time::Duration::from_secs(10), &sent)
         .expect("the real store still holds the sentinel");
     drop(guard);
+    cleanup_covtest_network(tag);
+}
+
+/// R95 F4: the mimo `.51` phase-3 case, replayed from the ticket-11 green
+/// commit (source only). A stage-10 prepass writes sentinel-10 through the
+/// normal end-of-verification path; the stage-11 run then repeats the
+/// ladder with that sentinel in the store, as the career did. Ticket 11's
+/// own suite passes, and the candidate's recovery after the transaction
+/// kill drops the sentinel on the scratch copy: stage 6 fails with
+/// "store lost after txn-kill" and the real store keeps the data the next
+/// ticket reads.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r95_f4_replay_mimo_store_loss() {
+    use crate::sandbox::docker::SandboxManager;
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture = repo.join("campaigns/sdb-sql/replay/mimo51-phase3");
+    let meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture.join("replay.json")).unwrap()).unwrap();
+    let expected: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture.join("expected.json")).unwrap()).unwrap();
+    let stage = meta["stage"].as_u64().expect("the fixture stage") as u32;
+    let pre = meta["prepass"].as_u64().expect("the prepass stage") as u32;
+    let accepted: Vec<u32> = meta["accepted"]
+        .as_array()
+        .expect("accepted")
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    let passed: Vec<u32> = meta["passed"]
+        .as_array()
+        .expect("passed")
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as u32))
+        .collect();
+    let tag = "r95f4";
+    cleanup_covtest_network(tag);
+    let dir = covtest_dir(tag);
+    let workdir = dir.join("workspace");
+    r91_copy_fixture(&fixture, &workdir).expect("copy the mimo fixture");
+    let sandbox = SandboxManager::with_id(&format!("r95f4-build-{}", std::process::id()));
+    sandbox
+        .build_rust_candidate(
+            &workdir,
+            crate::sandbox::docker::SandboxManager::RUST_BUILD_TIMEOUT_SECS,
+        )
+        .expect("build the mimo fixture");
+    sandbox.cleanup();
+    let worker = 111u8;
+    let prompt_path = dir.join("ticket_prompt.md");
+    fs::write(&prompt_path, "sdb-sql replay mimo51-phase3").unwrap();
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replay_run(
+        workdir: &Path,
+        worker: u8,
+        tag: &str,
+        stage: u32,
+        accepted: Vec<u32>,
+        passed: Vec<u32>,
+        prompt_path: &Path,
+        which: &str,
+    ) -> String {
+        let mut config = covtest_config(workdir.to_path_buf(), worker, tag);
+        config.run_id = Some(format!("test_covtest_{tag}_{which}_{}", std::process::id()));
+        config.task = TaskType::Sql;
+        config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
+            campaign: "covtest-sdb-sql".to_string(),
+            stage,
+            prompt_path: prompt_path.to_path_buf(),
+            continuity: true,
+            accepted_stages: accepted,
+            lite_profile: Vec::new(),
+            passed_lite: Vec::new(),
+            passed_stages: passed,
+            spec_md: None,
+            preamble: None,
+            cap_headroom_usd: None,
+        });
+        let logger = Arc::new(RecordingLogger::default());
+        let _ = BenchmarkPipeline::execute(config, logger.clone(), None).await;
+        logger.text()
+    }
+
+    // 1. The stage-10 pass writes sentinel-10 (the career's phase-2 end).
+    let pre_log = replay_run(
+        &workdir,
+        worker,
+        tag,
+        pre,
+        (0..=pre).collect(),
+        (0..pre).collect(),
+        &prompt_path,
+        "pre",
+    )
+    .await;
+    if std::env::var("SDB_R91_DEBUG").ok().as_deref() == Some("1") {
+        eprintln!("--- r95 f4 prepass {pre} ---\n{pre_log}");
+    }
+    assert!(
+        pre_log.contains(&format!("Stage {pre}: ")) && !pre_log.contains("-> FAIL"),
+        "the prepass stage {pre} did not pass, so there is no sentinel: {pre_log}"
+    );
+    assert!(
+        dir.join(format!("sentinel-{pre}.json")).is_file(),
+        "the prepass wrote sentinel-{pre}"
+    );
+
+    // 2. Ticket 11: its own suite passes, the store loss is stage 6's.
+    let log = replay_run(
+        &workdir,
+        worker,
+        tag,
+        stage,
+        accepted,
+        passed,
+        &prompt_path,
+        "main",
+    )
+    .await;
+    if std::env::var("SDB_R91_DEBUG").ok().as_deref() == Some("1") {
+        eprintln!("--- r95 f4 ticket {stage} ---\n{log}");
+    }
+    let own = log
+        .lines()
+        .find(|l| l.contains(&format!("Stage {stage}: ")))
+        .unwrap_or_default();
+    assert!(
+        own.contains("-> PASS"),
+        "ticket {stage}'s own suite did not pass: {own}"
+    );
+    // The loss is charged where it happened: a stage's FAIL line names the
+    // check and the ticket the lost data belongs to (F3). The synthetic
+    // r95_f3 test proves the transaction-kill attribution; this fixture
+    // shows the career's real loss, which surfaces at the first restart
+    // after the suite grew the store. The replay has no campaign layer,
+    // so the next attempt's rollback to the last verified store is F2's
+    // own test (`r95_f2_rollback_restores_a_verified_store`).
+    let errors = expected["errors"].as_object().expect("expected errors");
+    assert!(!errors.is_empty(), "expected.json pins no error");
+    for (stage, why) in errors {
+        let reason = why.as_str().unwrap_or_default();
+        assert!(
+            log.lines().any(|l| l.contains(&format!("Stage {stage}: "))
+                && l.contains("-> FAIL")
+                && l.contains(reason)
+                && l.contains("sentinel from stage 10")),
+            "stage {stage} did not fail with {reason:?} naming the lost data: {log}"
+        );
+    }
     cleanup_covtest_network(tag);
 }
 
