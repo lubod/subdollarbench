@@ -3202,7 +3202,7 @@ async fn r95_f4_replay_mimo_store_loss() {
         )
         .expect("build the mimo fixture");
     sandbox.cleanup();
-    let worker = 111u8;
+    let worker = 78u8;
     let prompt_path = dir.join("ticket_prompt.md");
     fs::write(&prompt_path, "sdb-sql replay mimo51-phase3").unwrap();
 

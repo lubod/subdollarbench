@@ -400,12 +400,20 @@ fn sentinel_drift(
     addr: &str,
     timeout: std::time::Duration,
 ) -> Option<(u32, String)> {
-    sentinels.iter().find_map(|sent| {
-        match crate::verifier::sql::sentinel::check(addr, timeout, sent) {
-            Err(e) if e.starts_with("drift:") => Some((sent.stage, e)),
-            _ => None,
+    for sent in sentinels {
+        for attempt in 0..2 {
+            match crate::verifier::sql::sentinel::check(addr, timeout, sent) {
+                Ok(()) => break,
+                Err(e) if e.starts_with("drift:") => return Some((sent.stage, e)),
+                // One retry on a transport error: a read that never
+                // reached the server is not evidence that the store kept
+                // its data (nor that it lost it).
+                Err(_) if attempt == 0 => std::thread::sleep(std::time::Duration::from_millis(250)),
+                Err(_) => break,
+            }
         }
-    })
+    }
+    None
 }
 
 /// R95 F3: after a late check that restarts the candidate on the real
