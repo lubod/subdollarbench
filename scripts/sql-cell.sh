@@ -372,6 +372,13 @@ fi
 
 cell_gate "$ROOT" "$BUDGET" "$SMOKE" "$REHEARSAL" || exit 1
 check_omp_pin "$ROOT" || exit 1
+# R94 M2: an official cell refuses a model check from another price row.
+if [[ "$SMOKE" != "1" && "$REHEARSAL" != "1" ]]; then
+    if ! ROW_CHECK="$("$ROOT/scripts/model-check.sh" --row-check "$MODEL" 2>&1)"; then
+        echo "[cell] $ROW_CHECK" >&2
+        exit 1
+    fi
+fi
 
 echo "[cell] building release binary ($BIN)"
 (cd "$ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release --bins)

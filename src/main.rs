@@ -23,8 +23,47 @@ fn apply_trial_suffix(run_id: &str, trial: Option<u32>) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    let cli = Cli::parse();
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(|s| s.as_str()) == Some("model-row") {
+        return model_row_cli(&raw[2..]);
+    }
+    let cli = Cli::parse_from(raw);
     run_cli(cli).await
+}
+
+/// R94 M1: the shell's one row/hash reader. The registry is data read at
+/// run time, so the model check, the grid and the add-model script ask the
+/// binary instead of each reimplementing the float formatting.
+fn model_row_cli(args: &[String]) -> Result<()> {
+    let mut model: Option<String> = None;
+    let mut sha = false;
+    for a in args {
+        match a.as_str() {
+            "--sha" => sha = true,
+            "--json" => sha = false,
+            s if s.starts_with("--") => anyhow::bail!("model-row: unknown option {s}"),
+            s => {
+                if model.replace(s.to_string()).is_some() {
+                    anyhow::bail!("model-row: exactly one model");
+                }
+            }
+        }
+    }
+    let model = model
+        .ok_or_else(|| anyhow::anyhow!("usage: subdollarbench model-row <model> [--sha|--json]"))?;
+    let reg = subdollarbench::cost::calculator::registry().map_err(|e| anyhow::anyhow!(e))?;
+    let row = reg.row(&model).ok_or_else(|| {
+        anyhow::anyhow!(
+            "model {model} is not in the model registry {}",
+            subdollarbench::cost::calculator::registry_path().display()
+        )
+    })?;
+    if sha {
+        println!("{}", row.sha());
+    } else {
+        println!("{}", row.canonical_json());
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_run_id(runs_dir: &str, prefix: &str) -> Result<String> {

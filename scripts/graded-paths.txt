@@ -11,6 +11,10 @@
 #   plumbing  pricing, recording, display and this list. A change moves
 #             the full key only; no new bar.
 #
+# The model registry (models/registry.json) is deliberately outside this
+# list and src/report/graded-files.txt: it is read at run time, adding a
+# model moves neither key, and each cell records its own row and hash (R94).
+#
 # The classes govern the bar only. A change to what the candidate sees
 # (src/sandbox/omp.rs's prompt and arguments, the bench policy,
 # tool_normalizer) still falls under the rules-bump policy (AGENTS.md,

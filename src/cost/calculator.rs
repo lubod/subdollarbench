@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostBreakdown {
@@ -274,20 +277,21 @@ impl ModelPricing {
         }
     }
 
-    /// R24 R2: the committed list-price snapshot. It is part of the rules
-    /// fingerprint; a provider catalog change does not move a score until
-    /// this file is edited and the rules bump.
+    /// R94 M1: the run-time registry's row for a model. The registry is
+    /// data outside the graded key and the rules fingerprint, so adding a
+    /// model needs no release rebuild; each cell records the row it used.
     pub fn snapshot_rates(model_name: &str) -> Option<Self> {
-        let m = model_name.to_lowercase();
-        let m = m.strip_prefix("openrouter/").unwrap_or(&m);
-        snapshot_entries().iter().find_map(|e| {
-            e.id.eq_ignore_ascii_case(m).then_some(Self {
-                prompt_per_million: e.prompt_per_million,
-                completion_per_million: e.completion_per_million,
-                cache_read_per_million: e.cache_read_per_million,
-                cache_write_per_million: e.cache_write_per_million,
-            })
-        })
+        let reg = registry().ok()?;
+        reg.row(model_name).map(Self::from_row)
+    }
+
+    pub(crate) fn from_row(row: &ModelRow) -> Self {
+        Self {
+            prompt_per_million: row.prompt_per_million,
+            completion_per_million: row.completion_per_million,
+            cache_read_per_million: row.cache_read_per_million,
+            cache_write_per_million: row.cache_write_per_million,
+        }
     }
 
     fn fallback() -> Self {
@@ -299,10 +303,21 @@ impl ModelPricing {
         }
     }
 
-    /// The offline fallback is only for unknown models outside a paid
-    /// campaign; a paid launch and the scored cost require a snapshot entry.
+    /// The fallback is only for a valid registry with an unknown model
+    /// outside a paid campaign; a paid launch and the scored cost require a
+    /// registry row, and a missing/unparsable registry is logged loudly,
+    /// never silently priced at the fallback.
     pub fn for_model(model_name: &str) -> Self {
-        Self::snapshot_rates(model_name).unwrap_or_else(Self::fallback)
+        match registry() {
+            Ok(reg) => reg
+                .row(model_name)
+                .map(Self::from_row)
+                .unwrap_or_else(Self::fallback),
+            Err(e) => {
+                log_registry_error(&e);
+                Self::fallback()
+            }
+        }
     }
 
     pub fn compute_cost_with_cache(
@@ -396,9 +411,8 @@ impl ModelPricing {
         ))
     }
 
-    /// Asynchronously resolve pricing, querying OpenRouter live catalog first with fallback to hardcoded rates
-    /// R23 D3/R24 R2: the committed snapshot price, or None when the model
-    /// has only the anonymous fallback. The fallback is never a list price.
+    /// R23 D3/R94 M1: the registry row's list price, or None when the model
+    /// has only the anonymous fallback (never a list price).
     pub fn list_price_for_model(model_name: &str) -> Option<Self> {
         Self::snapshot_rates(model_name)
     }
@@ -418,89 +432,152 @@ impl ModelPricing {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PriceEntry {
-    id: String,
+/// R94 M1: one run-time registry row. `override` is the provider's price
+/// rule that the flat base rates cannot express (context size or the hour);
+/// `added` and `source` record where and when the row came from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelRow {
+    pub id: String,
     /// R67 F1: the OpenRouter endpoint slug every paid call is pinned to.
-    /// The four prices are that endpoint's, not the model-level catalog's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub prompt_per_million: f64,
+    pub completion_per_million: f64,
+    pub cache_read_per_million: f64,
+    pub cache_write_per_million: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "override")]
+    pub override_text: Option<String>,
     #[serde(default)]
-    provider: Option<String>,
-    prompt_per_million: f64,
-    completion_per_million: f64,
-    cache_read_per_million: f64,
-    cache_write_per_million: f64,
+    pub added: String,
+    #[serde(default)]
+    pub source: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct PriceSnapshot {
-    as_of: String,
-    models: Vec<PriceEntry>,
+impl ModelRow {
+    /// The canonical bytes `sha` covers: the struct's field order, optional
+    /// fields omitted. The shell asks the binary for the hash, so Rust and
+    /// the grid agree on every byte and every float.
+    pub fn canonical_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    pub fn sha(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(self.canonical_json().as_bytes());
+        format!("{:x}", h.finalize())
+    }
 }
 
-fn snapshot() -> &'static PriceSnapshot {
-    static SNAPSHOT: OnceLock<PriceSnapshot> = OnceLock::new();
-    SNAPSHOT.get_or_init(|| {
-        serde_json::from_str(include_str!("model_prices.json"))
-            .expect("the committed model price snapshot must parse")
-    })
+/// R94 M1: the registry file. It lives at `models/registry.json` (or
+/// `SDB_MODEL_REGISTRY`), outside `scripts/graded-paths.txt` and
+/// `src/report/graded-files.txt`, so adding a model moves neither key nor
+/// the rules fingerprint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRegistry {
+    pub as_of: String,
+    #[serde(default)]
+    pub source: String,
+    pub models: Vec<ModelRow>,
 }
 
-fn snapshot_entries() -> &'static [PriceEntry] {
-    snapshot().models.as_slice()
+impl ModelRegistry {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read the model registry {}: {e}", path.display()))?;
+        let reg: Self = serde_json::from_str(&text)
+            .map_err(|e| format!("cannot parse the model registry {}: {e}", path.display()))?;
+        if reg.models.is_empty() {
+            return Err(format!(
+                "the model registry {} has no models",
+                path.display()
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for row in &reg.models {
+            if !seen.insert(row.id.to_lowercase()) {
+                return Err(format!(
+                    "the model registry {} lists {} twice",
+                    path.display(),
+                    row.id
+                ));
+            }
+        }
+        Ok(reg)
+    }
+
+    /// A model's row, matched like the old snapshot (the `openrouter/`
+    /// prefix ignored, case-insensitive).
+    pub fn row(&self, model: &str) -> Option<&ModelRow> {
+        let m = model.to_lowercase();
+        let m = m.strip_prefix("openrouter/").unwrap_or(&m);
+        self.models.iter().find(|r| r.id.eq_ignore_ascii_case(m))
+    }
 }
 
-/// R51 F5 (Q8 a): provider price overrides applied on top of the snapshot's
-/// base rates. The snapshot cannot express them (they depend on context
-/// size or the hour), so they live in this one table next to the snapshot
-/// reader, outside the graded JSON. An empty detail means no override.
-pub const PRICE_OVERRIDES: &[(&str, &str)] = &[
-    (
-        "anthropic/claude-haiku-5.5",
-        "5× the prompt rate above 100k prompt tokens",
-    ),
-    ("openai/gpt-6-luna", "2× above 272k prompt tokens"),
-    (
-        "deepseek/deepseek-v4.1-flash-1017",
-        "2× in weekday peak hours",
-    ),
-    ("xiaomi/mimo-v2.6-flash", ""),
-    ("qwen/qwen3.8-flash", ""),
-    // R66 F1: the next grid's four models. R75 F4 pins minimax to its
-    // maker; that endpoint doubles its price 01:00-15:00 UTC.
-    ("minimax/minimax-m3.1-flash", "2× 01:00-15:00 UTC"),
-    ("z-ai/glm-5.3-flash", ""),
-    ("inclusionai/ling-3.1-flash", ""),
-    ("openai/gpt-6-luna-pro", "2× above 272k prompt tokens"),
-    ("tencent/hy4", ""),
-    ("xiaomi/mimo-v2.6-pro", ""),
-];
-
-/// The override for a model, matched like the snapshot (openrouter/ prefix
-/// ignored, case-insensitive). `Some("")` means the model is priced but has
-/// no override; `None` means the model is not in the grid table.
-pub fn price_override_for(model: &str) -> Option<&'static str> {
-    let m = model.to_lowercase();
-    let m = m.strip_prefix("openrouter/").unwrap_or(&m);
-    PRICE_OVERRIDES
-        .iter()
-        .find(|(id, _)| id.eq_ignore_ascii_case(m))
-        .map(|(_, detail)| *detail)
+pub fn registry_path() -> PathBuf {
+    std::env::var_os("SDB_MODEL_REGISTRY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::config::get_repo_root().join("models/registry.json"))
 }
 
-/// R67 F1: the endpoint slug a model is pinned to, or None when the row
-/// has no provider (a paid launch is refused).
-pub fn provider_for_model(model: &str) -> Option<&'static str> {
-    let m = model.to_lowercase();
-    let m = m.strip_prefix("openrouter/").unwrap_or(&m);
-    snapshot_entries()
-        .iter()
-        .find(|e| e.id.eq_ignore_ascii_case(m))
-        .and_then(|e| e.provider.as_deref())
+static REGISTRY_CACHE: Mutex<Option<HashMap<PathBuf, Arc<ModelRegistry>>>> = Mutex::new(None);
+
+/// The registry at a path, cached for the process (a cell's prices cannot
+/// shift mid-run). A missing or unparsable file is an error, never a
+/// default price.
+pub fn registry_at(path: &Path) -> Result<Arc<ModelRegistry>, String> {
+    let mut cache = REGISTRY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = cache.as_ref() {
+        if let Some(reg) = map.get(path) {
+            return Ok(reg.clone());
+        }
+    }
+    let reg = Arc::new(ModelRegistry::load(path)?);
+    cache
+        .get_or_insert_with(HashMap::new)
+        .insert(path.to_path_buf(), reg.clone());
+    Ok(reg)
 }
 
-/// The snapshot's date, for the results page's Prices row.
-pub fn price_snapshot_as_of() -> &'static str {
-    snapshot().as_of.as_str()
+pub fn registry() -> Result<Arc<ModelRegistry>, String> {
+    registry_at(&registry_path())
+}
+
+/// R94 test lock: the registry is a file; a test that adds a temporary row
+/// and tests that read the real registry must not interleave.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn log_registry_error(e: &str) {
+    static ONCE: Mutex<Option<String>> = Mutex::new(None);
+    let mut once = ONCE.lock().unwrap_or_else(|e| e.into_inner());
+    if once.as_deref() != Some(e) {
+        eprintln!("[COST] {e}");
+        *once = Some(e.to_string());
+    }
+}
+
+/// The row a model resolves to, or None when the registry is unreadable or
+/// has no row; a paid launch refuses both cases with the registry named.
+pub fn row_for_model(model: &str) -> Option<ModelRow> {
+    registry().ok()?.row(model).cloned()
+}
+
+/// R94 M1: the row's override text (the grid table's models have one,
+/// possibly empty). None means the model is not in the grid table.
+pub fn price_override_for(model: &str) -> Option<String> {
+    row_for_model(model)?.override_text
+}
+
+/// R94 M1: the pinned OpenRouter endpoint slug, or None (a paid launch is
+/// refused).
+pub fn provider_for_model(model: &str) -> Option<String> {
+    row_for_model(model)?.provider
+}
+
+/// R94 M1: the registry date for the results page's Prices row.
+pub fn price_snapshot_as_of() -> String {
+    registry().map(|r| r.as_of.clone()).unwrap_or_default()
 }
 
 #[cfg(test)]

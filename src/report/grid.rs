@@ -59,6 +59,8 @@ pub struct CareerCell {
     pub sqlite_version: Option<String>,
     pub cap_price_basis: Option<String>,
     pub sandbox_image: Option<String>,
+    /// R94 M2: the canonical price-row hashes this career's cells recorded.
+    pub price_row_sha: Option<String>,
     /// Full rules fingerprints recorded by this career's ticket manifests.
     pub fingerprints: Vec<String>,
     /// R47 F2: the career's latest measured perf block, or the phase's own
@@ -647,6 +649,10 @@ fn career_from_leaf(leaf: &RawCell, cells: &[&RawCell]) -> CareerCell {
         sandbox_image: parsed
             .and_then(|r| r.sandbox_image.clone())
             .or_else(|| leaf.rollup["sandbox_image"].as_str().map(str::to_string)),
+        price_row_sha: leaf.rollup["price_row_sha"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| parsed.and_then(|r| r.price_row_sha.clone())),
         fingerprints,
         perf,
         cost,
@@ -1563,7 +1569,7 @@ fn strip_cell(
 /// R85 F3: one model's bill line: the surcharge named in
 /// `PRICE_OVERRIDES` and the billed / scored ratio, when either exists.
 fn bill_item(model: &str, cost: f64, billed: Option<f64>) -> Option<String> {
-    let over = crate::cost::calculator::price_override_for(model).unwrap_or("");
+    let over = crate::cost::calculator::price_override_for(model).unwrap_or_default();
     let ratio = billed.filter(|_| cost > 0.0).map(|b| b / cost);
     if over.is_empty() && ratio.is_none() {
         return None;
@@ -1572,7 +1578,7 @@ fn bill_item(model: &str, cost: f64, billed: Option<f64>) -> Option<String> {
     let display = model.strip_prefix("openrouter/").unwrap_or(model);
     let mut s = format!("<b>{}</b>", esc(display));
     if !over.is_empty() {
-        s.push_str(&format!(": {}", esc(over)));
+        s.push_str(&format!(": {}", esc(&over)));
     }
     if let Some(r) = ratio {
         s.push_str(&format!(" ({r:.2}× billed / scored)"));
@@ -2794,7 +2800,7 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
     let overrides = ranked_models
         .iter()
         .map(|m| {
-            let detail = crate::cost::calculator::price_override_for(m).unwrap_or("");
+            let detail = crate::cost::calculator::price_override_for(m).unwrap_or_default();
             if detail.is_empty() {
                 format!(
                     "{}<span title=\"{}\">{}</span> — none",
@@ -2808,16 +2814,29 @@ fn render_results_for(cells: &[CareerCell], page_rules: &str) -> String {
                     swatch(m, &colours),
                     esc(m),
                     model_name_html(m),
-                    esc(detail)
+                    esc(&detail)
                 )
             }
         })
         .collect::<Vec<_>>()
         .join("; ");
     // R69 F1: the price list and the cap basis moved here from the board.
+    // R94 M2: the price row the cells ran under, by its hash prefix.
+    let mut row_hashes: Vec<String> = current
+        .iter()
+        .filter_map(|c| c.price_row_sha.as_deref())
+        .map(|s| s.chars().take(12).collect())
+        .collect();
+    row_hashes.sort();
+    row_hashes.dedup();
+    let row_note = if row_hashes.is_empty() {
+        String::new()
+    } else {
+        format!("; price row {}", row_hashes.join(", "))
+    };
     let prices = format!(
-        "base rates per call from model_prices.json (snapshot {}); overrides: {}",
-        esc(crate::cost::calculator::price_snapshot_as_of()),
+        "base rates per call from models/registry.json ({}); overrides: {}{row_note}",
+        esc(&crate::cost::calculator::price_snapshot_as_of()),
         if overrides.is_empty() {
             "—"
         } else {
@@ -5922,7 +5941,7 @@ mod tests {
         let board_text = visible_text(&board);
         let results_text = visible_text(&results);
         assert!(
-            !board_text.contains("model_prices.json") && !board_text.contains("cap policy"),
+            !board_text.contains("models/registry.json") && !board_text.contains("cap policy"),
             "the board header speaks plainly: {board_text}"
         );
         assert!(
@@ -5932,7 +5951,7 @@ mod tests {
             "the board leads with the plain sentence: {board_text}"
         );
         assert!(
-            results_text.contains("model_prices.json") && results_text.contains("cap policy"),
+            results_text.contains("models/registry.json") && results_text.contains("cap policy"),
             "the results page names the price list and the cap basis: {results_text}"
         );
         for (page, html) in [("board", &board), ("results", &results)] {

@@ -2844,14 +2844,14 @@ fn r82_f2_one_model_per_session() {
                 body.pointer("/provider/only")
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-                Some(vec![pin]),
+                Some(vec![pin.as_str()]),
                 "{tag}: a request lacks the {pin} pin: {body}"
             );
             assert_eq!(
                 body.pointer("/provider/order")
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-                Some(vec![pin]),
+                Some(vec![pin.as_str()]),
                 "{tag}: a request lacks the {pin} order: {body}"
             );
         }

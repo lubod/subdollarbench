@@ -554,6 +554,12 @@ PY
         log "preflight: the model-check record for $model has a future time ($time_line)"
         return 1
     fi
+    # R94 M2: the check must match the model's current price row.
+    local row_msg
+    if ! row_msg="$("$ROOT/scripts/model-check.sh" --row-check "$model" 2>&1)"; then
+        log "preflight: $row_msg"
+        return 1
+    fi
     return 0
 }
 

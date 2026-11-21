@@ -291,7 +291,7 @@ fn r24_r1_the_real_tree_covers_the_sdb_sql_inputs() {
         "campaigns/sdb-sql/stages/0_genesis/prompt.md",
         "src/verifier/sql/wire.rs",
         "src/scoring.rs",
-        "src/cost/model_prices.json",
+        "src/cost/calculator.rs",
         "src/prompts/session_budget.txt",
         "src/prompts/omp_effective.md",
         "src/prompts/opencode_agents.md",
