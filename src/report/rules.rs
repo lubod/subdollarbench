@@ -4,7 +4,7 @@
 //! (prompt edit, verifier logic, cheat-stage enable). `fingerprint()`
 //! hashes the graded inputs so CI fails if content drifts without a bump.
 //!
-//! The published cell cap is at list price from `src/cost/model_prices.json`;
+//! The published cell cap is at list price from `models/registry.json`;
 //! the provider bill is recorded for audit only.
 
 use sha2::{Digest, Sha256};
@@ -36,6 +36,8 @@ mod graded_hash;
 ///   verification damaged the real store, the next attempt's snapshot
 ///   captured the damage, and every later rollback restored it (DECISIONS
 ///   #40).
+///   Also R94-1: the cap-basis text names the model registry
+///   (`models/registry.json`), where round 94 moved the price rows.
 ///   Score impact: careers restart at phase 1; mimo `.51` career 0 is void
 ///   (careers 1 and 2 never started); deepseek `.50` stands as `.50`;
 ///   scoring and the $0.99 cap stay at base rates.
@@ -943,7 +945,7 @@ pub const RULES_VERSION: &str = "2026-11-21.52";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
-pub const CAP_PRICE_BASIS: &str = "The $0.99 cell cap is at list price from src/cost/model_prices.json; the provider bill is recorded for audit only.";
+pub const CAP_PRICE_BASIS: &str = "The $0.99 cell cap is at list price from models/registry.json; the provider bill is recorded for audit only.";
 
 /// R28 F1: the linked SQLite oracle that grades every answer. The crate
 /// versions are covered by `Cargo.lock` in the compiled digest.

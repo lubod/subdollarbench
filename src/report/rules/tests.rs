@@ -38,7 +38,7 @@ fn r27_f1_stamp_is_stable_across_processes() {
     let rel = put(&root, "src/scoring.rs", "fixture\n");
     let fp = fingerprint_files(&root, std::slice::from_ref(&rel));
     assert_eq!(
-        fp, "2026-11-21.52+a09762f983a78eff24471b4f2c1874f4",
+        fp, "2026-11-21.52+5b552d6d3c61fef63003f7e7513eaf18",
         "the SHA-256 stamp must be stable"
     );
     assert_eq!(fp, fingerprint_files(&root, &[rel]));
@@ -77,14 +77,14 @@ fn r27_f1_compiled_in_files_hash_the_build() {
 #[test]
 fn r27_f3_rules_page_states_list_price() {
     assert!(CAP_PRICE_BASIS.contains("list price"));
-    assert!(CAP_PRICE_BASIS.contains("src/cost/model_prices.json"));
+    assert!(CAP_PRICE_BASIS.contains("models/registry.json"));
     let proposal = include_str!("../../../docs/PROPOSAL-sdb-sql.md");
     assert!(
         proposal.contains("list price"),
         "proposal missing list price"
     );
     assert!(
-        proposal.contains("src/cost/model_prices.json"),
+        proposal.contains("models/registry.json"),
         "proposal missing the snapshot source"
     );
 }
