@@ -5503,6 +5503,7 @@ fn r94_m2_row_change_needs_a_new_check() {
 
 /// R94 M2: every cell records the model's registry row and its hash.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // the registry test lock; the fake campaign is immediate
 async fn r94_m2_cell_records_its_row() {
     let _lock = crate::cost::calculator::REGISTRY_TEST_LOCK
         .lock()
