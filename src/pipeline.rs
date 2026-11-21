@@ -1216,6 +1216,10 @@ pub struct PipelineOutput {
     pub stop_reason: Option<String>,
     /// R48 F2: seconds spent waiting for the host grading lock.
     pub grading_wait_s: f64,
+    /// R95 F2: the last verification left a store that passed the upgrade
+    /// check at the end of a fully passed ticket (see
+    /// `VerificationOutcome::store_verified`).
+    pub store_verified: bool,
 }
 
 /// How an agent session that returned `Err` ended (round-14 N3): its partial
@@ -1274,6 +1278,11 @@ pub struct VerificationOutcome {
     pub disqualified: bool,
     pub disqualification_reason: Option<String>,
     pub infra_error: bool,
+    /// R95 F2: this SQL ticket passed its verification *and* the store
+    /// afterwards passed the upgrade (sentinel) check. Only such a store
+    /// may become the rollback snapshot; false for every other task and
+    /// for a fault.
+    pub store_verified: bool,
 }
 
 /// R81-1: the one place the `.47` language rule's production wiring is
@@ -3101,6 +3110,13 @@ impl BenchmarkPipeline {
                 }
             };
 
+            // R95 F2: every stage passed, so the closing upgrade read
+            // passed too (F3 fails the ticket otherwise); only a campaign
+            // has the store a rollback restores.
+            let store_verified = accepted.is_some()
+                && !infra_error
+                && total_stages > 0
+                && passed_stages == total_stages;
             let candidate_logs = if pass_rate < 100.0 {
                 let diag = sandbox.get_candidate_logs();
                 logger.log("[DIAGNOSTICS] Candidate container runtime output:");
@@ -3123,6 +3139,7 @@ impl BenchmarkPipeline {
                 disqualified,
                 disqualification_reason,
                 infra_error,
+                store_verified,
                 grading_wait_s,
             }
         })
@@ -3564,6 +3581,7 @@ impl BenchmarkPipeline {
                 disqualified: false,
                 disqualification_reason: None,
                 infra_error: true,
+                store_verified: false,
                 grading_wait_s: 0.0,
             }
         } else {
@@ -4467,6 +4485,7 @@ impl BenchmarkPipeline {
             max_call_usd: omp_stats.max_call_usd,
             stop_reason,
             grading_wait_s,
+            store_verified: v_outcome.store_verified,
         })
     }
 }

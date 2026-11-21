@@ -689,7 +689,7 @@ pub async fn run(
         if chain_dir.join("baseline.json").is_file() {
             std::fs::copy(chain_dir.join("baseline.json"), cdir.join("baseline.json"))?;
         }
-        for f in sentinel_files(&chain_dir) {
+        for f in subdollarbench::verifier::sql::store::sentinel_files(&chain_dir) {
             if let Some(name) = f.file_name() {
                 let _ = std::fs::copy(&f, cdir.join(name));
             }
@@ -1028,25 +1028,6 @@ fn copy_store(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Every `sentinel-<stage>.json` directly under `dir`.
-fn sentinel_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .map(|n| {
-                    let n = n.to_string_lossy();
-                    n.starts_with("sentinel-") && n.ends_with(".json")
-                })
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
 async fn rollback_workspace(workdir: &Path, commit: &str) -> Result<()> {
     for args in [vec!["reset", "--hard", commit], vec!["clean", "-fd"]] {
         let out = std::process::Command::new("git")
@@ -1103,46 +1084,15 @@ async fn run_one_stage(
     }
     // sdb-sql: the harness-owned data directory rolls back with the
     // workspace ("A rollback restores the data directory snapshot along
-    // with the code"). Snapshot the store this attempt starts from; a later
-    // rollback restores it.
-    if lc.spec.task == "sql" {
-        let data = cdir.join("sql-data");
-        let snap = cdir.join("sql-data.snap");
-        let sent_snap = cdir.join("sql-sentinels.snap");
-        if job.rollback_first && snap.is_dir() {
-            let _ = std::fs::remove_dir_all(&data);
-            match copy_store(&snap, &data) {
-                Ok(()) => println!("  [ROLLBACK] sdb-sql store restored from its snapshot"),
-                Err(e) => println!("  [WARN] could not restore the sdb-sql store snapshot: {e}"),
-            }
-            // The sentinel chain describes the state this attempt is about
-            // to start from: restoring the store without it would leave
-            // later tickets checking reads against data the rollback
-            // removed.
-            for f in sentinel_files(cdir) {
-                let _ = std::fs::remove_file(&f);
-            }
-            for f in sentinel_files(&sent_snap) {
-                if let Some(name) = f.file_name() {
-                    let _ = std::fs::copy(&f, cdir.join(name));
-                }
-            }
-            let _ = std::fs::remove_dir_all(&sent_snap);
-        }
-        if data.is_dir() {
-            let _ = std::fs::remove_dir_all(&snap);
-            if let Err(e) = copy_store(&data, &snap) {
-                // A store the harness cannot even copy costs the rollback
-                // protection, not the campaign: never abort here.
-                println!("  [WARN] could not snapshot the sdb-sql store: {e}");
-            }
-            let _ = std::fs::remove_dir_all(&sent_snap);
-            let _ = std::fs::create_dir_all(&sent_snap);
-            for f in sentinel_files(cdir) {
-                if let Some(name) = f.file_name() {
-                    let _ = std::fs::copy(&f, sent_snap.join(name));
-                }
-            }
+    // with the code"). R95 F2: the snapshot is written only by a passed
+    // ticket's verification (`snapshot_verified_store`), so a store that
+    // lost data after its checks is never captured as the state a later
+    // attempt rolls back to.
+    if lc.spec.task == "sql" && job.rollback_first {
+        match subdollarbench::verifier::sql::store::restore_store_snapshot(cdir) {
+            Ok(true) => println!("  [ROLLBACK] sdb-sql store restored from its snapshot"),
+            Ok(false) => {}
+            Err(e) => println!("  [WARN] could not restore the sdb-sql store snapshot: {e}"),
         }
     }
     // Round-10 D1: the per-round feedback report is harness-owned. Remove
@@ -1315,6 +1265,19 @@ async fn run_one_stage(
         let _ = std::fs::write(stage_dir.join("manifest.json"), m);
     }
     let passed = output.benchmark_result.pass_rate >= 100.0 && !output.disqualified;
+    // R95 F2: the store this ticket verified (its checks and the closing
+    // upgrade read) is the one a later rollback restores. A ticket that
+    // failed may have damaged its store; the last verified snapshot stays.
+    if lc.spec.task == "sql" {
+        if let Err(e) = subdollarbench::verifier::sql::store::snapshot_verified_store(
+            cdir,
+            output.store_verified && passed,
+        ) {
+            // A store the harness cannot copy costs the rollback
+            // protection, not the campaign: never abort here.
+            println!("  [WARN] could not snapshot the verified sdb-sql store: {e}");
+        }
+    }
     // F2: an agent that exited after the round was graded is a candidate
     // failure, not a harness fault. Only a real harness fault / infra error
     // measured nothing.

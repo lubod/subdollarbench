@@ -33,6 +33,7 @@ pub mod schema;
 pub mod security;
 pub mod sentinel;
 pub mod shrink;
+pub mod store;
 #[cfg(test)]
 mod toy;
 pub mod txn;

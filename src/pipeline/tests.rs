@@ -2908,6 +2908,125 @@ fn r95_f1_txn_kill_on_a_scratch_copy() {
     cleanup_covtest_network(&tag);
 }
 
+/// R95 F2: a store damaged after its ticket's checks never becomes the
+/// rollback snapshot; the next attempt restores the last verified store
+/// and its sentinels, and the sentinels read. An undamaged run snapshots
+/// the same pair the old start-of-attempt copy did.
+#[test]
+fn r95_f2_rollback_restores_a_verified_store() {
+    use crate::sandbox::docker::{CandidateRunExtras, RunGuard, SandboxManager};
+    use crate::verifier::sql::run::Candidate;
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let tag = format!("r95f2-{}", std::process::id());
+    cleanup_covtest_network(&tag);
+    let dir = covtest_dir(&tag);
+    let workdir = dir.join("workspace");
+    let data = dir.join("sql-data");
+    fs::create_dir_all(&data).unwrap();
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), 94);
+    crate::verifier::sql::ref_server::write_reference_compact(&workdir, port)
+        .expect("the compact reference");
+    let extras = CandidateRunExtras {
+        binds: vec![(data.display().to_string(), "/sdb-data".to_string())],
+        launch_args: vec![
+            "--port".to_string(),
+            port.to_string(),
+            "--data".to_string(),
+            "/sdb-data".to_string(),
+        ],
+        env: vec![
+            ("SDB_PORT".to_string(), port.to_string()),
+            ("SDB_DATA_DIR".to_string(), "/sdb-data".to_string()),
+        ],
+        ..Default::default()
+    };
+    let addr = format!("127.0.0.1:{port}");
+    let t = std::time::Duration::from_secs(20);
+    SandboxManager::with_id(&tag).cleanup();
+    let guard = RunGuard::new(SandboxManager::with_id(&tag));
+    let start = || {
+        guard
+            .manager()
+            .start_candidate_in_docker_with(&workdir, port, &extras)
+            .expect("the reference starts");
+        crate::verifier::sql::driver::wait_until_answering(&addr, t)
+            .expect("the reference answers");
+    };
+    start();
+
+    // A ticket 4 pass: its data, its sentinel file, its store snapshot.
+    let profile = crate::verifier::sql::driver::sentinel_profile(&[0, 1, 2, 3, 4], &[])
+        .expect("a stage-4 grammar");
+    let sent = crate::verifier::sql::sentinel::build(0x5D95_0002, 4, &profile)
+        .expect("the sentinel builds");
+    crate::verifier::sql::sentinel::write(&addr, t, &sent).expect("the sentinel writes");
+    crate::verifier::sql::sentinel::check(&addr, t, &sent).expect("the sentinel reads back");
+    crate::verifier::sql::sentinel::save(&dir.join("sentinel-4.json"), &sent)
+        .expect("the sentinel file");
+    crate::verifier::sql::store::snapshot_verified_store(&dir, true)
+        .expect("the verified snapshot");
+    let snap = dir.join("sql-data.snap");
+    let sent_snap = dir.join("sql-sentinels.snap").join("sentinel-4.json");
+    assert!(snap.is_dir(), "the verified store is snapshotted");
+    assert_eq!(
+        fs::read(snap.join("store.log")).unwrap(),
+        fs::read(data.join("store.log")).unwrap(),
+        "an undamaged run snapshots the store it verified"
+    );
+    assert_eq!(
+        fs::read(&sent_snap).unwrap(),
+        fs::read(dir.join("sentinel-4.json")).unwrap(),
+        "the sentinels travel with the store"
+    );
+
+    // The next ticket loses the table (a store loss after its checks); a
+    // failed verification must not replace the verified snapshot.
+    let table = sent
+        .writes
+        .iter()
+        .find_map(|w| {
+            let mut words = w.split_whitespace();
+            (words.next()?.eq_ignore_ascii_case("CREATE")
+                && words.next()?.eq_ignore_ascii_case("TABLE"))
+            .then(|| {
+                words
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches('(')
+                    .to_string()
+            })
+        })
+        .expect("the sentinel creates a table");
+    let mut conn = crate::verifier::sql::client::TcpCandidate::connect(&addr, t)
+        .expect("a connection to the reference");
+    conn.exec(&format!("DROP TABLE {table}")).expect("the drop");
+    assert!(
+        crate::verifier::sql::sentinel::check(&addr, t, &sent).is_err(),
+        "the damaged store lost the sentinel's table"
+    );
+    crate::verifier::sql::store::snapshot_verified_store(&dir, false)
+        .expect("a failed ticket leaves the snapshot");
+    let _ = guard.manager().kill_candidate();
+
+    // The next attempt's rollback: the last verified store and sentinels.
+    assert!(
+        crate::verifier::sql::store::restore_store_snapshot(&dir).expect("the rollback"),
+        "a verified snapshot exists"
+    );
+    start();
+    crate::verifier::sql::sentinel::check(&addr, t, &sent)
+        .expect("the restored store holds the sentinel");
+    // An undamaged run snapshots as today: the same pair, refreshed.
+    crate::verifier::sql::store::snapshot_verified_store(&dir, true)
+        .expect("the refreshed snapshot");
+    assert_eq!(
+        fs::read(&sent_snap).unwrap(),
+        fs::read(dir.join("sentinel-4.json")).unwrap()
+    );
+    drop(guard);
+    cleanup_covtest_network(&tag);
+}
+
 /// R91 B4 negative, stage 15: a suite that stays green when the feature
 /// is reverted must fail the sensitivity check.
 #[tokio::test]
