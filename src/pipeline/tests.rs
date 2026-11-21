@@ -3063,10 +3063,13 @@ async fn r95_f3_store_loss_charged_where_it_happened() {
     let sent_path = dir.join("sentinel-4.json");
     let sent: crate::verifier::sql::sentinel::Sentinel =
         serde_json::from_str(&fs::read_to_string(&sent_path).unwrap()).unwrap();
-    let table = sent
+    // Every table the sentinel created: the loss must remove data its
+    // reads cover, whatever seed the verification got (dropping only the
+    // first table made the proof seed-dependent).
+    let tables: Vec<String> = sent
         .writes
         .iter()
-        .find_map(|w| {
+        .filter_map(|w| {
             let mut words = w.split_whitespace();
             (words.next()?.eq_ignore_ascii_case("CREATE")
                 && words.next()?.eq_ignore_ascii_case("TABLE"))
@@ -3078,7 +3081,13 @@ async fn r95_f3_store_loss_charged_where_it_happened() {
                     .to_string()
             })
         })
-        .expect("the sentinel creates a table");
+        .collect();
+    assert!(tables.len() >= 2, "the sentinel creates tables: {tables:?}");
+    let table_list = tables
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // 2. The candidate marks an open transaction (BEGIN without
     // COMMIT/ROLLBACK) in its store, and a recovery that finds the mark
@@ -3093,7 +3102,7 @@ async fn r95_f3_store_loss_charged_where_it_happened() {
         &server,
         "    if COMPACT:\n        # The keeper holds the shared-memory database; the log is replayed",
         &format!(
-            "    if os.path.exists(os.path.join(data, \"tx-open\")):\n        # R95 F3 negative: a recovery that follows a crash with an\n        # open transaction drops an older table (the mimo .51 shape).\n        try:\n            keeper.execute(\"DROP TABLE IF EXISTS {table}\")\n            os.remove(os.path.join(data, \"tx-open\"))\n        except Exception as e:\n            print(\"sdb-sql reference: r95 loss fixture: %s\" % e,\n                  file=sys.stderr, flush=True)\n    if COMPACT:\n        # The keeper holds the shared-memory database; the log is replayed"
+            "    if os.path.exists(os.path.join(data, \"tx-open\")):\n        # R95 F3 negative: a recovery that follows a crash with an\n        # open transaction drops the older tables (the mimo .51 shape).\n        try:\n            for t in [{table_list}]:\n                keeper.execute(\"DROP TABLE IF EXISTS \" + t)\n            os.remove(os.path.join(data, \"tx-open\"))\n        except Exception as e:\n            print(\"sdb-sql reference: r95 loss fixture: %s\" % e,\n                  file=sys.stderr, flush=True)\n    if COMPACT:\n        # The keeper holds the shared-memory database; the log is replayed"
         ),
     );
 
@@ -3218,7 +3227,8 @@ async fn r95_f4_replay_mimo_store_loss() {
         which: &str,
     ) -> String {
         let mut config = covtest_config(workdir.to_path_buf(), worker, tag);
-        config.run_id = Some(format!("test_covtest_{tag}_{which}_{}", std::process::id()));
+        // A fixed seed: the fixture's verdict must not depend on the pid.
+        config.run_id = Some(format!("test_covtest_{tag}_{which}_pin1"));
         config.task = TaskType::Sql;
         config.campaign_stage = Some(crate::campaign::CampaignStageConfig {
             campaign: "covtest-sdb-sql".to_string(),
