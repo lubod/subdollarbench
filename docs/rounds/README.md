@@ -93,3 +93,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [92](92.md) | Rules `.51`: the audit leftover grader fixes | merged |
 | [93](93.md) | Harness and grid guards from the audit | merged |
 | [94](94.md) | Models are data: add a model without a round | open |
+| [95](95.md) | Rules `.52`: one store loss cannot poison a career | open |

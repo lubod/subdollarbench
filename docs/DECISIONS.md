@@ -952,6 +952,22 @@ The benchmark answers "what does a dollar buy" (round 23):
   operator's word, not a round; changing an existing model's row is a
   reviewed change.
 
+## 40. One store loss can't poison a career, rules `.52` (2026-11-21)
+
+- **Why:** mimo `.51` career 0 scored 10/10 and 12/12, then 4/22 and
+  0/32: its store lost the earlier sentinel tables during ticket 11's
+  verification (the transaction kill test runs on the real store; the
+  model's recovery discarded data), the rollback snapshot was taken after
+  the damage, and every later ticket failed `broke ticket 4`. Operator,
+  2026-11-21: "95".
+- **Change** (round 95): the transaction kill test on a scratch copy;
+  the rollback snapshot only from a verified store; a store loss charged
+  to the check that caused it, in the same ticket; the mimo case in the
+  replay set.
+- **Impact:** mimo `.51` career 0 is void (careers 1 and 2 never
+  started); `.52` careers start at phase 1; deepseek `.50` stands as
+  `.50`.
+
 ### AGENTS.md history (moved here on 2026-10-31)
 
 - "While a cell runs" rules: operator, 2026-10-28.

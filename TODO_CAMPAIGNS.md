@@ -486,3 +486,9 @@ not planned.
   0.3 %). The peak wait never fired (`openrouter/` prefix, round 93 G0):
   careers 1-2's phase 4 billed 2x, about $1.10 extra. Publishing is the
   operator's call.
+
+- **2026-11-21, mimo `.51` career 0 voided** (operator "95"): 10, 12,
+  4, 0; the store lost its sentinel tables during ticket 11's
+  verification and the rollback snapshot kept the damage. Grid stopped
+  at 04:21 CET hold; careers 1-2 never started; about $2.84 real spent.
+  Round 95 (`.52`) first, then mimo again.
