@@ -3027,6 +3027,131 @@ fn r95_f2_rollback_restores_a_verified_store() {
     cleanup_covtest_network(&tag);
 }
 
+/// R95 F3: a store loss is charged where it happened. The candidate's
+/// recovery after a kill with an open transaction drops an older table
+/// (the mimo `.51` shape): the ticket that ran the kill fails its stage 6
+/// with "store lost after txn-kill", and the real store keeps the data.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test-only serialization guard
+async fn r95_f3_store_loss_charged_where_it_happened() {
+    let _serial = SQL_PERF_LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let tag = "r95f3";
+    cleanup_covtest_network(tag);
+    let worker = 95u8;
+    let port = crate::web::server::worker_port(TaskType::Sql.default_port(), worker);
+    let dir = covtest_dir(tag);
+    let workdir = dir.join("workspace");
+    crate::verifier::sql::ref_server::write_reference(&workdir, port).unwrap();
+
+    // 1. A passed ticket 4 leaves sentinel-4 in the store, through the
+    // normal end-of-verification path.
+    let first = r91_negative_stage(
+        &dir,
+        &workdir,
+        worker,
+        4,
+        vec![0, 1, 2, 3, 4],
+        Vec::new(),
+        "r95f3a",
+    )
+    .await;
+    assert!(first.contains("PASS"), "the ticket-4 pass: {first}");
+    let sent_path = dir.join("sentinel-4.json");
+    let sent: crate::verifier::sql::sentinel::Sentinel =
+        serde_json::from_str(&fs::read_to_string(&sent_path).unwrap()).unwrap();
+    let table = sent
+        .writes
+        .iter()
+        .find_map(|w| {
+            let mut words = w.split_whitespace();
+            (words.next()?.eq_ignore_ascii_case("CREATE")
+                && words.next()?.eq_ignore_ascii_case("TABLE"))
+            .then(|| {
+                words
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches('(')
+                    .to_string()
+            })
+        })
+        .expect("the sentinel creates a table");
+
+    // 2. The candidate marks an open transaction (BEGIN without
+    // COMMIT/ROLLBACK) in its store, and a recovery that finds the mark
+    // drops the table. A kill with an open transaction leaves the mark.
+    let server = workdir.join("sql_server.py");
+    r91_patch(
+        &server,
+        "            if COMPACT and first_keyword(sql) in WRITE_KEYWORDS:",
+        "            if first_keyword(sql) == \"BEGIN\":\n                open(os.path.join(DATA, \"tx-open\"), \"w\").close()\n            elif first_keyword(sql) in (\"COMMIT\", \"ROLLBACK\"):\n                try:\n                    os.remove(os.path.join(DATA, \"tx-open\"))\n                except OSError:\n                    pass\n            if COMPACT and first_keyword(sql) in WRITE_KEYWORDS:",
+    );
+    r91_patch(
+        &server,
+        "    if COMPACT:\n        # The keeper holds the shared-memory database; the log is replayed",
+        &format!(
+            "    if os.path.exists(os.path.join(data, \"tx-open\")):\n        # R95 F3 negative: a recovery that follows a crash with an\n        # open transaction drops an older table (the mimo .51 shape).\n        try:\n            keeper.execute(\"DROP TABLE IF EXISTS {table}\")\n            os.remove(os.path.join(data, \"tx-open\"))\n        except Exception as e:\n            print(\"sdb-sql reference: r95 loss fixture: %s\" % e,\n                  file=sys.stderr, flush=True)\n    if COMPACT:\n        # The keeper holds the shared-memory database; the log is replayed"
+        ),
+    );
+
+    // 3. Ticket 6 repeats stages 0-4 and 6 but not 5 (no crash ladder), so
+    // the transaction kill is the only restart that can lose the table.
+    let line = r91_negative_stage(
+        &dir,
+        &workdir,
+        worker,
+        6,
+        vec![0, 1, 2, 3, 4, 6],
+        vec![0, 1, 2, 3, 4],
+        "r95f3b",
+    )
+    .await;
+    assert!(line.contains("FAIL"), "the loss passed stage 6: {line}");
+    assert!(
+        line.contains("store lost after txn-kill"),
+        "the loss was not charged to the check: {line}"
+    );
+    assert!(
+        line.contains("sentinel from stage 4"),
+        "the loss does not name the data's ticket: {line}"
+    );
+
+    // 4. The real store never saw the loss: a candidate started on it
+    // still answers the sentinel (the transaction check ran on the scratch
+    // copy).
+    let check_dir = dir.join("r95-check");
+    fs::create_dir_all(&check_dir).unwrap();
+    crate::verifier::sql::ref_server::write_reference(&check_dir, port).unwrap();
+    let check_tag = format!("r95f3-check-{}", std::process::id());
+    crate::sandbox::docker::SandboxManager::with_id(&check_tag).cleanup();
+    let guard = crate::sandbox::docker::RunGuard::new(
+        crate::sandbox::docker::SandboxManager::with_id(&check_tag),
+    );
+    let extras = crate::sandbox::docker::CandidateRunExtras {
+        binds: vec![(
+            dir.join("sql-data").display().to_string(),
+            "/sdb-data".to_string(),
+        )],
+        launch_args: vec![
+            "--port".to_string(),
+            port.to_string(),
+            "--data".to_string(),
+            "/sdb-data".to_string(),
+        ],
+        ..Default::default()
+    };
+    guard
+        .manager()
+        .start_candidate_in_docker_with(&check_dir, port, &extras)
+        .expect("the store's candidate starts");
+    let addr = format!("127.0.0.1:{port}");
+    crate::verifier::sql::driver::wait_until_answering(&addr, std::time::Duration::from_secs(20))
+        .expect("the store's candidate answers");
+    crate::verifier::sql::sentinel::check(&addr, std::time::Duration::from_secs(10), &sent)
+        .expect("the real store still holds the sentinel");
+    drop(guard);
+    cleanup_covtest_network(tag);
+}
+
 /// R91 B4 negative, stage 15: a suite that stays green when the feature
 /// is reverted must fail the sensitivity check.
 #[tokio::test]
