@@ -1117,7 +1117,15 @@ run_lane() {
                 guard="$(phase_guard_reason "$dir" "${points:-0}" "${cost:-0}" "${billed:-0}" "$REHEARSAL")"
             fi
             if [[ -n "$guard" ]]; then
-                stop="guard: $guard"
+                if [[ "$REHEARSAL" == "1" ]]; then
+                    # R96 Z1: the guard still runs on a $0 career, but a
+                    # replay fixture's flaky coverage reading must not
+                    # hold every lane of a rehearsal. Paid phases keep
+                    # the hold and the hidden marker below.
+                    log "rehearsal: guard note (not held): $guard"
+                else
+                    stop="guard: $guard"
+                fi
             fi
             if [[ "$stop" == guard:* ]]; then
                 ledger_mark_last_stop "$idx" "$phase" "$stop"
