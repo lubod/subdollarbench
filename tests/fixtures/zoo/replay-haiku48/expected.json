@@ -1,0 +1,12 @@
+{
+  "candidate": "replay-haiku48",
+  "model": "openrouter/anthropic/claude-haiku-5.5",
+  "start_phase": 4,
+  "phases": {
+    "4": {
+      "points": 32,
+      "stop": "ok"
+    }
+  },
+  "note": "The real haiku .48 phase-4 workspace from round 91's replay set, chained from its phase."
+}

@@ -540,6 +540,16 @@ pub async fn run(
             );
         }
     }
+    // R96 Z1: a rehearsal can seed a flawed candidate from a zoo fixture
+    // instead of the perfect reference. The grid passes the fixture path
+    // through the cell's environment; paid cells never set it.
+    let zoo_candidate = if rehearsal {
+        std::env::var("SDB_ZOO_CANDIDATE")
+            .ok()
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
     let phase_spec = match phase {
         Some(p) => Some(
             lc.spec
@@ -554,7 +564,9 @@ pub async fn run(
     match (phase, chain.as_deref()) {
         (None, Some(_)) => anyhow::bail!("--chain requires --phase"),
         (Some(1), Some(_)) => anyhow::bail!("phase 1 has no chain"),
-        (Some(p), None) if p > 1 => {
+        // A replay zoo candidate is a phase-N workspace seeded directly;
+        // it has no earlier cell to chain from (R96 Z1).
+        (Some(p), None) if p > 1 && !(rehearsal && zoo_candidate.is_some()) => {
             anyhow::bail!("phase {p} requires --chain <previous phase cell id>")
         }
         _ => {}
@@ -712,8 +724,40 @@ pub async fn run(
         // The real launch, no agent: the reference candidate passes the
         // ladder's stages. Phase 2+ comes from the chained workspace.
         let port = subdollarbench::web::server::worker_port(5480, worker);
-        subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
-        println!("[REHEARSAL] workspace seeded with the reference candidate on port {port}");
+        match zoo_candidate.as_deref() {
+            Some(dir) => {
+                let src = Path::new(dir);
+                if src.join("workspace").is_dir() {
+                    // A real replay workspace starts at the phase it was
+                    // captured from; its source is the fixture's whole
+                    // candidate (R96 Z1).
+                    copy_workspace(&src.join("workspace"), &workdir)?;
+                } else {
+                    subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
+                    let seed = src.join("seed.sh");
+                    if seed.is_file() {
+                        let status = std::process::Command::new("bash")
+                            .arg(&seed)
+                            .arg(&workdir)
+                            .arg(port.to_string())
+                            .status()?;
+                        if !status.success() {
+                            anyhow::bail!("zoo candidate {} seed.sh failed", src.display());
+                        }
+                    }
+                }
+                println!(
+                    "[REHEARSAL] workspace seeded with zoo candidate {} on port {port}",
+                    src.display()
+                );
+            }
+            None => {
+                subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
+                println!(
+                    "[REHEARSAL] workspace seeded with the reference candidate on port {port}"
+                );
+            }
+        }
     }
 
     println!(

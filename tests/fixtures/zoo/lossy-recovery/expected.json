@@ -1,0 +1,31 @@
+{
+  "candidate": "lossy-recovery",
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "verifier_seed": "zoo-lossy-recovery-v1",
+  "start_phase": 1,
+  "phases": {
+    "1": {
+      "points": 8,
+      "stop": "ok"
+    },
+    "2": {
+      "points": 12,
+      "stop": "ok"
+    },
+    "3": {
+      "points": 22,
+      "stop": "ok"
+    },
+    "4": {
+      "points": 32,
+      "stop": "ok"
+    }
+  },
+  "stages": {
+    "6": "fail"
+  },
+  "errors": {
+    "6": "store lost after txn-kill"
+  },
+  "note": "A recovery that drops committed rows after a kill with an open transaction. Ticket 6 fails where the loss happened; the scratch copy keeps the real store for the next tickets."
+}

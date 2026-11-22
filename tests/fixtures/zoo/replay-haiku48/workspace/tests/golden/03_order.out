@@ -1,0 +1,102 @@
+OK 0
+OK 6
+ROWS 2
+k	s
+\N	a
+1	\N
+2	a
+2	c
+3	\N
+3	b
+END 6
+ROWS 2
+k	s
+3	\N
+3	b
+2	a
+2	c
+1	\N
+\N	a
+END 6
+ROWS 2
+k	s
+3	b
+3	\N
+2	c
+2	a
+1	\N
+\N	a
+END 6
+ROWS 1
+k
+\N
+1
+END 2
+ROWS 2
+k	s
+2	a
+2	c
+END 2
+ROWS 2
+k	s
+3	b
+\N	a
+2	a
+END 3
+ROWS 1
+s
+\N
+a
+b
+c
+END 4
+ROWS 2
+k	s
+\N	a
+1	\N
+2	a
+2	c
+3	\N
+3	b
+END 6
+ROWS 1
+k
+END 0
+ROWS 1
+k
+3
+3
+END 2
+ROWS 2
+kk	ss
+3	\N
+END 1
+ROWS 1
+k
+\N
+1
+2
+2
+3
+3
+END 6
+ROWS 1
+s
+\N
+a
+b
+c
+END 4
+ROWS 1
+k
+3
+2
+1
+\N
+END 4
+ROWS 2
+k	s
+3	b
+2	a
+END 2
+ERR syntax

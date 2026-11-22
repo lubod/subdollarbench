@@ -1,0 +1,31 @@
+{
+  "candidate": "lossy-flush",
+  "model": "openrouter/xiaomi/mimo-v2.6-flash",
+  "verifier_seed": "zoo-lossy-flush-v1",
+  "start_phase": 1,
+  "phases": {
+    "1": {
+      "points": 8,
+      "stop": "ok"
+    },
+    "2": {
+      "points": 12,
+      "stop": "ok"
+    },
+    "3": {
+      "points": 22,
+      "stop": "ok"
+    },
+    "4": {
+      "points": 32,
+      "stop": "ok"
+    }
+  },
+  "stages": {
+    "4": "fail"
+  },
+  "errors": {
+    "4": "store lost after graceful stop"
+  },
+  "note": "R95-2: a one-shot SIGTERM handler drops committed rows after the sentinel write; the next ticket passes from the last verified store."
+}

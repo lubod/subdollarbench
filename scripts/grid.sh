@@ -41,6 +41,12 @@ LEDGER=""
 HOLD=""
 STOP=""
 CELL="${SDB_GRID_CELL:-$ROOT/scripts/sql-cell.sh}"
+# R96 Z1: parallel arrays, one entry per careers-file line. `CAREER_ZOO`
+# names a zoo fixture directory (empty for the reference career) and
+# `CAREER_START` the phase that career starts at.
+declare -a CAREER_ZOO=()
+declare -a CAREER_START=()
+declare -a ZOO_SEEDS=()
 SELF_TEST=0
 SELF_TEST_CASE=""
 REAL=0
@@ -344,7 +350,8 @@ balance_gate() {
 # model check refuses with). The wait polls STOP so a stopped grid exits.
 wait_off_peak() {
     local model="$1" phase="$2" state
-    [[ "$REHEARSAL" == "1" ]] && return 0
+    # R96 Z3: a rehearsal uses the same peak window as a paid grid (on a
+    # fake clock in tests); a deepseek-named career must wait at 01:30.
     state="$(peak_state "$model")"
     [[ "$state" == "off-peak" ]] && return 0
     log "phase $phase of $model waits: $state"
@@ -408,32 +415,69 @@ write_rehearsal_record() {
         log "rehearsal: --max-phase $MAX_PHASE is not a full 4-phase rehearsal; no record"
         return 0
     fi
-    if ! python3 - "$LEDGER" "${#CAREERS[@]}" "${REHEARSAL_START_LINE:-0}" <<'PY'
-import sys
-ledger, careers, start = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    local zoo_args=() i
+    for i in "${!CAREERS[@]}"; do
+        zoo_args+=("$i" "${CAREER_ZOO[$i]:-}" "${CAREER_START[$i]:-1}")
+    done
+    if ! python3 - "$LEDGER" "$RUNS" "${REHEARSAL_START_LINE:-0}" "${zoo_args[@]}" <<'PY'
+import json, os, sys
+
+ledger, runs, start = sys.argv[1], sys.argv[2], int(sys.argv[3])
+triples = sys.argv[4:]
 rows = {}
 for line in open(ledger).read().splitlines()[start:]:
     parts = line.split("\t")
     if len(parts) < 8 or parts[0] in ("career", ""):
         continue
     try:
-        idx, phase, cost = int(parts[0]), int(parts[2]), float(parts[6])
+        idx, phase, points, cost = (
+            int(parts[0]), int(parts[2]), float(parts[5]), float(parts[6]))
     except ValueError:
         sys.exit(f"bad ledger row: {line!r}")
-    rows.setdefault(idx, {})[phase] = (parts[7], cost)
+    rows.setdefault(idx, {})[phase] = (parts[7], cost, points, parts[4])
 if not rows:
     sys.exit("no rows were written by this run")
-for idx in range(careers):
+
+def failed_tickets(campaign_id):
+    """Name the tickets a career's rollup says failed, for the FAIL line."""
+    try:
+        rollup = json.load(open(os.path.join(runs, campaign_id, "campaign.json")))
+    except Exception:
+        return []
+    out = []
+    for st in rollup.get("stages") or []:
+        if not st.get("passed", False):
+            out.append(str(st.get("id", "?")))
+    return out
+
+for n in range(0, len(triples), 3):
+    idx, cand, begin = int(triples[n]), triples[n + 1], int(triples[n + 2])
     phases = rows.get(idx, {})
-    for phase in range(1, 5):
-        stop, cost = phases.get(phase, ("missing", 0.0))
+    if cand:
+        meta = json.load(open(os.path.join(cand, "expected.json")))
+        name = meta.get("candidate", os.path.basename(cand))
+        want = {int(k): v for k, v in meta.get("phases", {}).items()}
+    else:
+        name, want = f"career {idx}", {p: {} for p in range(1, 5)}
+    for phase, exp in sorted(want.items()):
+        stop, cost, points, cid = phases.get(phase, ("missing", 0.0, 0.0, ""))
+        tickets = failed_tickets(cid)
+        ticket = tickets[0] if tickets else "-"
         if stop != "ok":
-            sys.exit(f"career {idx} phase {phase} ended {stop}")
+            sys.exit(f"zoo {name} phase {phase} ticket {ticket}: ended {stop}")
         if cost != 0:
-            sys.exit(f"career {idx} phase {phase} spent ${cost}")
+            sys.exit(f"zoo {name} phase {phase} ticket {ticket}: spent ${cost}")
+        target = exp.get("points")
+        if target is not None and abs(points - float(target)) > 0.001:
+            sys.exit(
+                f"zoo {name} phase {phase} ticket {ticket}: "
+                f"expected {target} points, ledger says {points}")
+    extra = sorted(set(phases) - set(want))
+    if extra:
+        sys.exit(f"zoo {name}: unexpected phase rows {extra} (start {begin})")
 PY
     then
-        log "rehearsal: the ledger's rows from this run are not four ok $0 phases per career; no record"
+        log "rehearsal: a career did not match its expected.json; no record"
         return 1
     fi
     full="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
@@ -497,6 +541,36 @@ preflight() {
             return 1
         fi
     done
+}
+
+# R96 Z4: a paid grid on a rules version needs a free-model canary that
+# passed on that exact graded-content key. `SDB_CANARY_DIR` only redirects
+# the records in self-tests; the real path is the shared gate directory.
+canary_dir() {
+    if [[ -n "${SDB_CANARY_DIR:-}" ]]; then
+        printf '%s' "$SDB_CANARY_DIR"
+    else
+        printf '%s/sdb-gates' "$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)"
+    fi
+}
+
+canary_gate() {
+    local full record
+    full="$(cd "$ROOT" && scripts/flake-bar.sh --key)" || return 1
+    record="$(canary_dir)/canary-$full.txt"
+    if [[ ! -f "$record" ]]; then
+        log "preflight: no free-model canary for key $full ($record); run scripts/free-canary.sh"
+        return 1
+    fi
+    if ! grep -q '^RESULT: PASS$' "$record"; then
+        log "preflight: the canary for $full is not a PASS ($record)"
+        return 1
+    fi
+    if ! grep -q "^key: *$full\$" "$record"; then
+        log "preflight: the canary record does not name key $full ($record); rerun scripts/free-canary.sh"
+        return 1
+    fi
+    return 0
 }
 
 # R68 F3: a paid grid needs a fresh PASS model-check record for every
@@ -782,6 +856,7 @@ PY
 
 run_cell() {
     local career="$1" model="$2" phase="$3" chain="$4" worker="$5" result="$6"
+    local candidate="${7:-}" seed="${8:-}"
     exec setsid env SDB_CELL_CAREER="$career" \
     SDB_CELL_PHASE="$phase" \
     SDB_CELL_CHAIN="$chain" \
@@ -789,6 +864,8 @@ run_cell() {
     SDB_CELL_REHEARSAL="$REHEARSAL" \
     SDB_CELL_HARNESS="$HARNESS" \
     SDB_CONCURRENT_CELLS="$LANES" \
+    SDB_ZOO_CANDIDATE="$candidate" \
+    SDB_ZOO_SEED="$seed" \
     SDB_CELL_RESULT="$result" \
         "$CELL" "$model" "$PHASE_BUDGET" "$PHASE_WALL"
 }
@@ -882,7 +959,7 @@ run_lane() {
             start_phase=$((last_phase + 1))
             chain="$last_id"
         else
-            start_phase=1
+            start_phase="${CAREER_START[$idx]:-1}"
             chain=""
         fi
         if (( start_phase > MAX_PHASE )); then
@@ -925,7 +1002,8 @@ run_lane() {
             marker="$RUNS/.grid-live-marker-$worker-$phase-$$"
             : > "$marker"
             rc=0
-            run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" &
+            run_cell "$idx" "$model" "$phase" "$chain" "$worker" "$result" \
+                "${CAREER_ZOO[$idx]:-}" "${ZOO_SEEDS[$idx]:-}" &
             cell_pid=$!
             live_check "$model" "$worker" "$phase" "$cell_pid" "$marker" "$live_result" &
             monitor_pid=$!
@@ -1115,6 +1193,18 @@ run_grid() {
             model_check_gate "$model" || return 1
         done
     fi
+    # R96 Z4: one free canary per rules version, before any paid model.
+    # The self-test's SDB_GRID_SKIP_PREFLIGHT bypasses model checks, but a
+    # case that sets SDB_GRID_CANARY_TEST still exercises this gate.
+    if [[ "$REHEARSAL" != "1" && "$DRY_RUN" != "1" ]] \
+        && { [[ "${SDB_GRID_SKIP_PREFLIGHT:-0}" != "1" ]] \
+             || [[ "${SDB_GRID_CANARY_TEST:-0}" == "1" ]]; }; then
+        if [[ "${SDB_GRID_NO_CANARY:-0}" == "1" ]]; then
+            log "canary gate bypassed by SDB_GRID_NO_CANARY=1 (operator only)"
+        else
+            canary_gate || return 1
+        fi
+    fi
     # R54-1: a paid grid may not resume from a rehearsal/smoke row: its
     # phase 2+ would chain from the reference workspace and spend on a
     # career the board can never rank.
@@ -1211,10 +1301,51 @@ run_grid() {
 }
 
 load_careers() {
-    local file="$1"
+    local file="$1" i tok dir start
     [[ -f "$file" ]] || { log "careers file not found: $file"; exit 2; }
     mapfile -t CAREERS < <(grep -vE '^[[:space:]]*(#|$)' "$file" | awk '{print $1}')
+    mapfile -t ZOO_TOKENS < <(grep -vE '^[[:space:]]*(#|$)' "$file" | awk '{print $2}')
     [[ ${#CAREERS[@]} -gt 0 ]] || { log "no careers in $file"; exit 2; }
+    CAREER_ZOO=()
+    CAREER_START=()
+    ZOO_SEEDS=()
+    for i in "${!CAREERS[@]}"; do
+        tok="${ZOO_TOKENS[$i]:-}"
+        if [[ "$tok" == zoo:* ]]; then
+            dir="$ROOT/tests/fixtures/zoo/${tok#zoo:}"
+            [[ -f "$dir/expected.json" ]] || {
+                log "career $i names a zoo candidate without expected.json: $dir"; exit 2; }
+            CAREER_ZOO[$i]="$dir"
+            start="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("start_phase", 1))' "$dir/expected.json")"
+            CAREER_START[$i]="$start"
+        else
+            CAREER_ZOO[$i]=""
+            CAREER_START[$i]=1
+        fi
+        ZOO_SEEDS[$i]=""
+    done
+}
+
+# R96 Z1: a $0 rehearsal runs the reference careers named in the file and,
+# besides them, every flawed candidate in tests/fixtures/zoo. The zoo
+# entries are internal (after the file's careers), so the frozen careers
+# copy and a paid grid's resume indices stay untouched.
+zoo_add_careers() {
+    local dir meta model seed start
+    [[ "$REHEARSAL" == "1" && "${SDB_GRID_NO_ZOO:-0}" != "1" ]] || return 0
+    [[ -d "$ROOT/tests/fixtures/zoo" ]] || return 0
+    for dir in "$ROOT"/tests/fixtures/zoo/*; do
+        [[ -f "$dir/expected.json" ]] || continue
+        meta="$dir/expected.json"
+        model="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["model"])' "$meta")"
+        seed="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("verifier_seed", ""))' "$meta")"
+        start="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("start_phase", 1))' "$meta")"
+        CAREERS+=("$model")
+        CAREER_ZOO+=("$dir")
+        CAREER_START+=("$start")
+        ZOO_SEEDS+=("$seed")
+    done
+    log "zoo: ${#CAREER_ZOO[@]} careers, ${#CAREERS[@]} total"
 }
 
 # R90 M1-M5: the fake cell of the named acceptance cases. It writes the
@@ -1953,6 +2084,109 @@ r90_m5_paid_grid_needs_a_cap() {
     r90_case_done r90_m5_paid_grid_needs_a_cap
 }
 
+# R96 Z1: a zoo career whose ledger points do not match expected.json
+# must fail the rehearsal record and name the candidate, phase and ticket.
+r96_z1_zoo_mismatch_fails_the_rehearsal() {
+    r90_case_setup r96_z1_zoo_mismatch_fails_the_rehearsal
+    local zoo="$R90_DIR/zoo" out rc=0
+    mkdir -p "$zoo/bad" "$R90_RUNS/campaign_zoo_bad"
+    printf '{"candidate":"bad","model":"m","start_phase":1,"phases":{"1":{"points":42}}}\n' \
+        > "$zoo/bad/expected.json"
+    printf '0\tm\t1\t1\tcampaign_zoo_bad\t10.0\t0\tok\t2026-11-22T00:00:00Z\topencode\t0\n' \
+        >> "$LEDGER"
+    printf '%s\n' '{"stages":[{"id":7,"passed":false}]}' \
+        > "$R90_RUNS/campaign_zoo_bad/campaign.json"
+    CAREERS=(m)
+    CAREER_ZOO=("$zoo/bad")
+    CAREER_START=(1)
+    ZOO_SEEDS=("")
+    REHEARSAL=1
+    MAX_PHASE=4
+    out="$(write_rehearsal_record 2>&1)" || rc=$?
+    [[ "$rc" -ne 0 ]] || {
+        echo "zoo mismatch: a wrong point total was accepted"; return 1; }
+    grep -q 'zoo bad phase 1 ticket 7' <<<"$out" || {
+        echo "zoo mismatch: the FAIL line does not name candidate/phase/ticket: $out"; return 1; }
+    r90_case_done r96_z1_zoo_mismatch_fails_the_rehearsal
+}
+
+# R96 Z3: a rehearsal career with a real openrouter/... name waits at the
+# peak window on the fake clock; off-peak the simulated key's spend equals
+# the phase bills the ledger records.
+r96_z3_rehearsal_waits_at_peak() {
+    r90_case_setup r96_z3_rehearsal_waits_at_peak
+    printf 'openrouter/deepseek/deepseek-v4.1-flash-1017\n' > "$CAREERS_FILE"
+    REHEARSAL=1
+    MAX_PHASE=1
+    CAP=0
+    load_careers "$CAREERS_FILE"
+    export SDB_MODEL_CHECK_NOW="2026-11-23T01:30:00Z" SDB_GRID_PEAK_POLL=0.1
+    ( run_grid >"$R90_DIR/peak.out" 2>&1 ) &
+    local pid=$!
+    for _ in $(seq 1 50); do
+        grep -q 'waits: peak' "$R90_DIR/peak.out" 2>/dev/null && break
+        sleep 0.1
+    done
+    if ! grep -q 'waits: peak' "$R90_DIR/peak.out"; then
+        r90_stop_grid "$pid"
+        echo "rehearsal peak: the deepseek-named career did not wait"; return 1
+    fi
+    if [[ -f "$SDB_GRID_TRACE" ]]; then
+        r90_stop_grid "$pid"
+        echo "rehearsal peak: a phase started at peak"; return 1
+    fi
+    r90_stop_grid "$pid"
+    [[ $(($(wc -l < "$LEDGER") - 1)) -eq 0 ]] || {
+        echo "rehearsal peak: a phase ran during the wait"; return 1; }
+    unset SDB_MODEL_CHECK_NOW SDB_GRID_PEAK_POLL
+    export SDB_R90_COST=0.1 SDB_R90_BILLED=0.1
+    run_grid
+    local key_spend ledger_billed
+    key_spend="$(python3 - "$R90_RUNS" <<'PY'
+import glob, json, sys
+total = 0.0
+for p in glob.glob(sys.argv[1] + "/*/billed.jsonl"):
+    for line in open(p):
+        try:
+            total += float(json.loads(line).get("cost") or 0.0)
+        except Exception:
+            pass
+print("%.6f" % total)
+PY
+)"
+    ledger_billed="$(awk -F'\t' 'NR > 1 { s += $11 } END { printf "%.6f", s }' "$LEDGER")"
+    [[ "$key_spend" == "$ledger_billed" ]] || {
+        echo "rehearsal key: spend $key_spend != ledger bills $ledger_billed"; return 1; }
+    r90_case_done r96_z3_rehearsal_waits_at_peak
+}
+
+# R96 Z4: a paid grid refuses to start without a passing free canary on
+# the current content key, and starts with one.
+r96_z4_paid_grid_needs_a_canary() {
+    r90_case_setup r96_z4_paid_grid_needs_a_canary
+    printf 'c1\n' > "$CAREERS_FILE"
+    MAX_PHASE=1
+    CAP=0
+    load_careers "$CAREERS_FILE"
+    local full rc=0
+    full="$(cd "$ROOT" && scripts/flake-bar.sh --key)"
+    export SDB_CANARY_DIR="$R90_DIR/gates" SDB_GRID_CANARY_TEST=1
+    mkdir -p "$SDB_CANARY_DIR"
+    run_grid >"$R90_DIR/out" 2>&1 || rc=$?
+    [[ "$rc" -ne 0 ]] || {
+        echo "canary: a paid grid without a canary started"; return 1; }
+    grep -q 'free-model canary' "$R90_DIR/out" || {
+        echo "canary: the refusal does not say why: $(cat "$R90_DIR/out")"; return 1; }
+    [[ $(($(wc -l < "$LEDGER") - 1)) -eq 0 ]] || {
+        echo "canary: a phase ran without a canary"; return 1; }
+    printf 'key: %s\nmodel: openrouter/foo/bar:free\nRESULT: PASS\n' "$full" \
+        > "$SDB_CANARY_DIR/canary-$full.txt"
+    run_grid
+    [[ $(($(wc -l < "$LEDGER") - 1)) -eq 1 ]] || {
+        echo "canary: a paid grid with a canary did not run"; return 1; }
+    r90_case_done r96_z4_paid_grid_needs_a_canary
+}
+
 self_test() {
     local dir fake trace scenario runs out got paid_rows paid_rc first_chain chain p
     dir="$(mktemp -d)"
@@ -2055,7 +2289,7 @@ EOF
     export SDB_GRID_BALANCE_CMD
     if [[ -n "${SELF_TEST_CASE:-}" ]]; then
         case "$SELF_TEST_CASE" in
-            r90_m1_*|r90_m2_*|r90_m3_*|r90_m5_*|r93_*) "$SELF_TEST_CASE" ;;
+            r90_m1_*|r90_m2_*|r90_m3_*|r90_m5_*|r93_*|r96_*) "$SELF_TEST_CASE" ;;
             *) echo "unknown self-test case: $SELF_TEST_CASE" >&2; return 2 ;;
         esac
         return 0
@@ -3105,6 +3339,10 @@ EOF
     unset SDB_FAKE_HEALTH SDB_FAKE_LIVE_SLEEP SDB_GRID_HEALTH_POLL SDB_GRID_CANARY
     unset SDB_FAKE_PREFIX SDB_RUNS_DIR
 
+    r96_z1_zoo_mismatch_fails_the_rehearsal
+    r96_z3_rehearsal_waits_at_peak
+    r96_z4_paid_grid_needs_a_canary
+
     echo "RESULT: PASS (grid self-test)"
 }
 
@@ -3213,6 +3451,7 @@ fi
 
 [[ -n "$CAREERS_FILE" ]] || { log "--careers is required"; usage; }
 load_careers "$CAREERS_FILE"
+zoo_add_careers
 if [[ "$DRY_RUN" -eq 1 ]]; then
     for ((lane = 0; lane < LANES; lane++)); do
         echo "lane $lane worker $((WORKER_BASE + lane)):" \

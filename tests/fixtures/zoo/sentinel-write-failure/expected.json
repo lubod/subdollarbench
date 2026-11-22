@@ -1,0 +1,31 @@
+{
+  "candidate": "sentinel-write-failure",
+  "model": "openrouter/minimax/minimax-m2.5",
+  "verifier_seed": "zoo-sentinel-write-v1",
+  "start_phase": 1,
+  "phases": {
+    "1": {
+      "points": 8,
+      "stop": "ok"
+    },
+    "2": {
+      "points": 12,
+      "stop": "ok"
+    },
+    "3": {
+      "points": 22,
+      "stop": "ok"
+    },
+    "4": {
+      "points": 32,
+      "stop": "ok"
+    }
+  },
+  "stages": {
+    "4": "fail"
+  },
+  "errors": {
+    "4": "sentinel for stage 4 not written"
+  },
+  "note": "R95-3: the candidate refuses the first sentinel dataset's CREATE TABLE grammar; the ticket fails and the snapshot is not taken."
+}

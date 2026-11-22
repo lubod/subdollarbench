@@ -1,0 +1,103 @@
+OK 0
+OK 0
+OK 0
+OK 3
+OK 5
+OK 3
+ROWS 2
+n	amt
+ann	50
+ann	100
+bob	70
+END 3
+ROWS 2
+n	amt
+ann	50
+ann	100
+bob	70
+END 3
+ROWS 2
+n	bid
+ann	10
+ann	11
+bob	12
+cy	\N
+END 4
+ROWS 2
+n	bid
+ann	10
+bob	12
+cy	\N
+END 3
+ERR ambiguous
+ROWS 3
+ai	bi	code
+1	10	x
+2	12	y
+END 2
+ROWS 2
+n	code
+ann	\N
+ann	x
+bob	y
+cy	\N
+END 4
+ROWS 2
+n	m
+ann	bob
+ann	cy
+bob	cy
+END 3
+ROWS 2
+pid	qid
+1	1
+2	2
+3	3
+END 3
+ERR ambiguous
+ERR no_column
+ERR no_column
+ERR no_column
+ERR no_table
+ROWS 4
+id	name	code	bid
+1	ann	x	10
+1	ann	y	12
+1	ann	z	99
+2	bob	x	10
+2	bob	y	12
+2	bob	z	99
+3	cy	x	10
+3	cy	y	12
+3	cy	z	99
+END 9
+ROWS 5
+id	name	id	a_id	amt
+1	ann	10	1	100
+1	ann	11	1	50
+2	bob	12	2	70
+END 3
+ROWS 2
+amt	c
+50	1
+70	1
+100	1
+END 3
+ROWS 1
+n
+ann
+END 1
+ROWS 1
+n
+ann
+bob
+END 2
+ROWS 2
+n	amt
+ann	100
+bob	70
+END 2
+ROWS 2
+n	amt
+ann	50
+END 1
