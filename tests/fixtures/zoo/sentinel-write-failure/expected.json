@@ -1,6 +1,6 @@
 {
   "candidate": "sentinel-write-failure",
-  "model": "openrouter/minimax/minimax-m2.5",
+  "model": "openrouter/inclusionai/ling-3.1-flash",
   "verifier_seed": "zoo-sentinel-write-v1",
   "start_phase": 1,
   "phases": {
