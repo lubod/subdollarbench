@@ -3472,7 +3472,14 @@ REHEARSAL_START_LINE=0
 if [[ "$REHEARSAL" == "1" && -f "$LEDGER" ]]; then
     REHEARSAL_START_LINE="$(wc -l < "$LEDGER")"
 fi
-run_grid_locked
+# R96 Z1: after recording a zoo run's actual points into expected.json,
+# regenerate the record from that run's ledger without starting another
+# grid. The expectations are still checked by write_rehearsal_record.
+if [[ "${SDB_ZOO_RECORD_ONLY:-0}" == "1" ]]; then
+    REHEARSAL_START_LINE=0
+else
+    run_grid_locked
+fi
 if [[ "$REHEARSAL" == "1" ]]; then
     write_rehearsal_record
 fi
