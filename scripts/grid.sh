@@ -2189,6 +2189,8 @@ r96_z4_paid_grid_needs_a_canary() {
 
 self_test() {
     local dir fake trace scenario runs out got paid_rows paid_rc first_chain chain p
+    # The self-test's fake rehearsals check the driver, not the zoo.
+    export SDB_GRID_NO_ZOO=1
     dir="$(mktemp -d)"
     trap 'rm -rf "${dir:-}"' EXIT
     fake="$dir/cell.sh"
@@ -2808,7 +2810,7 @@ EOF
     export SDB_GRID_TRACE
     load_careers "$CAREERS_FILE"
     ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=1 \
-        SDB_LONG_TEST_LOCK="$scenario/long-test.lock"; run_grid ) \
+        SDB_GRID_NO_CANARY=1 SDB_LONG_TEST_LOCK="$scenario/long-test.lock"; run_grid ) \
         >"$scenario/out" 2>&1 || {
         echo "probe race: the grid failed"; cat "$scenario/out"; exit 1; }
     [[ "$(($(wc -l < "$LEDGER") - 1))" -eq 3 ]] || {
@@ -2873,8 +2875,8 @@ EOF
 
     rm -f "$record"
     rc=0
-    ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=0; run_grid ) \
-        >/dev/null 2>&1 || rc=$?
+    ( export SDB_GRID_SKIP_PREFLIGHT=0 SDB_GRID_PREFLIGHT_TEST=0 \
+        SDB_GRID_NO_CANARY=1; run_grid ) >/dev/null 2>&1 || rc=$?
     [[ "$rc" -eq 1 ]] || { echo "a grid without a model-check record was accepted"; exit 1; }
     [[ ! -f "$LEDGER" ]] || { echo "a grid without a model-check record wrote a ledger"; exit 1; }
     echo "[self-test] no model-check record refuses the grid"
