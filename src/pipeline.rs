@@ -150,7 +150,12 @@ fn crash_ladder(
             .map(|n| n.to_string_lossy())
             .unwrap_or_default()
     ));
-    let _ = sandbox.kill_candidate();
+    // R95 F1: quiesce with ticket 4's clean stop, never a kill: the real
+    // store must not pay the recovery this check is about just to be
+    // copied (a clean stop flushes it, and the copy is complete).
+    if let Err(e) = sandbox.stop_candidate_gracefully(5) {
+        logger.log(&format!("  [CRASH] clean stop before the copy failed: {e}"));
+    }
     let _ = std::fs::remove_dir_all(&scratch);
     crash::copy_tree(data, &scratch).map_err(|e| format!("scratch copy: {e}"))?;
     let mut scratch_extras = extras.clone();
@@ -385,6 +390,163 @@ fn crash_ladder(
     body?;
     restored?;
     Ok(())
+}
+
+/// R95 F1: the first sentinel whose reads drift on `addr`, with the stage
+/// that wrote it. A transport error is not drift: an unreachable server is
+/// the caller's own failure, not evidence that data was lost.
+fn sentinel_drift(
+    sentinels: &[crate::verifier::sql::sentinel::Sentinel],
+    addr: &str,
+    timeout: std::time::Duration,
+) -> Option<(u32, String)> {
+    for sent in sentinels {
+        for attempt in 0..2 {
+            match crate::verifier::sql::sentinel::check(addr, timeout, sent) {
+                Ok(()) => break,
+                Err(e) if e.starts_with("drift:") => return Some((sent.stage, e)),
+                // One retry on a transport error: a read that never
+                // reached the server is not evidence that the store kept
+                // its data (nor that it lost it).
+                Err(_) if attempt == 0 => std::thread::sleep(std::time::Duration::from_millis(250)),
+                Err(_) => break,
+            }
+        }
+    }
+    None
+}
+
+/// R95 F3: after a late check that restarts the candidate on the real
+/// store, read the older sentinels once on it. A drift is this ticket's
+/// failure, charged to the check that just ran and naming the ticket the
+/// lost data belongs to; the next ticket no longer discovers it as
+/// `broke ticket N`.
+fn store_after_check(
+    late_failure: &mut Option<(u32, String)>,
+    sentinels: &[crate::verifier::sql::sentinel::Sentinel],
+    addr: &str,
+    check: &str,
+    stage: u32,
+) {
+    if late_failure.is_some() || sentinels.is_empty() {
+        return;
+    }
+    if let Some((owner, e)) = sentinel_drift(sentinels, addr, std::time::Duration::from_secs(10)) {
+        *late_failure = Some((
+            stage,
+            format!("store lost after {check}: sentinel from stage {owner}: {e}"),
+        ));
+    }
+}
+
+/// R95 F3: the human name of a late check, for `store lost after <check>`.
+fn late_check_name(stage: u32) -> &'static str {
+    match stage {
+        5 => "crash-ladder",
+        6 => "txn-kill",
+        11 => "index-perf",
+        12 => "concurrency",
+        14 => "observability",
+        15 => "tests",
+        16 => "memory",
+        17 => "disk-full",
+        18 => "security",
+        19 => "replication",
+        20 => "pgwire",
+        _ => "a late check",
+    }
+}
+
+/// R95 F1/F3: stage 6's isolation and kill-with-open-transaction checks.
+/// The kill forces the candidate to recover; a recovery that drops
+/// committed data (the mimo `.51` case) must cost stage 6, not the store
+/// every later ticket reads. Both checks run on a scratch copy of the
+/// store (taken from a quiesced one, like the crash ladder), the older
+/// sentinels are read *there* after the kill, and the candidate is
+/// restarted onto the real store on every exit path.
+///
+/// The error carries the stage the contract belongs to: 6 for the checks,
+/// 4 for a failed restart back onto the real store (round-92 F5: a
+/// restart after a scenario is the store's ticket-4 contract).
+#[allow(clippy::too_many_arguments)]
+fn txn_scenario(
+    sandbox: &crate::sandbox::docker::SandboxManager,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+    data: &Path,
+    sentinels: &[crate::verifier::sql::sentinel::Sentinel],
+    verifier_seed: &str,
+    logger: &Arc<dyn PipelineLogger>,
+) -> Result<(), (u32, String)> {
+    let scratch = data.with_file_name(format!(
+        "{}-txn",
+        data.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    // R95 F1: the same clean quiesce as the crash ladder; the real store
+    // is never killed for a copy.
+    if let Err(e) = sandbox.stop_candidate_gracefully(5) {
+        logger.log(&format!("  [TXN] clean stop before the copy failed: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    crate::verifier::sql::crash::copy_tree(data, &scratch)
+        .map_err(|e| (6, format!("scratch copy: {e}")))?;
+    let mut scratch_extras = extras.clone();
+    let real_src = data.display().to_string();
+    for b in scratch_extras.binds.iter_mut() {
+        if b.0 == real_src {
+            b.0 = scratch.display().to_string();
+        }
+    }
+    let addr = format!("127.0.0.1:{port}");
+    let t = std::time::Duration::from_secs(20);
+    let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 6) ^ 0x5E27_1E10_0000_0006;
+    let body = (|| -> Result<(), String> {
+        restart_candidate(&sandbox.instance_id, workdir, port, &scratch_extras, false)
+            .map_err(|e| format!("restart on the scratch store: {e}"))?;
+        logger.log(&format!(
+            "  [TXN] isolation and the kill run on a scratch copy of the store ({})",
+            scratch.display()
+        ));
+        crate::verifier::sql::txn::isolation(&addr, t, &format!("c{ns:x}_iso"))?;
+        logger.log("  [TXN] uncommitted rows stay invisible across connections");
+        let mut kill = || sandbox.kill_candidate().map_err(|e| e.to_string());
+        let mut restart = || {
+            restart_candidate(&sandbox.instance_id, workdir, port, &scratch_extras, false)
+                .map_err(|e| format!("restart on the scratch store: {e}"))
+        };
+        crate::verifier::sql::txn::kill_with_open_transaction(
+            &addr,
+            t,
+            &format!("c{ns:x}_kill"),
+            &mut kill,
+            &mut restart,
+        )?;
+        logger.log("  [TXN] a kill with an open transaction discarded it");
+        // R95 F1: the recovery the kill forced must keep what earlier
+        // tickets wrote; the scratch copy shows the loss here, before the
+        // real store is touched.
+        if let Some((stage, e)) = sentinel_drift(sentinels, &addr, t) {
+            return Err(format!(
+                "store lost after txn-kill: sentinel from stage {stage}: {e}"
+            ));
+        }
+        Ok(())
+    })();
+    // Always: back onto the real store, then drop the scratch copy.
+    let restored = restart_after_scenario("txn", &sandbox.instance_id, workdir, port, extras);
+    let _ = std::fs::remove_dir_all(&scratch);
+    match (body, restored) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) => Err((6, e)),
+        (Err(e), Err(r)) => {
+            logger.log(&format!("  [TXN] the store restart also failed: {r}"));
+            Err((6, e))
+        }
+        (Ok(()), Err(e)) => Err((4, e)),
+    }
 }
 
 /// One raw `GET /` probe against a candidate: true when any HTTP response
@@ -1103,6 +1265,10 @@ pub struct PipelineOutput {
     pub stop_reason: Option<String>,
     /// R48 F2: seconds spent waiting for the host grading lock.
     pub grading_wait_s: f64,
+    /// R95 F2: the last verification left a store that passed the upgrade
+    /// check at the end of a fully passed ticket (see
+    /// `VerificationOutcome::store_verified`).
+    pub store_verified: bool,
 }
 
 /// How an agent session that returned `Err` ended (round-14 N3): its partial
@@ -1161,6 +1327,11 @@ pub struct VerificationOutcome {
     pub disqualified: bool,
     pub disqualification_reason: Option<String>,
     pub infra_error: bool,
+    /// R95 F2: this SQL ticket passed its verification *and* the store
+    /// afterwards passed the upgrade (sentinel) check. Only such a store
+    /// may become the rollback snapshot; false for every other task and
+    /// for a fault.
+    pub store_verified: bool,
 }
 
 /// R81-1: the one place the `.47` language rule's production wiring is
@@ -1905,6 +2076,20 @@ impl BenchmarkPipeline {
                             stages.push(st);
                         }
                         let mut late_failure: Option<(u32, String)> = upgrade_failed.take();
+                        let store_addr = format!("127.0.0.1:{port}");
+                        // R95 F3: the suite runs on the real store too; a
+                        // loss there fails this ticket before any late
+                        // check (the current ticket owns the suite).
+                        if late_failure.is_none() && stages.iter().all(|s| s.passed) {
+                            let top = wanted.iter().copied().max().unwrap_or(0);
+                            store_after_check(
+                                &mut late_failure,
+                                &sentinels,
+                                &store_addr,
+                                "the differential suite",
+                                top,
+                            );
+                        }
                         // Scenario-only stages whose late check actually ran;
                         // the rest must not keep their placeholder PASS (L1).
                         let mut late_ran: Vec<u32> = Vec::new();
@@ -1941,53 +2126,56 @@ impl BenchmarkPipeline {
                                         logger.log(&format!("  [CRASH] FAILED: {e}"));
                                         late_failure = Some((5, format!("[crash] {e}")));
                                     }
+                                    store_after_check(
+                                        &mut late_failure,
+                                        &sentinels,
+                                        &store_addr,
+                                        "crash-ladder",
+                                        5,
+                                    );
                                 }
                             }
                             // Stage 6's suite: cross-connection isolation and
                             // a kill with a transaction open (needs the
                             // sandbox's kill/restart, so it runs here too).
+                            // R95 F1: both run on a scratch copy of the
+                            // store; the kill's recovery cannot damage the
+                            // store every later ticket reads, and an older
+                            // sentinel lost on the copy fails this ticket's
+                            // stage 6 here.
                             if late_failure.is_none() && wanted.contains(&6) {
-                                late_ran.push(6);
-                                let ns = crate::verifier::sql::driver::stage_seed(verifier_seed, 6)
-                                    ^ 0x5E27_1E10_0000_0006;
-                                let addr = format!("127.0.0.1:{port}");
-                                let t = std::time::Duration::from_secs(20);
-                                let iso = crate::verifier::sql::txn::isolation(
-                                    &addr,
-                                    t,
-                                    &format!("c{ns:x}_iso"),
-                                );
-                                let killed = iso.and_then(|()| {
-                                    logger.log(
-                                        "  [TXN] uncommitted rows stay invisible across connections",
-                                    );
-                                    let mut kill =
-                                        || sandbox.kill_candidate().map_err(|e| e.to_string());
-                                    let mut restart = || {
-                                        restart_candidate(
-                                            &sandbox.instance_id,
-                                            workdir,
-                                            port,
-                                            &extras,
-                                            false,
-                                        )
-                                    };
-                                    crate::verifier::sql::txn::kill_with_open_transaction(
-                                        &addr,
-                                        t,
-                                        &format!("c{ns:x}_kill"),
-                                        &mut kill,
-                                        &mut restart,
-                                    )
-                                });
-                                match killed {
-                                    Ok(()) => logger.log(
-                                        "  [TXN] a kill with an open transaction discarded it",
-                                    ),
-                                    Err(e) => {
-                                        logger.log(&format!("  [TXN] FAILED: {e}"));
-                                        late_failure = Some((6, format!("[txn] {e}")));
+                                if let Some(data) = &sql_data {
+                                    late_ran.push(6);
+                                    match txn_scenario(
+                                        sandbox,
+                                        workdir,
+                                        port,
+                                        &extras,
+                                        data,
+                                        &sentinels,
+                                        verifier_seed,
+                                        logger,
+                                    ) {
+                                        Ok(()) => {}
+                                        Err((stage, why)) => {
+                                            logger.log(&format!("  [TXN] FAILED: {why}"));
+                                            late_failure = Some((
+                                                stage,
+                                                if stage == 6 {
+                                                    format!("[txn] {why}")
+                                                } else {
+                                                    why
+                                                },
+                                            ));
+                                        }
                                     }
+                                    store_after_check(
+                                        &mut late_failure,
+                                        &sentinels,
+                                        &store_addr,
+                                        "txn-kill",
+                                        6,
+                                    );
                                 }
                             }
                             // Stage 12's suite: serializable concurrency
@@ -2207,6 +2395,13 @@ impl BenchmarkPipeline {
                                         late_failure = Some((4, e));
                                     }
                                 }
+                                store_after_check(
+                                    &mut late_failure,
+                                    &sentinels,
+                                    &store_addr,
+                                    "index-perf",
+                                    11,
+                                );
                             }
                             // Ticket 16's store: a fresh scratch dir, the
                             // same binary restarted under a 64 MiB cap, then
@@ -2290,6 +2485,13 @@ impl BenchmarkPipeline {
                                         late_failure = Some((4, e));
                                     }
                                 }
+                                store_after_check(
+                                    &mut late_failure,
+                                    &sentinels,
+                                    &store_addr,
+                                    "memory",
+                                    16,
+                                );
                             }
                             // Ticket 17's incident: the candidate runs on a
                             // fresh 16 MiB tmpfs; the harness fills it with a
@@ -2372,6 +2574,13 @@ impl BenchmarkPipeline {
                                         late_failure = Some((4, e));
                                     }
                                 }
+                                store_after_check(
+                                    &mut late_failure,
+                                    &sentinels,
+                                    &store_addr,
+                                    "disk-full",
+                                    17,
+                                );
                             }
                             // Ticket 18's hardening: the candidate is
                             // restarted on a fresh scratch store with a
@@ -2483,6 +2692,13 @@ impl BenchmarkPipeline {
                                         late_failure = Some((4, e));
                                     }
                                 }
+                                store_after_check(
+                                    &mut late_failure,
+                                    &sentinels,
+                                    &store_addr,
+                                    "security",
+                                    18,
+                                );
                             }
                             // Ticket 19's cluster: three nodes on the HA
                             // containers (or two for the lite manual
@@ -2858,7 +3074,26 @@ impl BenchmarkPipeline {
                                         late_failure = Some((4, e));
                                     }
                                 }
+                                store_after_check(
+                                    &mut late_failure,
+                                    &sentinels,
+                                    &store_addr,
+                                    "pgwire",
+                                    20,
+                                );
                             }
+                        }
+                        // R95 F3: the closing read of the verification,
+                        // after every late check: a loss that only shows
+                        // after the last restart is still this ticket's.
+                        if let Some(last) = late_ran.last() {
+                            store_after_check(
+                                &mut late_failure,
+                                &sentinels,
+                                &store_addr,
+                                late_check_name(*last),
+                                *last,
+                            );
                         }
                         // L1/L-d: a ticket whose late check never ran (a
                         // differential stage or a late check failed) must
@@ -2999,6 +3234,13 @@ impl BenchmarkPipeline {
                 }
             };
 
+            // R95 F2: every stage passed, so the closing upgrade read
+            // passed too (F3 fails the ticket otherwise); only a campaign
+            // has the store a rollback restores.
+            let store_verified = accepted.is_some()
+                && !infra_error
+                && total_stages > 0
+                && passed_stages == total_stages;
             let candidate_logs = if pass_rate < 100.0 {
                 let diag = sandbox.get_candidate_logs();
                 logger.log("[DIAGNOSTICS] Candidate container runtime output:");
@@ -3021,6 +3263,7 @@ impl BenchmarkPipeline {
                 disqualified,
                 disqualification_reason,
                 infra_error,
+                store_verified,
                 grading_wait_s,
             }
         })
@@ -3462,6 +3705,7 @@ impl BenchmarkPipeline {
                 disqualified: false,
                 disqualification_reason: None,
                 infra_error: true,
+                store_verified: false,
                 grading_wait_s: 0.0,
             }
         } else {
@@ -4365,6 +4609,7 @@ impl BenchmarkPipeline {
             max_call_usd: omp_stats.max_call_usd,
             stop_reason,
             grading_wait_s,
+            store_verified: v_outcome.store_verified,
         })
     }
 }

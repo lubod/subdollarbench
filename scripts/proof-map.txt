@@ -30,6 +30,8 @@ src/verifier/sql/run.rs full
 src/verifier/sql/scenarios.rs full
 src/verifier/sql/schema.rs full
 src/verifier/sql/sentinel.rs full
+# R95 F2: the rollback snapshot's verified-store policy (store + sentinels).
+src/verifier/sql/store.rs full
 src/verifier/sql/shrink.rs full
 src/verifier/sql/wire.rs full
 src/verifier/sql/concurrency.rs test_pipeline_eval_only_sql_stage12_concurrency_live,test_pipeline_eval_only_sql_stage12_concurrency_lite_live
