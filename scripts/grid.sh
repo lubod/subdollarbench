@@ -1338,7 +1338,7 @@ zoo_add_careers() {
         [[ -f "$dir/expected.json" ]] || continue
         meta="$dir/expected.json"
         model="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["model"])' "$meta")"
-        seed="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("verifier_seed", ""))' "$meta")"
+        seed="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sentinel_seed", ""))' "$meta")"
         start="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("start_phase", 1))' "$meta")"
         CAREERS+=("$model")
         CAREER_ZOO+=("$dir")

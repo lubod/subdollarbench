@@ -3236,10 +3236,20 @@ impl BenchmarkPipeline {
                                                 )
                                             ));
                                         };
-                                    let seed = crate::verifier::sql::driver::stage_seed(
-                                        verifier_seed,
-                                        top,
-                                    ) ^ 0x5E27_1E10_0000_0004;
+                                    // R96 Z1: a zoo fixture pins the sentinel
+                                    // seed so its deliberate refusal is
+                                    // deterministic. The suite's seed stays
+                                    // per-attempt: pinning it made a repair
+                                    // round reuse the same table names.
+                                    let seed = match std::env::var("SDB_SENTINEL_SEED") {
+                                        Ok(base) if !base.is_empty() => {
+                                            crate::verifier::sql::driver::stage_seed(&base, top)
+                                        }
+                                        _ => crate::verifier::sql::driver::stage_seed(
+                                            verifier_seed,
+                                            top,
+                                        ),
+                                    } ^ 0x5E27_1E10_0000_0004;
                                     let addr = format!("127.0.0.1:{port}");
                                     let built =
                                         crate::verifier::sql::sentinel::build(seed, top, &profile)
@@ -3391,14 +3401,7 @@ impl BenchmarkPipeline {
                 config.worker
             )
         });
-        // R96 Z1: zoo fixtures pin the seed so their expected verdicts and
-        // the sentinel grammar a flaw refuses are deterministic. A real
-        // cell never sets this; the grid passes it through the rehearsal's
-        // cell environment.
-        let verifier_seed = std::env::var("SDB_VERIFIER_SEED")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| hash_seed(&run_id));
+        let verifier_seed = hash_seed(&run_id);
 
         logger.log(&format!(
             "[PIPELINE] Starting benchmark run '{}' (Model: {}, Task: {}, Effort: {}, Budget: ${:.2})",

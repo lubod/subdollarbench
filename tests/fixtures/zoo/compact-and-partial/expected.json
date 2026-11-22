@@ -1,7 +1,6 @@
 {
   "candidate": "compact-and-partial",
   "model": "openrouter/inclusionai/ling-3.1-flash",
-  "verifier_seed": "zoo-compact-partial-v1",
   "start_phase": 1,
   "phases": {
     "1": {
@@ -25,5 +24,6 @@
     "2": "fail",
     "15": "fail"
   },
-  "note": "Compact append-only log, no ticket-2 grammar, weak test suite and a slow (12 s) restart."
+  "note": "Compact append-only log, no ticket-2 grammar, weak test suite and a slow (12 s) restart.",
+  "sentinel_seed": "zoo-compact-partial-v1"
 }

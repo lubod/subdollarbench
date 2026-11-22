@@ -1,7 +1,6 @@
 {
   "candidate": "sentinel-write-failure",
   "model": "openrouter/inclusionai/ling-3.1-flash",
-  "verifier_seed": "zoo-sentinel-write-v1",
   "start_phase": 1,
   "phases": {
     "1": {
@@ -27,5 +26,6 @@
   "errors": {
     "4": "sentinel for stage 4 not written"
   },
-  "note": "R95-3: the candidate refuses the first sentinel dataset's CREATE TABLE grammar; the ticket fails and the snapshot is not taken."
+  "note": "R95-3: the candidate refuses the first sentinel dataset's CREATE TABLE grammar; the ticket fails and the snapshot is not taken.",
+  "sentinel_seed": "zoo-sentinel-write-v1"
 }
