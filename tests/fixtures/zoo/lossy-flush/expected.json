@@ -4,7 +4,7 @@
   "start_phase": 1,
   "phases": {
     "1": {
-      "points": 8,
+      "points": 4,
       "stop": "ok"
     },
     "2": {
@@ -26,6 +26,6 @@
   "errors": {
     "4": "store lost after graceful stop"
   },
-  "note": "R95-2: a one-shot SIGTERM handler drops committed rows after the sentinel write; the next ticket passes from the last verified store.",
+  "note": "R95-2: the one-shot SIGTERM deletion costs ticket 4 at its own persistence restart. Later phases catch up from the last verified store.",
   "sentinel_seed": "zoo-lossy-flush-v1"
 }
