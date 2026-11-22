@@ -593,7 +593,7 @@ pub async fn run(
     let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id, worker)
         .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
 
-    let (chain_state, chain_career, chain_image) = if let Some(chain_id) = chain.as_deref() {
+    let (mut chain_state, chain_career, chain_image) = if let Some(chain_id) = chain.as_deref() {
         if chain_id.contains('/') || chain_id.contains("..") {
             anyhow::bail!("invalid --chain id {chain_id:?}");
         }
@@ -651,6 +651,28 @@ pub async fn run(
     } else {
         (None, None, None)
     };
+    if chain_state.is_none() && rehearsal && zoo_candidate.is_some() {
+        if let Some(p) = phase {
+            // R96 Z1: a replay zoo candidate is seeded with the workspace
+            // captured at phase p. Give it the earlier phases' green ladder
+            // state so its needs/catch-up gates behave like a real career's
+            // phase p, without running phases 1..p-1 again.
+            let earlier: Vec<u32> = lc
+                .spec
+                .phases
+                .iter()
+                .filter(|ph| ph.id < p)
+                .flat_map(|ph| ph.stages.iter().copied())
+                .collect();
+            let mut st = campaign::LadderState::default();
+            st.passed = earlier.clone();
+            st.outcomes = earlier
+                .into_iter()
+                .map(|id| (id, campaign::LadderOutcome::Full))
+                .collect();
+            chain_state = Some(st);
+        }
+    }
     let cdir = campaign::create_campaign_dir(&runs_dir, &campaign_id)?;
     // The campaign-level live fields (round-8 improvement A): every later
     // status write merges into this document.
