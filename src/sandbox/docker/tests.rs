@@ -1605,7 +1605,7 @@ fn r96_start_chaos(log: &std::path::Path) -> (R96ChaosStub, u16) {
         .arg(port.to_string())
         .arg(log)
         .arg("chaos")
-        .env("SDB_CHAOS_SLOW_SECS", "0.05")
+        .env("SDB_CHAOS_SLOW_SECS", "0.4")
         .env("SDB_CHAOS_HANG_SECS", "0.05")
         .env("SDB_CHAOS_OPEN_SECS", "0.05")
         .stdout(std::process::Stdio::null())
@@ -1634,7 +1634,7 @@ fn r96_z2_chaos_bill_equals_charges() {
     let bill_log = dir.join("billed.jsonl");
     let (_stub, stub_port) = r96_start_chaos(&stub_log);
     let (_proxy, port) = r87_start_proxy(&format!("http://127.0.0.1:{stub_port}"), &bill_log);
-    for _ in 0..8 {
+    for i in 0..8 {
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(10)))
@@ -1644,6 +1644,31 @@ fn r96_z2_chaos_bill_equals_charges() {
             port,
             "{\"model\":\"openai/gpt-6-luna\",\"stream\":true}",
         );
+        if i == 0 {
+            // R87 F1: a buffering proxy hides the slow stream's first
+            // chunk until the whole answer lands 0.4 s later.
+            let started = std::time::Instant::now();
+            let mut first = String::new();
+            let mut head = [0u8; 8192];
+            while started.elapsed() < std::time::Duration::from_millis(200)
+                && !first.contains("data:")
+            {
+                let n = client.read(&mut head).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                first.push_str(&String::from_utf8_lossy(&head[..n]));
+            }
+            assert!(
+                first.contains("HTTP/1.1 200") && first.contains("data:"),
+                "the slow stream's first chunk was hidden: {first}"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(200),
+                "the first chunk waited {:?} for the whole answer",
+                started.elapsed()
+            );
+        }
         let mut text = String::new();
         let _ = client.read_to_string(&mut text);
     }
@@ -1678,20 +1703,39 @@ fn r96_z2_chaos_bill_equals_charges() {
 /// envelope; a 429 and an empty answer keep their own health kinds.
 #[test]
 fn r96_z2_chaos_classified_right() {
+    // The round-89 fix classifies only structured errors and raw stderr,
+    // so feed the trigger words through the real text-event path, not the
+    // stderr classifier directly.
     for prose in [
         "the provider said rate limit, try again later",
         "the provider returned too many requests",
         "unauthorized token: check your auth",
     ] {
+        let event = format!(
+            r#"{{"type":"text","part":{{"text":{}}}}}"#,
+            serde_json::to_string(prose).unwrap()
+        );
+        let v: serde_json::Value = serde_json::from_str(&event).unwrap();
+        let raw = v.to_string();
+        let (_, effects) = crate::sandbox::opencode::OpenCodeRunner::opencode_event_lines(
+            &v,
+            &raw,
+            1,
+            200,
+            0.0,
+            0,
+            "openai/gpt-6-luna",
+            0.99,
+        );
         assert!(
-            crate::sandbox::omp::classify_billing_error(prose).is_none(),
-            "model prose tripped a billing fault: {prose}"
+            effects.billing.is_none(),
+            "model prose tripped a billing fault: {prose}: {effects:?}"
         );
     }
     let log = "\
 [00:00:00] [LIVE] Agent initialized\n\
 [00:00:01] [LIVE] Turn 1 started\n\
-[00:00:02] [STDERR] {\"message\":{\"errorStatus\":429}}\n\
+[00:00:02] [STDERR] Retrying (1/2) provider rate limit, status 429\n\
 [00:00:03] [TELEMETRY] turn=1\n\
 [00:00:04] [LIVE] Turn 2 started\n\
 [00:00:05] [RESPONSE] the provider said rate limit, try again later\n\

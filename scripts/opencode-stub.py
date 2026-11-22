@@ -77,9 +77,17 @@ def chaos_step(n, wfile):
         # A slow stream: the headers arrive before the first token, then
         # the answer takes longer than the agent's five-minute wait.
         wfile.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+        wfile.write(b'data: {"id":"gen-stub","choices":[{"delta":{"content":"slow"}}]}\n\n')
         wfile.flush()
         time.sleep(SLOW)
-        text_sse(wfile, "slow but answered")
+        sse(wfile, [
+            {"id": "gen-stub", "choices": [{"index": 0,
+             "delta": {"content": " but answered"}, "finish_reason": None}]},
+            {"id": "gen-stub", "choices": [{"index": 0, "delta": {},
+             "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 1,
+                       "cost": 0.001}},
+        ])
         return 0.001
     if step == 1:
         rate_limited(wfile)
@@ -107,6 +115,12 @@ def chaos_step(n, wfile):
     wfile.write(b'data: {"id":"gen-stub","choices":[{"delta":{"content":"open"}}]}\n\n')
     wfile.flush()
     time.sleep(OPEN)
+    # The session may be gone, but the proxy still bills the call: finish
+    # the stream with its usage so the charge is visible in the bill.
+    sse(wfile, [{"id": "gen-stub", "choices": [{"delta": {},
+        "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 1,
+                  "cost": 0.001}}])
     return 0.001
 
 
