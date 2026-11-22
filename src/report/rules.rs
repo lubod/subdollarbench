@@ -15,6 +15,25 @@ use std::path::{Path, PathBuf};
 mod graded_hash;
 
 /// Bump this whenever grading changes. History:
+/// - `2026-11-22.53`: round 96. A ticket whose graceful stop damages the
+///   store now fails that ticket: after the SIGTERM that follows the
+///   sentinel write the candidate is restarted on the real store and the
+///   just-written sentinel (plus the older ones) is read before the
+///   rollback snapshot is taken; a drift is `store lost after graceful
+///   stop: sentinel from stage N`, so the snapshot stays at the last
+///   verified store. A sentinel that cannot be written or saved is no
+///   longer a warning: it fails the ticket that owns the sentinel, so a
+///   ticket whose data has no sentinel never becomes the verified state a
+///   later ticket rolls back to (`src/pipeline.rs`).
+///   Why: round 95's review findings R95-2/R95-3. A candidate whose
+///   SIGTERM handler dropped committed rows could still snapshot the
+///   damage, and a candidate that refused the sentinel grammar passed
+///   with a warning while later losses had no sentinel to charge (the
+///   operator's 2026-11-22 "add R95-2 R95-3 to 96" is the bump's
+///   go-ahead).
+///   Score impact: no published `.52` cell has run; every career restarts
+///   at phase 1 under `.53`. Points, tiers, the $0.99 cap and the model
+///   pins are unchanged.
 /// - `2026-11-21.52`: round 95. A store loss costs the ticket that saw
 ///   it, never the rest of the career. The transaction checks
 ///   (cross-connection isolation and the kill with an open transaction)
@@ -941,7 +960,7 @@ mod graded_hash;
 /// - `2026-09-22.2`: DNS candidate joins run network (ref-dns reachable);
 ///   fail-fast forwarding guidance in the DNS prompt; stage-5 latency logging.
 ///
-pub const RULES_VERSION: &str = "2026-11-21.52";
+pub const RULES_VERSION: &str = "2026-11-22.53";
 
 /// R27 F3: the rules-page statement of the cap's price basis. Kept as a
 /// constant so the page, the proposal and the test cannot drift.
