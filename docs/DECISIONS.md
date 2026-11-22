@@ -983,6 +983,11 @@ The benchmark answers "what does a dollar buy" (round 23):
   the rehearsal on the real entry points with real model names and a
   fake clock; and a free-model canary phase required before a paid grid
   on a new rules version.
+- **Added 2026-11-22** (operator: "add R95-2 R95-3 to 96"): the zoo
+  gains a lossy-flush candidate (a SIGTERM handler that drops the last
+  committed rows; R95-2) and a sentinel-write-failure candidate (R95-3).
+  Their expectations are the ideal behavior; the fixes are in round 96
+  and `RULES_VERSION` becomes `.53`.
 
 ### AGENTS.md history (moved here on 2026-10-31)
 
