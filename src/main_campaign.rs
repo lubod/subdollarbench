@@ -1275,7 +1275,13 @@ async fn run_one_stage(
             cap_headroom_usd: job.cap_headroom_usd,
         }),
         baseline_rps,
-        reference_fixture: false,
+        // R96 Z1: a zoo fixture is the reference server with one deliberate
+        // flaw, not candidate code to police. The cell refuses this env var
+        // on a paid run, so only a rehearsal can reach the exemption.
+        reference_fixture: std::env::var("SDB_ZOO_CANDIDATE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some(),
     };
 
     let output = BenchmarkPipeline::execute(config, logger, cancel).await?;
