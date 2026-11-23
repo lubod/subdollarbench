@@ -2147,9 +2147,13 @@ r96_z3_rehearsal_waits_at_peak() {
     r90_stop_grid "$pid"
     [[ $(($(wc -l < "$LEDGER") - 1)) -eq 0 ]] || {
         echo "rehearsal peak: a phase ran during the wait"; return 1; }
-    unset SDB_MODEL_CHECK_NOW SDB_GRID_PEAK_POLL
+    # R97 F2: the off-peak run keeps a fake clock too; on the real clock a
+    # weekday morning is deepseek's 06:00-10:00 peak and the case would
+    # wait until the window closes.
+    export SDB_MODEL_CHECK_NOW="2026-11-23T12:00:00Z" SDB_GRID_PEAK_POLL=0.1
     export SDB_R90_COST=0.1 SDB_R90_BILLED=0.1
     run_grid
+    unset SDB_MODEL_CHECK_NOW SDB_GRID_PEAK_POLL
     local key_spend ledger_billed
     key_spend="$(python3 - "$R90_RUNS" <<'PY'
 import glob, json, sys
@@ -2876,6 +2880,19 @@ EOF
     load_careers "$CAREERS_FILE"
     export SDB_MODEL_CHECK_DIR="$scenario/gates"
     export SDB_MODEL_CHECK_IMAGE_DIGEST="sha256:fresh"
+    # R97 F2: R94's row check runs scripts/model-row.sh, which needs the
+    # release binary. The self-test uses a stub that answers the one row
+    # hash its synthetic record names, so the check itself is unchanged.
+    cat > "$scenario/model-row.sh" <<'SH'
+#!/usr/bin/env bash
+# model-row.sh execs the binary as `model-row --sha <model>`.
+case "${2:-}" in
+    --sha) echo "rowsha-selftest" ;;
+    *) exit 1 ;;
+esac
+SH
+    chmod +x "$scenario/model-row.sh"
+    export SDB_MODEL_ROW_BIN="$scenario/model-row.sh"
     # R82 F1: the default harness is opencode, so the record path carries
     # the opencode- prefix.
     record="$scenario/gates/model-check-opencode-test-model.txt"
@@ -2908,11 +2925,12 @@ EOF
     fi
     echo "[self-test] a failed model-check record refuses"
 
-    printf 'time: %s\nimage: sha256:fresh\nRESULT: PASS\n' "$fresh" > "$record"
+    printf 'time: %s\nimage: sha256:fresh\nrow_sha: rowsha-selftest\nRESULT: PASS\n' \
+        "$fresh" > "$record"
     model_check_gate test-model 2>/dev/null || {
         echo "a fresh matching model-check record was refused"; exit 1; }
     echo "[self-test] a fresh matching model-check record allows"
-    unset SDB_MODEL_CHECK_DIR SDB_MODEL_CHECK_IMAGE_DIGEST
+    unset SDB_MODEL_CHECK_DIR SDB_MODEL_CHECK_IMAGE_DIGEST SDB_MODEL_ROW_BIN
 
     # 18) R68 F2: a full 4-phase $0 rehearsal writes the full-key record;
     # a stopped phase or a partial run writes none.
