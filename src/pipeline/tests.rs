@@ -2554,6 +2554,52 @@ fn r91_copy_fixture(src: &std::path::Path, dst: &std::path::Path) -> std::io::Re
     Ok(())
 }
 
+/// R97 F1: a stage's verdict is its **last** line, not the first. The
+/// suite prints a placeholder PASS before the late checks; a late-check
+/// failure (a second `Stage N: ... FAIL`) used to be hidden by the first
+/// line, which is how the replay fixtures' missing git history went
+/// unnoticed (round-95 R95-1).
+fn replay_stage_verdicts(log: &str) -> std::collections::BTreeMap<String, String> {
+    let mut got = std::collections::BTreeMap::new();
+    for n in 0..=20u32 {
+        let needle = format!("Stage {n}: ");
+        let verdict = log
+            .lines()
+            .filter(|l| l.contains(&needle))
+            .map(|l| {
+                if l.contains("-> PASS") {
+                    "pass"
+                } else {
+                    "fail"
+                }
+            })
+            .last()
+            .unwrap_or("missing");
+        got.insert(n.to_string(), verdict.to_string());
+    }
+    got
+}
+
+/// R97 F1: the parser keeps a late-check failure instead of the suite's
+/// placeholder PASS.
+#[test]
+fn r97_f1_replay_records_late_failures() {
+    let log = "\
+  Stage 15: Tests and CI gate -> PASS 
+  Stage 15: Tests and CI gate -> FAIL [tests] git log: not a git repository
+  Stage 16: Larger than memory -> FAIL not run: late checks skipped after stage 15 failed
+";
+    let got = replay_stage_verdicts(log);
+    assert_eq!(
+        got["15"], "fail",
+        "the late-check failure was hidden: {got:?}"
+    );
+    assert_eq!(
+        got["16"], "fail",
+        "the skipped late check was hidden: {got:?}"
+    );
+}
+
 /// R91 B4: replay the two real candidate workspaces (a haiku `.48`
 /// phase-4 and a deepseek `.48` phase-4, source only) through the whole
 /// ladder and compare each stage's verdict with `expected.json`. A
@@ -2628,22 +2674,7 @@ async fn r91_b4_replay_real_workspaces() {
         if std::env::var("SDB_R91_DEBUG").ok().as_deref() == Some("1") {
             eprintln!("--- replay {name} ---\n{log}");
         }
-        let mut got = std::collections::BTreeMap::new();
-        for n in 0..=20u32 {
-            let needle = format!("Stage {n}: ");
-            let verdict = log
-                .lines()
-                .find(|l| l.contains(&needle))
-                .map(|l| {
-                    if l.contains("-> PASS") {
-                        "pass"
-                    } else {
-                        "fail"
-                    }
-                })
-                .unwrap_or("missing");
-            got.insert(n.to_string(), verdict.to_string());
-        }
+        let got = replay_stage_verdicts(&log);
         let expected: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(fixture.join("expected.json")).unwrap())
                 .unwrap();
