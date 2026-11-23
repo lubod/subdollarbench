@@ -54,7 +54,7 @@ drop = (
     '            names = [r[0] for r in keeper.execute(\n'
     '                "SELECT name FROM sqlite_master WHERE type=\'table\'").fetchall()]\n'
     '            for n in names:\n'
-    '                if n.startswith(%r):\n' % prefixes +
+    '                if n.startswith(' + repr(prefixes) + '):\n'
     '                    keeper.execute("DROP TABLE IF EXISTS " + n)\n'
     '            os.remove(os.path.join(data, "tx-open"))\n'
     '        except Exception as e:\n'
