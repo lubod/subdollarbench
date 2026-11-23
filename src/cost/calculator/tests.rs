@@ -1015,7 +1015,10 @@ fn r94_m1_registry_matches_the_snapshot() {
     let old: serde_json::Value =
         serde_json::from_str(R94_SNAPSHOT).expect("the old snapshot parses");
     let old_models = old["models"].as_array().expect("models");
-    assert_eq!(old_models.len(), reg.models.len(), "row count");
+    assert!(
+        reg.models.len() >= old_models.len(),
+        "the registry keeps every snapshot row (added rows are allowed)"
+    );
     for om in old_models {
         let id = om["id"].as_str().unwrap();
         let row = reg

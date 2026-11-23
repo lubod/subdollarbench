@@ -222,6 +222,26 @@
       "cache_write_per_million": 0.125,
       "added": "2026-11-09",
       "source": "OpenRouter /api/v1/models (2026-11-09)"
+    },
+    {
+      "id": "baidu/ernie-5.5-flash-preview:free",
+      "provider": "baidu",
+      "prompt_per_million": 0.0,
+      "completion_per_million": 0.0,
+      "cache_read_per_million": 0.0,
+      "cache_write_per_million": 0.0,
+      "added": "2026-11-23",
+      "source": "OpenRouter /api/v1/models/baidu/ernie-5.5-flash-preview:free/endpoints"
+    },
+    {
+      "id": "inclusionai/ling-3.2-flash:free",
+      "provider": "antdigital/fp8",
+      "prompt_per_million": 0.0,
+      "completion_per_million": 0.0,
+      "cache_read_per_million": 0.0,
+      "cache_write_per_million": 0.0,
+      "added": "2026-11-23",
+      "source": "OpenRouter /api/v1/models/inclusionai/ling-3.2-flash:free/endpoints"
     }
   ]
 }
