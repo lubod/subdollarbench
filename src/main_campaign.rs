@@ -664,13 +664,14 @@ pub async fn run(
                 .filter(|ph| ph.id < p)
                 .flat_map(|ph| ph.stages.iter().copied())
                 .collect();
-            let mut st = campaign::LadderState::default();
-            st.passed = earlier.clone();
-            st.outcomes = earlier
-                .into_iter()
-                .map(|id| (id, campaign::LadderOutcome::Full))
-                .collect();
-            chain_state = Some(st);
+            chain_state = Some(campaign::LadderState {
+                passed: earlier.clone(),
+                outcomes: earlier
+                    .into_iter()
+                    .map(|id| (id, campaign::LadderOutcome::Full))
+                    .collect(),
+                ..Default::default()
+            });
         }
     }
     let cdir = campaign::create_campaign_dir(&runs_dir, &campaign_id)?;
