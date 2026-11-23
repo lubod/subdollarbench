@@ -352,6 +352,14 @@ in code comments (C2, the grid log, M8 and so on) are defined there.
     at least 900 requests left today, and a phase is stopped if the day's
     remainder falls to 25. About one phase a day: 8 phases, about 8 days.
     Started 2026-11-15 10:20 CET.
+    **Model checks for free models (2026-11-23):** the round-96 canary
+    exposed a gap: `scripts/model-check.sh` refuses a $0 bill
+    (`bill $0.00000000 is $0`), and ling's opencode probe exited 1 with
+    no session db, so neither free model has a PASS check. Free rows are
+    $0 by design; the check needs a zero-price path that still proves
+    the sent/served id, the pin and a tool round trip. The canary (one
+    full free phase on the full key) is the gate meanwhile; mimo's paid
+    check passed on the same image. Candidate for the next round.
     **Next rules version (not `.47`): the turn limit** (operator,
     2026-11-15 "just log it"). Each ticket has `max_turns` 200 besides its
     share of the $0.99. Cheap models reach 200 turns with budget left, so
