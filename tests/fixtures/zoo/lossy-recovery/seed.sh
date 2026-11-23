@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # R96 Z1: the mimo `.51` shape. The reference marks an open transaction in
 # its store and a recovery that finds the mark after a kill drops the
-# *older sentinel datasets* (the data earlier tickets wrote), leaving the
-# current stage's own tables alone. Round 95 runs the kill on a scratch
-# copy and reads the older sentinels there, so the loss costs stage 6 of
-# the ticket that ran the check; before round 95 the damaged store was
-# snapshotted and the next tickets failed `broke ticket 4`.
+# *stage-4 sentinel dataset* (the data ticket 4 wrote), leaving the
+# current stage's own tables and later sentinels alone. Round 95 runs the
+# kill on a scratch copy and reads the older sentinels there, so the loss
+# costs stage 6 of the ticket that ran the check; before round 95 the
+# damaged store was snapshotted and ticket 5 failed `broke ticket 4`.
 set -euo pipefail
 work="$1"
 python3 - "$work/sql_server.py" <<'PY'
 import sys
 
 VERIFIER_SEED = "zoo-lossy-recovery-v1"
-SENTINEL_STAGES = range(0, 7)
+SENTINEL_STAGES = [4]
 
 
 def stage_seed(seed, stage):
