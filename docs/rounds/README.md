@@ -95,4 +95,4 @@ in `archive/TODO_CAMPAIGNS-to-2026-10-22.md`.
 | [94](94.md) | Models are data: add a model without a round | merged |
 | [95](95.md) | Rules `.52`: one store loss cannot poison a career | merged |
 | [96](96.md) | A messy rehearsal: catch real-candidate bugs before paid runs | merged |
-| [97](97.md) | The replay fixtures' history and the grid self-test | draft |
+| [97](97.md) | The replay fixtures' history and the grid self-test | open |
