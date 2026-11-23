@@ -1,0 +1,15 @@
+{
+  "candidate": "replay-deepseek50",
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "start_phase": 4,
+  "phases": {
+    "4": {
+      "points": 0,
+      "stop": "ok"
+    }
+  },
+  "note": "The real deepseek .50 phase-4 workspace, chained from phase 4. No fixture git history: stage 15 fails and the later tickets are not run (round-95 R95-1).",
+  "stages": {
+    "15": "fail"
+  }
+}

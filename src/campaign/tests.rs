@@ -3150,7 +3150,7 @@ fn r45_f3_prompt_names_the_perf_score() {
 /// the current rules; a same-version phase does.
 #[test]
 fn r45_f4_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-21.52");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-22.53");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.43".to_string();
@@ -3169,7 +3169,7 @@ fn r45_f4_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.43"), "{msg}");
-    assert!(msg.contains("not 2026-11-21.52"), "{msg}");
+    assert!(msg.contains("not 2026-11-22.53"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -3189,7 +3189,7 @@ fn r45_f4_no_chain_across_the_bump() {
 /// current `.47` rules; a current phase chains normally.
 #[test]
 fn r49_f5_no_chain_across_the_bump() {
-    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-21.52");
+    assert_eq!(crate::report::rules::RULES_VERSION, "2026-11-22.53");
     let state = phase1_state();
     let mut prev = chain_rollup(1, true);
     prev.rules_version = "2026-10-19.44".to_string();
@@ -3208,7 +3208,7 @@ fn r49_f5_no_chain_across_the_bump() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("ran rules 2026-10-19.44"), "{msg}");
-    assert!(msg.contains("not 2026-11-21.52"), "{msg}");
+    assert!(msg.contains("not 2026-11-22.53"), "{msg}");
     validate_chain(
         &chain_rollup(1, true),
         Some(&state),
@@ -5230,6 +5230,26 @@ fn r90_m5_paid_grid_needs_a_cap() {
 #[test]
 fn r93_g0_peak_matches_grid_model_names() {
     r90_grid_case("r93_g0_peak_matches_grid_model_names");
+}
+
+/// R96 Z1: a zoo career's points must match its expected.json, and a
+/// mismatch must name the candidate, phase and the ticket that failed.
+#[test]
+fn r96_z1_zoo_mismatch_fails_the_rehearsal() {
+    r90_grid_case("r96_z1_zoo_mismatch_fails_the_rehearsal");
+}
+
+/// R96 Z3: a rehearsal career with a real openrouter/deepseek name waits
+/// at a fake-clock peak and the simulated key's spend equals the bills.
+#[test]
+fn r96_z3_rehearsal_waits_at_peak() {
+    r90_grid_case("r96_z3_rehearsal_waits_at_peak");
+}
+
+/// R96 Z4: no paid grid on a new rules version without a free canary.
+#[test]
+fn r96_z4_paid_grid_needs_a_canary() {
+    r90_grid_case("r96_z4_paid_grid_needs_a_canary");
 }
 
 #[test]

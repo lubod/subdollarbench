@@ -439,6 +439,47 @@ fn store_after_check(
     }
 }
 
+/// R96 Z1 (R95-2): the graceful stop that precedes the snapshot can damage
+/// the store (a candidate's SIGTERM handler may drop rows). Restart the
+/// candidate on the real store and read the sentinel just written plus the
+/// older ones; a drift fails the ticket that wrote the sentinel, so the
+/// snapshot stays at the last verified store. A restart that never answers
+/// is the ticket-4 restart contract, not a verified store either.
+fn store_after_graceful_stop(
+    sandbox: &crate::sandbox::docker::SandboxManager,
+    workdir: &Path,
+    port: u16,
+    extras: &crate::sandbox::docker::CandidateRunExtras,
+    sentinels: &[crate::verifier::sql::sentinel::Sentinel],
+    written: &crate::verifier::sql::sentinel::Sentinel,
+    logger: &Arc<dyn PipelineLogger>,
+) -> Option<(u32, String)> {
+    let addr = format!("127.0.0.1:{port}");
+    if let Err(e) = sandbox.start_candidate_in_docker_with(workdir, port, extras) {
+        logger.log(&format!(
+            "[WARN] restart after the graceful stop failed: {e}"
+        ));
+        return Some((4, format!("restart after graceful stop: {e}")));
+    }
+    if let Err(e) = crate::verifier::sql::driver::wait_until_answering(
+        &addr,
+        std::time::Duration::from_secs(20),
+    ) {
+        logger.log(&format!(
+            "[WARN] the candidate did not answer after the graceful stop: {e}"
+        ));
+        return Some((4, format!("restart after graceful stop: {e}")));
+    }
+    let mut all = sentinels.to_vec();
+    all.push(written.clone());
+    sentinel_drift(&all, &addr, std::time::Duration::from_secs(10)).map(|(owner, e)| {
+        (
+            written.stage,
+            format!("store lost after graceful stop: sentinel from stage {owner}: {e}"),
+        )
+    })
+}
+
 /// R95 F3: the human name of a late check, for `store lost after <check>`.
 fn late_check_name(stage: u32) -> &'static str {
     match stage {
@@ -3164,10 +3205,51 @@ impl BenchmarkPipeline {
                                 crate::verifier::sql::driver::sentinel_profile(&wanted, &variants)
                             {
                                 if let Some(dir) = &sentinel_dir {
-                                    let seed = crate::verifier::sql::driver::stage_seed(
-                                        verifier_seed,
-                                        top,
-                                    ) ^ 0x5E27_1E10_0000_0004;
+                                    // R96 Z1 (R95-3): a sentinel write is
+                                    // part of the passing ticket's contract.
+                                    // If it fails, the ticket fails and the
+                                    // snapshot is not taken; a warning would
+                                    // hide the loss from the next ticket.
+                                    let fail_stage =
+                                        |stages: &mut Vec<crate::verifier::StageResult>,
+                                         stage: u32,
+                                         why: String| {
+                                            let pos = stages
+                                                .iter()
+                                                .position(|s| s.stage == stage)
+                                                .unwrap_or(0);
+                                            if let Some(st) = stages.get_mut(pos) {
+                                                st.passed = false;
+                                                st.error = Some(why.clone());
+                                                log_stage(logger, st);
+                                            }
+                                            logger.log(&format!(
+                                                "  Stage {stage}: {} -> FAIL {why}",
+                                                crate::config::stage_label(
+                                                    stage,
+                                                    &format!(
+                                                        "Stage {stage}: {}",
+                                                        crate::verifier::sql::driver::stage_title(
+                                                            stage
+                                                        )
+                                                    )
+                                                )
+                                            ));
+                                        };
+                                    // R96 Z1: a zoo fixture pins the sentinel
+                                    // seed so its deliberate refusal is
+                                    // deterministic. The suite's seed stays
+                                    // per-attempt: pinning it made a repair
+                                    // round reuse the same table names.
+                                    let seed = match std::env::var("SDB_SENTINEL_SEED") {
+                                        Ok(base) if !base.is_empty() => {
+                                            crate::verifier::sql::driver::stage_seed(&base, top)
+                                        }
+                                        _ => crate::verifier::sql::driver::stage_seed(
+                                            verifier_seed,
+                                            top,
+                                        ),
+                                    } ^ 0x5E27_1E10_0000_0004;
                                     let addr = format!("127.0.0.1:{port}");
                                     let built =
                                         crate::verifier::sql::sentinel::build(seed, top, &profile)
@@ -3202,22 +3284,50 @@ impl BenchmarkPipeline {
                                                         crate::sandbox::docker::SandboxManager::with_id(
                                                             &sandbox.instance_id,
                                                         );
-                                                    if let Err(e) = sb.stop_candidate_gracefully(5)
-                                                    {
-                                                        logger.log(&format!(
-                                                            "[WARN] graceful flush after the \
-                                                             sentinel failed: {e}"
-                                                        ));
+                                                    // R96 Z1 (R95-2): the
+                                                    // graceful stop itself can
+                                                    // damage the store; only a
+                                                    // store that survives it and
+                                                    // answers the sentinels is
+                                                    // verified.
+                                                    let post_stop =
+                                                        match sb.stop_candidate_gracefully(5) {
+                                                            Err(e) => {
+                                                                logger.log(&format!(
+                                                                "[WARN] graceful flush after the \
+                                                                 sentinel failed: {e}"
+                                                            ));
+                                                                Some((
+                                                                    4,
+                                                                    format!(
+                                                                        "graceful stop after the \
+                                                                     sentinel: {e}"
+                                                                    ),
+                                                                ))
+                                                            }
+                                                            Ok(()) => store_after_graceful_stop(
+                                                                &sb, workdir, port, &extras,
+                                                                &sentinels, &s, logger,
+                                                            ),
+                                                        };
+                                                    if let Some((stage, why)) = post_stop {
+                                                        fail_stage(&mut stages, stage, why);
                                                     }
                                                 }
-                                                Err(e) => logger.log(&format!(
-                                                    "[WARN] sentinel not saved: {e}"
-                                                )),
+                                                Err(e) => fail_stage(
+                                                    &mut stages,
+                                                    top,
+                                                    format!(
+                                                        "sentinel for stage {top} not saved: {e}"
+                                                    ),
+                                                ),
                                             }
                                         }
-                                        Err(e) => logger.log(&format!(
-                                            "[WARN] sentinel for stage {top} not written: {e}"
-                                        )),
+                                        Err(e) => fail_stage(
+                                            &mut stages,
+                                            top,
+                                            format!("sentinel for stage {top} not written: {e}"),
+                                        ),
                                     }
                                 }
                             }

@@ -1,0 +1,28 @@
+{
+  "candidate": "compact-and-partial",
+  "model": "openrouter/inclusionai/ling-3.1-flash",
+  "start_phase": 1,
+  "phases": {
+    "1": {
+      "points": 0,
+      "stop": "ok"
+    },
+    "2": {
+      "points": 0,
+      "stop": "ok"
+    },
+    "3": {
+      "points": 0,
+      "stop": "ok"
+    },
+    "4": {
+      "points": 0,
+      "stop": "ok"
+    }
+  },
+  "stages": {
+    "0": "fail"
+  },
+  "note": "Compact log, no ticket 2, a slow restart and a weak test suite. The compact log loses rows under the stage-0 concurrency check, so the career stops there; this also exercises catch-up with a permanently broken genesis ticket.",
+  "sentinel_seed": "zoo-compact-partial-v1"
+}

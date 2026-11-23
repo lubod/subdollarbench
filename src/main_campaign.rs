@@ -540,6 +540,16 @@ pub async fn run(
             );
         }
     }
+    // R96 Z1: a rehearsal can seed a flawed candidate from a zoo fixture
+    // instead of the perfect reference. The grid passes the fixture path
+    // through the cell's environment; paid cells never set it.
+    let zoo_candidate = if rehearsal {
+        std::env::var("SDB_ZOO_CANDIDATE")
+            .ok()
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
     let phase_spec = match phase {
         Some(p) => Some(
             lc.spec
@@ -554,7 +564,9 @@ pub async fn run(
     match (phase, chain.as_deref()) {
         (None, Some(_)) => anyhow::bail!("--chain requires --phase"),
         (Some(1), Some(_)) => anyhow::bail!("phase 1 has no chain"),
-        (Some(p), None) if p > 1 => {
+        // A replay zoo candidate is a phase-N workspace seeded directly;
+        // it has no earlier cell to chain from (R96 Z1).
+        (Some(p), None) if p > 1 && !(rehearsal && zoo_candidate.is_some()) => {
             anyhow::bail!("phase {p} requires --chain <previous phase cell id>")
         }
         _ => {}
@@ -581,7 +593,7 @@ pub async fn run(
     let _campaign_lock = campaign::CampaignLock::acquire(&campaign_id, worker)
         .map_err(|e| anyhow::anyhow!("{e} — stop it first or wait for it to finish"))?;
 
-    let (chain_state, chain_career, chain_image) = if let Some(chain_id) = chain.as_deref() {
+    let (mut chain_state, chain_career, chain_image) = if let Some(chain_id) = chain.as_deref() {
         if chain_id.contains('/') || chain_id.contains("..") {
             anyhow::bail!("invalid --chain id {chain_id:?}");
         }
@@ -639,6 +651,29 @@ pub async fn run(
     } else {
         (None, None, None)
     };
+    if chain_state.is_none() && rehearsal && zoo_candidate.is_some() {
+        if let Some(p) = phase {
+            // R96 Z1: a replay zoo candidate is seeded with the workspace
+            // captured at phase p. Give it the earlier phases' green ladder
+            // state so its needs/catch-up gates behave like a real career's
+            // phase p, without running phases 1..p-1 again.
+            let earlier: Vec<u32> = lc
+                .spec
+                .phases
+                .iter()
+                .filter(|ph| ph.id < p)
+                .flat_map(|ph| ph.stages.iter().copied())
+                .collect();
+            chain_state = Some(campaign::LadderState {
+                passed: earlier.clone(),
+                outcomes: earlier
+                    .into_iter()
+                    .map(|id| (id, campaign::LadderOutcome::Full))
+                    .collect(),
+                ..Default::default()
+            });
+        }
+    }
     let cdir = campaign::create_campaign_dir(&runs_dir, &campaign_id)?;
     // The campaign-level live fields (round-8 improvement A): every later
     // status write merges into this document.
@@ -712,8 +747,40 @@ pub async fn run(
         // The real launch, no agent: the reference candidate passes the
         // ladder's stages. Phase 2+ comes from the chained workspace.
         let port = subdollarbench::web::server::worker_port(5480, worker);
-        subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
-        println!("[REHEARSAL] workspace seeded with the reference candidate on port {port}");
+        match zoo_candidate.as_deref() {
+            Some(dir) => {
+                let src = Path::new(dir);
+                if src.join("workspace").is_dir() {
+                    // A real replay workspace starts at the phase it was
+                    // captured from; its source is the fixture's whole
+                    // candidate (R96 Z1).
+                    copy_workspace(&src.join("workspace"), &workdir)?;
+                } else {
+                    subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
+                    let seed = src.join("seed.sh");
+                    if seed.is_file() {
+                        let status = std::process::Command::new("bash")
+                            .arg(&seed)
+                            .arg(&workdir)
+                            .arg(port.to_string())
+                            .status()?;
+                        if !status.success() {
+                            anyhow::bail!("zoo candidate {} seed.sh failed", src.display());
+                        }
+                    }
+                }
+                println!(
+                    "[REHEARSAL] workspace seeded with zoo candidate {} on port {port}",
+                    src.display()
+                );
+            }
+            None => {
+                subdollarbench::verifier::sql::ref_server::write_reference(&workdir, port)?;
+                println!(
+                    "[REHEARSAL] workspace seeded with the reference candidate on port {port}"
+                );
+            }
+        }
     }
 
     println!(
@@ -1231,7 +1298,13 @@ async fn run_one_stage(
             cap_headroom_usd: job.cap_headroom_usd,
         }),
         baseline_rps,
-        reference_fixture: false,
+        // R96 Z1: a zoo fixture is the reference server with one deliberate
+        // flaw, not candidate code to police. The cell refuses this env var
+        // on a paid run, so only a rehearsal can reach the exemption.
+        reference_fixture: std::env::var("SDB_ZOO_CANDIDATE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some(),
     };
 
     let output = BenchmarkPipeline::execute(config, logger, cancel).await?;

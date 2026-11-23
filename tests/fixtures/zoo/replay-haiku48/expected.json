@@ -1,0 +1,15 @@
+{
+  "candidate": "replay-haiku48",
+  "model": "openrouter/anthropic/claude-haiku-5.5",
+  "start_phase": 4,
+  "phases": {
+    "4": {
+      "points": 0,
+      "stop": "ok"
+    }
+  },
+  "note": "The real haiku .48 phase-4 workspace, chained from phase 4. The fixture has no git history, so the stage-15 sensitivity check fails and the later tickets are not run (round-95 R95-1).",
+  "stages": {
+    "15": "fail"
+  }
+}

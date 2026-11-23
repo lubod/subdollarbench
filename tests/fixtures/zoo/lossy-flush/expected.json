@@ -1,0 +1,31 @@
+{
+  "candidate": "lossy-flush",
+  "model": "openrouter/xiaomi/mimo-v2.6-flash",
+  "start_phase": 1,
+  "phases": {
+    "1": {
+      "points": 4,
+      "stop": "ok"
+    },
+    "2": {
+      "points": 12,
+      "stop": "ok"
+    },
+    "3": {
+      "points": 8.8,
+      "stop": "ok"
+    },
+    "4": {
+      "points": 0,
+      "stop": "ok"
+    }
+  },
+  "stages": {
+    "4": "fail"
+  },
+  "errors": {
+    "4": "store lost after graceful stop"
+  },
+  "note": "R95-2: the one-shot SIGTERM deletion costs ticket 4 at its own persistence restart. Later phases catch up from the last verified store.",
+  "sentinel_seed": "zoo-lossy-flush-v1"
+}

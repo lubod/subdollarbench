@@ -1584,3 +1584,170 @@ exec(compile(open(script).read(), script, "exec"), {"__name__": "__main__"})
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// R96 Z2: the chaos stub through the real billing proxy.
+// ---------------------------------------------------------------------------
+
+struct R96ChaosStub(std::process::Child);
+impl Drop for R96ChaosStub {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn r96_start_chaos(log: &std::path::Path) -> (R96ChaosStub, u16) {
+    let port = free_port();
+    let script = crate::config::get_repo_root().join("scripts/opencode-stub.py");
+    let child = std::process::Command::new("python3")
+        .arg(&script)
+        .arg(port.to_string())
+        .arg(log)
+        .arg("chaos")
+        .env("SDB_CHAOS_SLOW_SECS", "0.4")
+        .env("SDB_CHAOS_HANG_SECS", "0.05")
+        .env("SDB_CHAOS_OPEN_SECS", "0.05")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start the chaos stub");
+    let stub = R96ChaosStub(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (stub, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the chaos stub did not start on port {port}");
+}
+
+/// R96 Z2: every call of the chaos schedule is billed exactly once, and
+/// the phase bill is the sum of the stub's recorded charges. The 429 and
+/// the dropped timeout are billed at $0; the six answered calls at $0.001.
+#[test]
+fn r96_z2_chaos_bill_equals_charges() {
+    use std::io::Read;
+    let dir = r87_temp("chaos-bill");
+    let stub_log = dir.join("stub.jsonl");
+    let bill_log = dir.join("billed.jsonl");
+    let (_stub, stub_port) = r96_start_chaos(&stub_log);
+    let (_proxy, port) = r87_start_proxy(&format!("http://127.0.0.1:{stub_port}"), &bill_log);
+    for i in 0..8 {
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        r87_request(
+            &mut client,
+            port,
+            "{\"model\":\"openai/gpt-6-luna\",\"stream\":true}",
+        );
+        if i == 0 {
+            // R87 F1: a buffering proxy hides the slow stream's first
+            // chunk until the whole answer lands 0.4 s later.
+            let started = std::time::Instant::now();
+            let mut first = String::new();
+            let mut head = [0u8; 8192];
+            while started.elapsed() < std::time::Duration::from_millis(200)
+                && !first.contains("data:")
+            {
+                let n = client.read(&mut head).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                first.push_str(&String::from_utf8_lossy(&head[..n]));
+            }
+            assert!(
+                first.contains("HTTP/1.1 200") && first.contains("data:"),
+                "the slow stream's first chunk was hidden: {first}"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(200),
+                "the first chunk waited {:?} for the whole answer",
+                started.elapsed()
+            );
+        }
+        let mut text = String::new();
+        let _ = client.read_to_string(&mut text);
+    }
+    let bill: Vec<serde_json::Value> = std::fs::read_to_string(&bill_log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert_eq!(
+        bill.len(),
+        8,
+        "every chaos call must be billed once: {bill:?}"
+    );
+    let charges: Vec<f64> = std::fs::read_to_string(&stub_log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["case"].as_str() == Some("chaos"))
+        .filter_map(|v| v["charge"].as_f64())
+        .collect();
+    assert_eq!(charges.len(), 8, "the stub must record eight charges");
+    let billed: f64 = bill.iter().map(|v| v["cost"].as_f64().unwrap_or(0.0)).sum();
+    let charged: f64 = charges.iter().sum();
+    assert!(
+        (billed - charged).abs() < 1e-9,
+        "phase bill ${billed} != stub charges ${charged}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R96 Z2: the chaos stub's trigger words are prose, not an error
+/// envelope; a 429 and an empty answer keep their own health kinds.
+#[test]
+fn r96_z2_chaos_classified_right() {
+    // The round-89 fix classifies only structured errors and raw stderr,
+    // so feed the trigger words through the real text-event path, not the
+    // stderr classifier directly.
+    for prose in [
+        "the provider said rate limit, try again later",
+        "the provider returned too many requests",
+        "unauthorized token: check your auth",
+    ] {
+        let event = format!(
+            r#"{{"type":"text","part":{{"text":{}}}}}"#,
+            serde_json::to_string(prose).unwrap()
+        );
+        let v: serde_json::Value = serde_json::from_str(&event).unwrap();
+        let raw = v.to_string();
+        let (_, effects) = crate::sandbox::opencode::OpenCodeRunner::opencode_event_lines(
+            &v,
+            &raw,
+            1,
+            200,
+            0.0,
+            0,
+            "openai/gpt-6-luna",
+            0.99,
+        );
+        assert!(
+            effects.billing.is_none(),
+            "model prose tripped a billing fault: {prose}: {effects:?}"
+        );
+    }
+    let log = "\
+[00:00:00] [LIVE] Agent initialized\n\
+[00:00:01] [LIVE] Turn 1 started\n\
+[00:00:02] [STDERR] Retrying (1/2) provider rate limit, status 429\n\
+[00:00:03] [TELEMETRY] turn=1\n\
+[00:00:04] [LIVE] Turn 2 started\n\
+[00:00:05] [RESPONSE] the provider said rate limit, try again later\n\
+[00:00:06] [TELEMETRY] turn=2\n\
+[00:00:07] [LIVE] Turn 3 started\n\
+[00:00:08] [RESPONSE] unauthorized token: check your auth\n\
+[00:00:09] [TELEMETRY] turn=3\n";
+    let h = crate::campaign::health::health_from_live_log(log);
+    assert_eq!(h.turns, 3, "{h:?}");
+    assert_eq!(h.rate_limited, 1, "the 429 kept its kind: {h:?}");
+    assert_eq!(
+        h.empty_responses, 1,
+        "the empty answer kept its kind: {h:?}"
+    );
+}

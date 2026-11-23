@@ -435,6 +435,19 @@ LOG="$(mktemp)"
 # R54 F2: tests may use workers 8-9; production stays 0-7.
 EXTRA_ENV=()
 if [[ "$REHEARSAL" == "1" ]]; then EXTRA_ENV+=(SDB_CAMPAIGN_TEST_WORKER_MAX=99); fi
+# R96 Z1: the zoo's flawed candidate and its pinned sentinel seed ride on
+# the rehearsal cell's environment. Never let a paid cell see either.
+if [[ -n "${SDB_ZOO_CANDIDATE:-}" || -n "${SDB_ZOO_SEED:-}" ]] \
+    && [[ "$REHEARSAL" != "1" ]]; then
+    echo "[cell] FATAL: SDB_ZOO_CANDIDATE/SDB_ZOO_SEED are rehearsal-only" >&2
+    exit 1
+fi
+if [[ -n "${SDB_ZOO_CANDIDATE:-}" ]]; then
+    EXTRA_ENV+=("SDB_ZOO_CANDIDATE=$SDB_ZOO_CANDIDATE")
+fi
+if [[ -n "${SDB_ZOO_SEED:-}" ]]; then
+    EXTRA_ENV+=("SDB_SENTINEL_SEED=$SDB_ZOO_SEED")
+fi
 set +e
 env SDB_HOME="$ROOT" "${EXTRA_ENV[@]}" "$BIN" campaign run \
     --name sdb-sql --model "$MODEL" --effort "$EFFORT" --harness "$HARNESS" \

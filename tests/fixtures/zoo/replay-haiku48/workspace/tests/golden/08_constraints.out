@@ -1,0 +1,67 @@
+OK 0
+OK 1
+OK 1
+OK 1
+OK 1
+ERR constraint
+ERR constraint
+OK 1
+OK 1
+ERR constraint
+OK 1
+ERR arity
+ROWS 4
+id	code	qty	note
+1	a	1	x
+2	b	5	n
+10	c	3	\N
+11	d	5	n
+12	\N	5	n
+13	f	5	n
+30	h	5	n
+END 7
+OK 0
+OK 1
+ERR constraint
+ERR constraint
+ROWS 2
+name	v
+k1	1
+END 1
+OK 0
+OK 0
+OK 2
+OK 3
+ERR constraint
+OK 1
+ERR constraint
+OK 0
+ERR constraint
+OK 1
+ERR constraint
+ROWS 3
+id	pid	tag
+1	1	a
+2	\N	b
+3	2	c
+4	2	\N
+END 4
+ROWS 2
+id	label
+1	one
+2	two
+END 2
+ERR constraint
+ERR constraint
+OK 1
+ERR constraint
+ROWS 4
+id	code	qty	note
+1	a	1	x
+2	zz	5	n
+10	c	3	\N
+11	d	5	n
+12	\N	5	n
+13	f	5	n
+30	h	5	n
+END 7

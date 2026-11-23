@@ -1,0 +1,53 @@
+OK 0
+OK 2
+OK 0
+OK 0
+ROWS 4
+id	name	extra	flag
+1	one	\N	7
+2	two	\N	7
+END 2
+ERR exists
+OK 0
+ERR no_table
+OK 1
+OK 0
+ERR no_column
+ERR exists
+ERR no_table
+ROWS 1
+more
+\N
+\N
+\N
+END 3
+OK 0
+ROWS 3
+id	name	flag
+1	one	7
+2	two	7
+3	three	7
+END 3
+ERR no_column
+OK 0
+ERR constraint
+ERR constraint
+OK 0
+OK 0
+ERR no_table
+ROWS 2
+id	name
+1	one
+2	two
+3	three
+END 3
+OK 0
+ERR exists
+ERR no_table
+OK 0
+ERR no_table
+ERR no_table
+ERR no_table
+ERR no_table
+ERR no_table
+ERR no_table

@@ -1,0 +1,140 @@
+ROWS 5
+q	nq	r	nr	r2
+3	-3	1	-1	1
+END 1
+ROWS 2
+dz	mz
+\N	\N
+END 1
+ROWS 4
+p1	p2	p3	p4
+7	9	3	2
+END 1
+ROWS 2
+neg	n2
+6	-3
+END 1
+ROWS 7
+a	b	c	d	e	f	g
+1	1	0	1	1	0	1
+END 1
+ROWS 4
+a	b	c	d
+\N	1	1	0
+END 1
+ROWS 4
+a	b	c	d
+\N	0	0	\N
+END 1
+ROWS 4
+a	b	c	d
+1	\N	1	\N
+END 1
+ROWS 3
+a	b	c
+1	0	\N
+END 1
+ROWS 4
+p	q	r	s
+1	1	1	0
+END 1
+ROWS 4
+c1	c2	c3	c4
+ab	\N	\N	xyz
+END 1
+ROWS 5
+l	u	lo	a	a2
+3	ABC	abc	5	3
+END 1
+ROWS 4
+c	c2	ln	un
+4	\N	\N	\N
+END 1
+ROWS 1
+one
+1
+END 1
+ROWS 2
+two	s
+2	x
+END 1
+ROWS 1
+chk
+1
+END 1
+OK 0
+OK 5
+ROWS 1
+a
+2
+4
+END 2
+ROWS 2
+a	b
+2	\N
+END 1
+ROWS 1
+a
+END 0
+ROWS 1
+a
+-5
+1
+END 2
+ROWS 1
+b
+x
+END 1
+ROWS 1
+a1
+-4
+2
+END 2
+ROWS 1
+a
+-5
+2
+4
+END 3
+ROWS 1
+u
+XY
+END 1
+ROWS 1
+c
+Z
+none
+x
+xy
+y
+END 5
+ROWS 1
+a
+-5
+1
+4
+END 3
+ROWS 1
+a
+-5
+1
+4
+END 3
+ROWS 1
+a
+END 0
+ROWS 3
+a	h	m
+-5	-2	-1
+1	0	1
+2	1	0
+4	2	0
+END 4
+ROWS 1
+a
+\N
+-5
+1
+2
+4
+END 5

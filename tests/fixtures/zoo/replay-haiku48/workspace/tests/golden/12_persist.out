@@ -1,0 +1,43 @@
+OK 0
+OK 2
+OK 1
+ROWS 2
+id	s
+1	a
+2	bb
+END 2
+OK 1
+ROWS 2
+id	s
+1	a
+2	bb
+3	c
+END 3
+ERR constraint
+OK 0
+OK 1
+OK 0
+ROWS 2
+id	s
+1	a
+2	bb
+3	c
+END 3
+OK 0
+OK 1
+OK 0
+ROWS 2
+a	b
+1	d
+END 1
+OK 1
+ROWS 1
+id
+2
+3
+END 2
+OK 0
+ROWS 2
+b	a
+d	1
+END 1
