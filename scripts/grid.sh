@@ -1330,8 +1330,8 @@ load_careers() {
         else
             CAREER_ZOO[$i]=""
             CAREER_START[$i]=1
+            ZOO_SEEDS[$i]=""
         fi
-        ZOO_SEEDS[$i]=""
     done
 }
 
