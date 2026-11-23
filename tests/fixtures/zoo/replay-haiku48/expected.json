@@ -8,8 +8,14 @@
       "stop": "ok"
     }
   },
-  "note": "The real haiku .48 phase-4 workspace, chained from phase 4. The fixture has no git history, so the stage-15 sensitivity check fails and the later tickets are not run (round-95 R95-1).",
+  "note": "The real haiku .48 phase-4 workspace, chained from phase 4. The fixture has no git history, so the stage-15 sensitivity check fails and stages 11 and 16-20 are not run (round-95 R95-1, round-97 F1).",
   "stages": {
-    "15": "fail"
+    "11": "fail",
+    "15": "fail",
+    "16": "fail",
+    "17": "fail",
+    "18": "fail",
+    "19": "fail",
+    "20": "fail"
   }
 }
