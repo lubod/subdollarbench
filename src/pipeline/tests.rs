@@ -2573,7 +2573,7 @@ fn replay_stage_verdicts(log: &str) -> std::collections::BTreeMap<String, String
                     "fail"
                 }
             })
-            .last()
+            .next_back()
             .unwrap_or("missing");
         got.insert(n.to_string(), verdict.to_string());
     }
