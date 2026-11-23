@@ -1326,6 +1326,7 @@ load_careers() {
             CAREER_ZOO[$i]="$dir"
             start="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("start_phase", 1))' "$dir/expected.json")"
             CAREER_START[$i]="$start"
+            ZOO_SEEDS[$i]="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sentinel_seed", ""))' "$dir/expected.json")"
         else
             CAREER_ZOO[$i]=""
             CAREER_START[$i]=1
